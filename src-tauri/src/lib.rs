@@ -28,10 +28,11 @@ fn init_tracing() {
     }
     let file_appender = tracing_appender::rolling::daily(&log_dir, "app.log");
     let env = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
+    // init() 대신 try_init() — 이미 설정됐으면 무시 (panic 방지)
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(env)
         .with_writer(file_appender)
-        .init();
+        .try_init();
     tracing::info!(?log_dir, "tracing initialized");
 }
 
@@ -47,6 +48,7 @@ async fn open_detail_window(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = std::fs::write("/tmp/ai-monitor-run.txt", "run() started\n");
     init_tracing();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<TokenEvent>();
@@ -72,10 +74,9 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-                eprintln!("[setup] starting tray install");
+                let _ = std::fs::write("/tmp/ai-monitor-setup.txt", "setup() called\n");
                 tray::install(app.handle())?;
-                eprintln!("[setup] tray installed ok");
-                tracing::info!("tray installed");
+                let _ = std::fs::write("/tmp/ai-monitor-setup.txt", "tray installed\n");
 
                 let app_handle = app.handle().clone();
                 let agg_for_ingest = aggregator.clone();
