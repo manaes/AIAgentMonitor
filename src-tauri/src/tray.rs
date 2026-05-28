@@ -61,7 +61,8 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         })
         .build(app)?;
 
-    // TrayIcon을 app state에 보관해서 install() 반환 후에도 drop 방지
-    app.manage(tray);
+    eprintln!("[tray] TrayIcon built ok, leaking to keep alive");
+    // Box::leak으로 앱 종료 시까지 TrayIcon drop 방지 (의도적 leak)
+    Box::leak(Box::new(tray));
     Ok(())
 }

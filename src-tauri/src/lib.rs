@@ -68,11 +68,13 @@ pub fn run() {
             let aggregator = aggregator.clone();
             let gate = gate.clone();
             move |app| {
-                // menubar-only 앱: Dock 아이콘 숨김
+                // Dock 아이콘 숨김 — setup 초반에 호출
                 #[cfg(target_os = "macos")]
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+                eprintln!("[setup] starting tray install");
                 tray::install(app.handle())?;
+                eprintln!("[setup] tray installed ok");
                 tracing::info!("tray installed");
 
                 let app_handle = app.handle().clone();
