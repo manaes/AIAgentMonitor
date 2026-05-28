@@ -1,7 +1,3 @@
-# Tauri + SvelteKit + TypeScript
+# Tauri + Svelte 5 + TypeScript
 
-This template should help get you started developing with Tauri, SvelteKit and TypeScript in Vite.
-
-## Recommended IDE Setup
-
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer).
+AI Agent Monitor — Tauri 2, Svelte 5 (vanilla SPA, runes), TypeScript, Rust 백엔드 기반 macOS 메뉴바 앱. 자세한 사용법/아키텍처 문서는 Task 16에서 작성된다.
