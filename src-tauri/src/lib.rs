@@ -1,6 +1,7 @@
 mod clock;
 mod types;
 mod aggregator;
+mod emitter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
