@@ -10,12 +10,11 @@ const ALPHA: f32 = 0.3;
 pub struct EventRing {
     events: VecDeque<TokenEvent>,
     ema_rate: f32,
-    last_eval: Option<SystemTime>,
 }
 
 impl EventRing {
     pub fn new() -> Self {
-        Self { events: VecDeque::new(), ema_rate: 0.0, last_eval: None }
+        Self { events: VecDeque::new(), ema_rate: 0.0 }
     }
 
     pub fn push(&mut self, ev: TokenEvent) {
@@ -41,7 +40,6 @@ impl EventRing {
         }
         let raw = sum as f32 / WINDOW_SECS;
         self.ema_rate = ALPHA * raw + (1.0 - ALPHA) * self.ema_rate;
-        self.last_eval = Some(now);
         self.ema_rate
     }
 
