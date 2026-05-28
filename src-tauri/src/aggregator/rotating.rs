@@ -7,14 +7,12 @@ const NUM_BUCKETS: usize = 60;                       // 60 * 5min = 5h
 
 pub struct RotatingBucket {
     cells: [(SystemTime, TokenCounts); NUM_BUCKETS],
-    initialized: bool,
 }
 
 impl RotatingBucket {
     pub fn new() -> Self {
         Self {
             cells: std::array::from_fn(|_| (SystemTime::UNIX_EPOCH, TokenCounts::default())),
-            initialized: false,
         }
     }
 
@@ -37,7 +35,6 @@ impl RotatingBucket {
             cell.1 = TokenCounts::default();
         }
         cell.1.add(counts);
-        self.initialized = true;
     }
 
     pub fn sum_5h<C: Clock>(&self, clock: &C) -> TokenCounts {
