@@ -1,4 +1,5 @@
-// 모듈 선언은 후속 task에서 추가됩니다.
+mod clock;
+mod types;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
