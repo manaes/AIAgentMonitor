@@ -19,6 +19,7 @@ impl TokenCounts {
         self.tokens_in
             .saturating_add(self.tokens_out)
             .saturating_add(self.tokens_cache_create)
+            .saturating_add(self.tokens_cache_read)
     }
     pub fn add(&mut self, other: &TokenCounts) {
         self.tokens_in = self.tokens_in.saturating_add(other.tokens_in);
@@ -78,7 +79,19 @@ mod tests {
         let mut c = TokenCounts::default();
         c.tokens_in = u32::MAX;
         c.tokens_out = 10;
+        c.tokens_cache_read = 5;
         assert_eq!(c.total(), u32::MAX);
+    }
+
+    #[test]
+    fn token_counts_total_includes_cache_read() {
+        let c = TokenCounts {
+            tokens_in: 10,
+            tokens_out: 20,
+            tokens_cache_read: 30,
+            tokens_cache_create: 40,
+        };
+        assert_eq!(c.total(), 100);
     }
 
     #[test]
