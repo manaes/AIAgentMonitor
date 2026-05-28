@@ -48,7 +48,6 @@ async fn open_detail_window(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let _ = std::fs::write("/tmp/ai-monitor-run.txt", "run() started\n");
     init_tracing();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<TokenEvent>();
@@ -74,9 +73,7 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-                let _ = std::fs::write("/tmp/ai-monitor-setup.txt", "setup() called\n");
                 tray::install(app.handle())?;
-                let _ = std::fs::write("/tmp/ai-monitor-setup.txt", "tray installed\n");
 
                 let app_handle = app.handle().clone();
                 let agg_for_ingest = aggregator.clone();

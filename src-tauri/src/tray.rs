@@ -11,11 +11,6 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .tray_by_id("main")
         .ok_or_else(|| tauri::Error::AssetNotFound("tray id 'main' not found".into()))?;
 
-    let _ = std::fs::write(
-        "/tmp/ai-monitor-tray.txt",
-        "tray_by_id succeeded\n",
-    );
-
     let detail = MenuItem::with_id(app, "detail", "Open Detail Window…", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "logs", "Open Log Folder", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
