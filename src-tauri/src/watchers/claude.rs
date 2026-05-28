@@ -125,6 +125,15 @@ impl ClaudeWatcher {
                 }
             }
 
+            // 5h 데이터 복원: 기존 파일들을 offset=0부터 다시 읽어 aggregator에 흘려넣음.
+            // offset 캐시는 업데이트하지 않음 — FSEvents 후속 이벤트는 file end 기준으로만 잡힘.
+            for entry in walk_jsonl(&projects_root) {
+                let project_dir = entry.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                let session_id = entry.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                let decoded = decode_project_path(&project_dir);
+                tail_file(&entry, 0, &decoded, &session_id, &tx);
+            }
+
             loop {
                 match notify_rx.recv() {
                     Ok(Ok(event)) => {
