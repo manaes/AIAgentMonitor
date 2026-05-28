@@ -1,0 +1,22 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+  background: transparent;
+  color: #f2f2f7;
+  font-size: 12px;
+}
+.popover-root {
+  background: #1c1c1e;
+  border-radius: 14px;
+  border: 1px solid #3a3a3c;
+  padding: 12px;
+}
+.window-root {
+  background: #1c1c1e;
+  min-height: 100vh;
+  padding: 14px;
+}
+.label { font-size: 9px; color: #8e8e93; text-transform: uppercase; letter-spacing: 0.4px; }
+.subtle { color: #8e8e93; font-size: 11px; }
