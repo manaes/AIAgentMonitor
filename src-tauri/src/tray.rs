@@ -1,6 +1,6 @@
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, Runtime,
 };
 
@@ -11,8 +11,9 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit AI Monitor", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&detail, &logs, &sep, &quit])?;
 
-    let _tray = TrayIconBuilder::with_id("main")
-        .icon(app.default_window_icon().cloned().expect("icon"))
+    // include_image! 은 컴파일 타임에 PNG를 embed해서 dev/release 모두 경로 문제 없음
+    let tray: TrayIcon<R> = TrayIconBuilder::new()
+        .icon(tauri::include_image!("icons/32x32.png"))
         .icon_as_template(true)
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -22,7 +23,6 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 position,
-                rect,
                 ..
             } = event
             {
@@ -33,20 +33,12 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                     if visible {
                         let _ = w.hide();
                     } else {
-                        // 팝오버를 트레이 아이콘 바로 아래에 위치시킨다.
-                        // rect.position 은 dpi::Position(논리 좌표)이므로
-                        // PhysicalPosition 인 position(커서 위치)과 rect.size를 조합해 계산한다.
                         let win_w = 360.0_f64;
-                        let icon_right_edge = position.x; // 클릭 지점은 아이콘 안에 있음
-                        // rect.size 를 물리 픽셀로 추정(스케일 1 가정, 보수적으로 22px)
-                        let icon_h = 22.0_f64;
-                        let target_x = (icon_right_edge - win_w / 2.0).max(8.0);
-                        let target_y = position.y - icon_h / 2.0 + icon_h + 4.0;
+                        let target_x = (position.x - win_w / 2.0).max(8.0);
+                        let target_y = position.y + 4.0;
                         let _ = w.set_position(tauri::PhysicalPosition::new(target_x, target_y));
                         let _ = w.show();
                         let _ = w.set_focus();
-                        // rect 바인딩 사용 — unused 경고 억제
-                        let _ = rect;
                     }
                 }
             }
@@ -68,5 +60,8 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             _ => {}
         })
         .build(app)?;
+
+    // TrayIcon을 app state에 보관해서 install() 반환 후에도 drop 방지
+    app.manage(tray);
     Ok(())
 }
