@@ -177,9 +177,12 @@ fn walk_jsonl(root: &Path) -> Vec<PathBuf> {
 
 fn tail_file(path: &Path, offset: u64, project: &Path, session_id: &str, tx: &mpsc::UnboundedSender<TokenEvent>) -> u64 {
     let mut f = match File::open(path) { Ok(f) => f, Err(_) => return offset };
-    if f.seek(SeekFrom::Start(offset)).is_err() { return offset; }
+    let file_len = f.metadata().map(|m| m.len()).unwrap_or(offset);
+    // 파일이 회전/잘림되어 현재 offset보다 작아진 경우, 처음부터 다시 읽음.
+    let effective_offset = if file_len < offset { 0 } else { offset };
+    if f.seek(SeekFrom::Start(effective_offset)).is_err() { return offset; }
     let reader = BufReader::new(&f);
-    let mut new_offset = offset;
+    let mut new_offset = effective_offset;
     for line in reader.lines().map_while(|r| r.ok()) {
         new_offset += line.len() as u64 + 1;
         match parse_line(&line, project, session_id) {
