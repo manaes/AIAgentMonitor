@@ -5,6 +5,8 @@
   "windows": ["popover", "detail"],
   "permissions": [
     "core:default",
+    "core:window:default",
+    "core:tray:default",
     "shell:default"
   ]
 }

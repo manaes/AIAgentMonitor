@@ -17,19 +17,36 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
+            tracing::info!(?event, "tray event received");
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
+                position,
+                rect,
                 ..
             } = event
             {
                 let app = tray.app_handle();
                 if let Some(w) = app.get_webview_window("popover") {
-                    if w.is_visible().unwrap_or(false) {
+                    let visible = w.is_visible().unwrap_or(false);
+                    tracing::info!(visible, "popover toggle");
+                    if visible {
                         let _ = w.hide();
                     } else {
+                        // 팝오버를 트레이 아이콘 바로 아래에 위치시킨다.
+                        // rect.position 은 dpi::Position(논리 좌표)이므로
+                        // PhysicalPosition 인 position(커서 위치)과 rect.size를 조합해 계산한다.
+                        let win_w = 360.0_f64;
+                        let icon_right_edge = position.x; // 클릭 지점은 아이콘 안에 있음
+                        // rect.size 를 물리 픽셀로 추정(스케일 1 가정, 보수적으로 22px)
+                        let icon_h = 22.0_f64;
+                        let target_x = (icon_right_edge - win_w / 2.0).max(8.0);
+                        let target_y = position.y - icon_h / 2.0 + icon_h + 4.0;
+                        let _ = w.set_position(tauri::PhysicalPosition::new(target_x, target_y));
                         let _ = w.show();
                         let _ = w.set_focus();
+                        // rect 바인딩 사용 — unused 경고 억제
+                        let _ = rect;
                     }
                 }
             }
