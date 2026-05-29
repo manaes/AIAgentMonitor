@@ -82,9 +82,12 @@
     if (r === null) return null;
     const rem = r - nowSecs;
     if (rem <= 0) return "리셋됨";
-    const totalMin = Math.floor(rem / 60);
-    const sec = rem % 60;
-    return `약 ${totalMin}분 ${sec}초 남음`;
+    const h = Math.floor(rem / 3600);
+    const m = Math.floor((rem % 3600) / 60);
+    const s = rem % 60;
+    return h > 0
+      ? `약 ${h}시간 ${m}분 ${s}초 남음`
+      : `약 ${m}분 ${s}초 남음`;
   });
 
   let effectiveLimit = $derived(agent.quota_limit ?? localLimit);
