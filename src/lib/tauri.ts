@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Snapshot = {
@@ -36,4 +37,42 @@ export type AgentState = {
 
 export async function listenSnapshot(cb: (s: Snapshot) => void): Promise<UnlistenFn> {
   return listen<Snapshot>("snapshot", (e) => cb(e.payload));
+}
+
+// ── Anchor Trigger ──────────────────────────────────────────────
+
+export type TriggerRule = {
+  id: string;
+  agent: "claude" | "codex";
+  cron: string;
+  working_dir: string;
+  prompt: string;
+  enabled: boolean;
+  created_at: number;
+};
+
+export async function listTriggerRules(): Promise<TriggerRule[]> {
+  return invoke<TriggerRule[]>("list_trigger_rules");
+}
+
+export async function addTriggerRule(
+  agent: "claude" | "codex",
+  hour: number,
+  minute: number,
+  working_dir: string,
+  prompt: string
+): Promise<TriggerRule> {
+  return invoke<TriggerRule>("add_trigger_rule", { agent, hour, minute, working_dir, prompt });
+}
+
+export async function removeTriggerRule(id: string): Promise<void> {
+  return invoke<void>("remove_trigger_rule", { id });
+}
+
+export async function toggleTriggerRule(id: string): Promise<TriggerRule> {
+  return invoke<TriggerRule>("toggle_trigger_rule", { id });
+}
+
+export async function fireTriggerNow(id: string): Promise<void> {
+  return invoke<void>("fire_trigger_now", { id });
 }

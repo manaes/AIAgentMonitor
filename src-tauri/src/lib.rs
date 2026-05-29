@@ -1,6 +1,7 @@
 mod aggregator;
 mod clock;
 mod emitter;
+mod scheduler;
 mod tray;
 mod types;
 mod watchers;
@@ -8,6 +9,7 @@ mod watchers;
 use aggregator::Aggregator;
 use clock::SystemClock;
 use emitter::EmitGate;
+use scheduler::{ScheduleRule, Scheduler};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,6 +48,67 @@ async fn open_detail_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn list_trigger_rules(
+    state: tauri::State<'_, Arc<Mutex<Scheduler>>>,
+) -> Result<Vec<ScheduleRule>, String> {
+    let s = state.lock().await;
+    Ok(s.list_rules())
+}
+
+// HH(0-23), MM(0-59)을 받아 6필드 cron "0 MM HH * * *"으로 변환 후 룰 추가
+#[tauri::command]
+async fn add_trigger_rule(
+    state: tauri::State<'_, Arc<Mutex<Scheduler>>>,
+    agent: String,
+    hour: u8,
+    minute: u8,
+    working_dir: String,
+    prompt: String,
+) -> Result<ScheduleRule, String> {
+    let cron = format!("0 {minute} {hour} * * *");
+    let mut s = state.lock().await;
+    s.add_rule(agent, cron, working_dir, prompt)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn remove_trigger_rule(
+    state: tauri::State<'_, Arc<Mutex<Scheduler>>>,
+    id: String,
+) -> Result<(), String> {
+    let mut s = state.lock().await;
+    s.remove_rule(&id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn toggle_trigger_rule(
+    state: tauri::State<'_, Arc<Mutex<Scheduler>>>,
+    id: String,
+) -> Result<ScheduleRule, String> {
+    let mut s = state.lock().await;
+    s.toggle_rule(&id).await.map_err(|e| e.to_string())
+}
+
+// 즉시 실행: id에 해당하는 룰을 지금 바로 spawn
+#[tauri::command]
+async fn fire_trigger_now(
+    state: tauri::State<'_, Arc<Mutex<Scheduler>>>,
+    id: String,
+) -> Result<(), String> {
+    let s = state.lock().await;
+    let rule = s
+        .rules
+        .iter()
+        .find(|r| r.id == id)
+        .ok_or_else(|| format!("id를 찾을 수 없습니다: {id}"))?
+        .clone();
+    drop(s);
+    scheduler::runner::run_trigger(&rule.agent, &rule.prompt, &rule.working_dir).await;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
@@ -62,9 +125,24 @@ pub fn run() {
     let aggregator = Arc::new(Mutex::new(Aggregator::new()));
     let gate = Arc::new(Mutex::new(EmitGate::new(Duration::from_millis(500))));
 
+    // Scheduler 초기화 — tauri async_runtime 위에서 block_on
+    let scheduler = Arc::new(Mutex::new(
+        tauri::async_runtime::block_on(async {
+            Scheduler::new().await.expect("Scheduler 초기화 실패")
+        })
+    ));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![open_detail_window])
+        .manage(scheduler)
+        .invoke_handler(tauri::generate_handler![
+            open_detail_window,
+            list_trigger_rules,
+            add_trigger_rule,
+            remove_trigger_rule,
+            toggle_trigger_rule,
+            fire_trigger_now,
+        ])
         .setup({
             let aggregator = aggregator.clone();
             let gate = gate.clone();

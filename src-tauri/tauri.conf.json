@@ -27,7 +27,7 @@
         "label": "detail",
         "title": "AI Agent Monitor — Detail",
         "width": 720,
-        "height": 480,
+        "height": 560,
         "visible": false,
         "resizable": true
       }
