@@ -18,7 +18,7 @@ use serde::Serialize;
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::sync::{mpsc, Mutex};
-use types::TokenEvent;
+use types::{AgentKind, TokenEvent};
 
 fn home() -> PathBuf {
     dirs_next::home_dir().expect("home dir")
@@ -132,17 +132,19 @@ pub fn run() {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<TokenEvent>();
 
-    // Watchers (Claude + Codex). 둘 다 실패해도 앱은 띄움.
-    let claude_root = home().join(".claude/projects");
-    let _ = watchers::claude::ClaudeWatcher::spawn(claude_root, tx.clone());
-    let codex_db = home().join(".codex/state_5.sqlite");
-    let _ = watchers::codex::CodexWatcher::spawn(codex_db, tx.clone());
-
-    // OTEL 리시버 spawn (포트 4318)
+    // OTEL 상태 먼저 생성 (Watcher에 전달 필요)
     let otel_state = Arc::new(OtelState {
         port_bound:    AtomicBool::new(false),
         data_received: AtomicBool::new(false),
     });
+
+    // Watchers (Claude + Codex). 둘 다 실패해도 앱은 띄움.
+    let claude_root = home().join(".claude/projects");
+    let _ = watchers::claude::ClaudeWatcher::spawn(claude_root, tx.clone(), otel_state.clone());
+    let codex_db = home().join(".codex/state_5.sqlite");
+    let _ = watchers::codex::CodexWatcher::spawn(codex_db, tx.clone());
+
+    // OTEL 리시버 spawn (포트 4318)
     {
         let otel_tx  = tx.clone();
         let otel_ref = otel_state.clone();
@@ -158,6 +160,23 @@ pub fn run() {
 
     let aggregator = Arc::new(Mutex::new(Aggregator::new()));
     let gate = Arc::new(Mutex::new(EmitGate::new(Duration::from_millis(500))));
+
+    // OTEL 첫 수신 시 aggregator의 Claude 데이터 리셋 (jsonl 중복 제거)
+    {
+        let otel_ref  = otel_state.clone();
+        let agg_ref   = aggregator.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                if otel_ref.data_received.load(Ordering::Relaxed) {
+                    let mut a = agg_ref.lock().await;
+                    a.clear_agent(AgentKind::Claude);
+                    tracing::info!("OTEL 전환 완료 — Claude aggregator 초기화");
+                    break;
+                }
+            }
+        });
+    }
 
     // Scheduler 초기화 — tauri async_runtime 위에서 block_on
     let scheduler = Arc::new(Mutex::new(

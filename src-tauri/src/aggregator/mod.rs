@@ -38,6 +38,12 @@ impl Default for AgentBucket {
 impl Aggregator {
     pub fn new() -> Self { Self::default() }
 
+    /// OTEL 전환 시 호출 — 특정 에이전트의 ring/rotating 버퍼를 초기화
+    pub fn clear_agent(&mut self, kind: AgentKind) {
+        self.by_agent.remove(&kind);
+        tracing::info!(?kind, "Aggregator 초기화 (OTEL 전환)");
+    }
+
     pub fn push(&mut self, ev: TokenEvent) {
         let bucket = self.by_agent.entry(ev.agent).or_default();
         bucket.rotating.add(ev.ts, &ev.counts);

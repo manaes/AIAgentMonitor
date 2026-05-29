@@ -1,3 +1,4 @@
+use crate::otel_receiver::OtelState;
 use crate::types::{AgentKind, TokenCounts, TokenEvent};
 use anyhow::{anyhow, Result};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
@@ -101,7 +102,12 @@ pub struct ClaudeWatcher;
 
 impl ClaudeWatcher {
     /// projects_root: 보통 ~/.claude/projects
-    pub fn spawn(projects_root: PathBuf, tx: mpsc::UnboundedSender<TokenEvent>) -> Result<()> {
+    /// otel_active: OTEL이 활성화되면 jsonl live 이벤트를 중단
+    pub fn spawn(
+        projects_root: PathBuf,
+        tx: mpsc::UnboundedSender<TokenEvent>,
+        otel: std::sync::Arc<OtelState>,
+    ) -> Result<()> {
         std::thread::spawn(move || {
             if !projects_root.exists() {
                 tracing::warn!(?projects_root, "claude projects dir 없음 — Claude 미설치?");
@@ -135,6 +141,11 @@ impl ClaudeWatcher {
             }
 
             loop {
+                // OTEL 활성화 시 jsonl live 이벤트 중단 (OTEL이 더 정확하므로)
+                if otel.data_received.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    continue;
+                }
                 match notify_rx.recv() {
                     Ok(Ok(event)) => {
                         if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
