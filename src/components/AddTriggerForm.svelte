@@ -1,12 +1,20 @@
 <script lang="ts">
+  import { open } from "@tauri-apps/plugin-dialog";
   import { store } from "../lib/store.svelte";
 
   let agent = $state<"claude" | "codex">("claude");
-  let timeValue = $state("08:00");  // <input type="time"> 값 "HH:MM"
+  let timeValue = $state("08:00");
   let workingDir = $state("");
-  let prompt = $state("ping");
+  let prompt = $state("");
   let submitting = $state(false);
   let errorMsg = $state("");
+
+  async function pickFolder() {
+    const selected = await open({ directory: true, multiple: false });
+    if (typeof selected === "string") {
+      workingDir = selected;
+    }
+  }
 
   async function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
@@ -21,7 +29,7 @@
       return;
     }
     if (!workingDir.trim()) {
-      errorMsg = "작업 디렉토리를 입력하세요.";
+      errorMsg = "작업 디렉토리를 선택하거나 입력하세요.";
       return;
     }
     if (!prompt.trim()) {
@@ -32,9 +40,8 @@
     submitting = true;
     try {
       await store.addTrigger(agent, hour, minute, workingDir.trim(), prompt.trim());
-      // 성공 시 폼 초기화
       workingDir = "";
-      prompt = "ping";
+      prompt = "";
     } catch (err) {
       errorMsg = String(err);
     } finally {
@@ -45,40 +52,51 @@
 
 <form class="form" onsubmit={handleSubmit}>
   <p class="label">새 트리거 추가</p>
+
+  <!-- 1행: 에이전트 · 시간 · 경로 · 폴더 선택 -->
   <div class="row">
     <select class="sel" bind:value={agent}>
       <option value="claude">Claude</option>
       <option value="codex">Codex</option>
     </select>
+
     <input
       class="input time-input"
       type="time"
       bind:value={timeValue}
       required
     />
+
     <input
       class="input dir-input"
       type="text"
       bind:value={workingDir}
-      placeholder="/Users/yourname/workspace"
-      required
+      placeholder="~/workspace 또는 절대경로"
     />
-    <input
-      class="input prompt-input"
-      type="text"
+
+    <button class="btn-dir" type="button" onclick={pickFolder} title="폴더 선택">
+      📁
+    </button>
+  </div>
+
+  <!-- 2행: 프롬프트 textarea + 추가 버튼 -->
+  <div class="row row-prompt">
+    <textarea
+      class="input prompt-area"
       bind:value={prompt}
-      placeholder="ping"
+      placeholder="실행할 프롬프트 입력 (예: ping, summarize recent changes...)"
+      rows={3}
       required
-    />
+    ></textarea>
     <button class="btn-add" type="submit" disabled={submitting}>
       {submitting ? "…" : "추가"}
     </button>
   </div>
+
   {#if errorMsg}
     <p class="error">{errorMsg}</p>
   {/if}
   <p class="hint subtle">앱 실행 중일 때만 트리거가 동작합니다.</p>
-  <p class="hint subtle">절대경로 또는 ~/ 로 시작하는 경로 입력 가능</p>
 </form>
 
 <style>
@@ -99,7 +117,10 @@
     display: flex;
     gap: 6px;
     align-items: center;
-    flex-wrap: wrap;
+  }
+  .row-prompt {
+    margin-top: 6px;
+    align-items: flex-end;
   }
   .sel,
   .input {
@@ -110,54 +131,48 @@
     font-size: 11px;
     padding: 4px 7px;
     outline: none;
+    font-family: inherit;
   }
   .sel:focus,
   .input:focus {
     border-color: #0a84ff;
   }
-  .sel {
-    flex-shrink: 0;
-  }
-  .time-input {
-    width: 90px;
-    flex-shrink: 0;
-  }
-  .dir-input {
-    flex: 2;
-    min-width: 100px;
-  }
-  .prompt-input {
+  .sel { flex-shrink: 0; }
+  .time-input { width: 90px; flex-shrink: 0; }
+  .dir-input { flex: 1; min-width: 0; }
+  .prompt-area {
     flex: 1;
-    min-width: 60px;
+    resize: vertical;
+    min-height: 52px;
+    line-height: 1.5;
   }
+  .btn-dir {
+    flex-shrink: 0;
+    background: #3a3a3c;
+    border: none;
+    border-radius: 5px;
+    font-size: 14px;
+    padding: 3px 8px;
+    cursor: pointer;
+    line-height: 1;
+  }
+  .btn-dir:hover { background: #48484a; }
   .btn-add {
     flex-shrink: 0;
+    align-self: flex-end;
     background: #0a84ff;
     border: none;
     border-radius: 5px;
     color: #fff;
     font-size: 11px;
     font-weight: 600;
-    padding: 4px 12px;
+    padding: 6px 14px;
     cursor: pointer;
+    height: 28px;
   }
-  .btn-add:hover:not(:disabled) {
-    background: #0070d8;
-  }
-  .btn-add:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .error {
-    font-size: 10px;
-    color: #ff453a;
-    margin: 4px 0 0;
-  }
-  .hint {
-    font-size: 9px;
-    margin: 6px 0 0;
-  }
-  .subtle {
-    color: #8e8e93;
-  }
+  .btn-add:hover:not(:disabled) { background: #0070d8; }
+  .btn-add:disabled { opacity: 0.5; cursor: default; }
+  .error { font-size: 10px; color: #ff453a; margin: 4px 0 0; }
+  .hint { font-size: 9px; margin: 6px 0 0; }
+  .subtle { color: #8e8e93; }
 </style>
