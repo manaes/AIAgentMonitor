@@ -19,6 +19,7 @@
   const KEY_MANUAL_PCT     = `ai-monitor-manual-pct-${kind}`;
   const KEY_MANUAL_RESET   = `ai-monitor-manual-reset-${kind}`;
   const KEY_BASELINE_TOKENS= `ai-monitor-baseline-tokens-${kind}`;
+  const KEY_PCT_ENTERED_AT = `ai-monitor-pct-entered-at-${kind}`; // 입력 시각 (epoch secs)
 
   // ── 플랜 선택 ────────────────────────────────────────────────────
   const PLANS = kind === "claude"
@@ -37,8 +38,9 @@
   let selectedPlan = $state<string>("none");
 
   // ── 수동 입력 오버라이드 ─────────────────────────────────────────
-  let manualPct      = $state<number | null>(null); // % 입력 시점 기준값
-  let baselineTokens = $state<number | null>(null); // % 입력 시점의 input+output 토큰 수
+  let manualPct      = $state<number | null>(null);
+  let baselineTokens = $state<number | null>(null);
+  let pctEnteredAt   = $state<number | null>(null);  // 입력 시각 (epoch secs)
   let manualReset    = $state<string>("");
   let editing        = $state<"none" | "plan" | "pct" | "reset">("none");
   let editPct        = $state("");
@@ -59,6 +61,8 @@
     if (rawPct)      manualPct = parseFloat(rawPct);
     if (rawReset)    manualReset = rawReset;
     if (rawBaseline) baselineTokens = parseInt(rawBaseline, 10);
+    const rawEnteredAt = localStorage.getItem(KEY_PCT_ENTERED_AT);
+    if (rawEnteredAt) pctEnteredAt = parseInt(rawEnteredAt, 10);
 
     // 1초마다 갱신 (초 단위 카운트다운)
     const tick = setInterval(() => { nowSecs = Math.floor(Date.now() / 1000); }, 1_000);
@@ -121,13 +125,17 @@
       // 입력 시점의 input+output 토큰 수를 baseline으로 기록
       const snapshot = agent.tokens_5h.tokens_in + agent.tokens_5h.tokens_out;
       baselineTokens = snapshot;
+      pctEnteredAt = nowSecs;
       localStorage.setItem(KEY_MANUAL_PCT, String(v));
       localStorage.setItem(KEY_BASELINE_TOKENS, String(snapshot));
+      localStorage.setItem(KEY_PCT_ENTERED_AT, String(nowSecs));
     } else {
       manualPct = null;
       baselineTokens = null;
+      pctEnteredAt = null;
       localStorage.removeItem(KEY_MANUAL_PCT);
       localStorage.removeItem(KEY_BASELINE_TOKENS);
+      localStorage.removeItem(KEY_PCT_ENTERED_AT);
     }
   }
   function onPctKey(e: KeyboardEvent) { if (e.key === "Enter") commitPct(); if (e.key === "Escape") editing = "none"; }
@@ -192,8 +200,12 @@
       <span class="unit-hint">%</span>
     {:else}
       <button class="inline-btn" onclick={startEditPct}
-        title="Claude Code /usage 에서 확인한 실제 사용%를 입력하세요">
-        {manualPct !== null ? `${manualPct}% ✎` : "사용% 입력"}
+        title="Claude Code /usage 에서 확인한 실제 사용%를 입력 (30분마다 갱신 권장)">
+        {#if manualPct !== null}
+          {manualPct}% ✎{(pctEnteredAt && (nowSecs - pctEnteredAt) > 1800) ? " ⚠" : ""}
+        {:else}
+          사용% 입력
+        {/if}
       </button>
     {/if}
 
