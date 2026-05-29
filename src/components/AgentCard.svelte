@@ -43,6 +43,9 @@
   let editReset      = $state("");
   let editCustom     = $state("");
 
+  // ── 카운트다운 타이머 ──────────────────────────────────────────────
+  let nowSecs = $state(Math.floor(Date.now() / 1000));
+
   onMount(() => {
     const rawLimit    = localStorage.getItem(KEY_LIMIT);
     const rawPlan     = localStorage.getItem(KEY_PLAN);
@@ -54,6 +57,34 @@
     if (rawPct)      manualPct = parseFloat(rawPct);
     if (rawReset)    manualReset = rawReset;
     if (rawBaseline) baselineTokens = parseInt(rawBaseline, 10);
+
+    // 10초마다 갱신 (카운트다운용)
+    const tick = setInterval(() => { nowSecs = Math.floor(Date.now() / 1000); }, 10_000);
+    return () => clearInterval(tick);
+  });
+
+  // reset_at을 epoch seconds로 통일
+  let resetEpochSecs = $derived((): number | null => {
+    if (manualReset) {
+      const [hh, mm] = manualReset.split(":").map(Number);
+      if (isNaN(hh) || isNaN(mm)) return null;
+      const d = new Date(nowSecs * 1000);
+      d.setHours(hh, mm, 0, 0);
+      if (d.getTime() / 1000 <= nowSecs) d.setDate(d.getDate() + 1);
+      return Math.floor(d.getTime() / 1000);
+    }
+    return agent.quota_reset_at?.secs_since_epoch ?? null;
+  });
+
+  // "Xh Ym" 또는 "Ym" 형태 카운트다운
+  let countdown = $derived((): string | null => {
+    const r = resetEpochSecs();
+    if (r === null) return null;
+    const rem = r - nowSecs;
+    if (rem <= 0) return "리셋됨";
+    const h = Math.floor(rem / 3600);
+    const m = Math.floor((rem % 3600) / 60);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
   });
 
   let effectiveLimit = $derived(agent.quota_limit ?? localLimit);
@@ -121,8 +152,11 @@
     <span class="unit">tok/s</span>
   </div>
 
-  <div class="proj subtle">
-    {primaryProj?.name ?? "no active session"}
+  <div class="proj-row">
+    <span class="subtle">{primaryProj?.name ?? "no active session"}</span>
+    {#if countdown()}
+      <span class="countdown">{countdown()}</span>
+    {/if}
   </div>
 
   <!-- 설정 행: 플랜 | 실제사용% | 리셋시각 -->
@@ -192,7 +226,14 @@
   .name { font-weight: 600; }
   .big { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
   .unit { font-size: 11px; color: #8e8e93; font-weight: 500; margin-left: 4px; }
-  .proj { margin-bottom: 6px; }
+  .proj-row {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 6px;
+  }
+  .countdown {
+    font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 600;
+    color: #ff9f0a;
+  }
   .subtle { color: #8e8e93; font-size: 11px; }
 
   .settings-row {

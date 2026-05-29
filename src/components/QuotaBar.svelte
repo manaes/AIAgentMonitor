@@ -42,16 +42,8 @@
     quota_limit ? Math.max(0, quota_limit - usedDisplay) : null
   );
 
-  // 리셋 시각: 수동 입력 우선, 없으면 자동 추정
-  let resetLabel = $derived(
-    manual_reset
-      ? manual_reset
-      : (reset_at ? autoResetLabel(reset_at.secs_since_epoch) : null)
-  );
-  function autoResetLabel(secs: number): string {
-    const d = new Date(secs * 1000);
-    return `~${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}`;
-  }
+  // 리셋 시각 레이블 (카운트다운이 AgentCard에 있으므로 여기선 생략)
+  let resetLabel = $derived<string | null>(null);
 
   // 바 색상
   let barColor = $derived(
