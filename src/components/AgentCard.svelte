@@ -58,8 +58,8 @@
     if (rawReset)    manualReset = rawReset;
     if (rawBaseline) baselineTokens = parseInt(rawBaseline, 10);
 
-    // 10초마다 갱신 (카운트다운용)
-    const tick = setInterval(() => { nowSecs = Math.floor(Date.now() / 1000); }, 10_000);
+    // 1초마다 갱신 (초 단위 카운트다운)
+    const tick = setInterval(() => { nowSecs = Math.floor(Date.now() / 1000); }, 1_000);
     return () => clearInterval(tick);
   });
 
@@ -76,15 +76,15 @@
     return agent.quota_reset_at?.secs_since_epoch ?? null;
   });
 
-  // "Xh Ym" 또는 "Ym" 형태 카운트다운
+  // "약 NNN분 SS초 남음" 형태 카운트다운
   let countdown = $derived((): string | null => {
     const r = resetEpochSecs();
     if (r === null) return null;
     const rem = r - nowSecs;
     if (rem <= 0) return "리셋됨";
-    const h = Math.floor(rem / 3600);
-    const m = Math.floor((rem % 3600) / 60);
-    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+    const totalMin = Math.floor(rem / 60);
+    const sec = rem % 60;
+    return `약 ${totalMin}분 ${sec}초 남음`;
   });
 
   let effectiveLimit = $derived(agent.quota_limit ?? localLimit);
