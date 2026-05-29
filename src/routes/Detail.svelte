@@ -54,11 +54,22 @@
     </button>
     {#if showOtelHelp}
       <div class="otel-help">
-        <p class="hint">~/.zshrc에 추가 후 새 터미널에서 claude 실행:</p>
-        <code>export CLAUDE_CODE_ENABLE_TELEMETRY=1
+        {#if !otelPortBound}
+          <p class="hint warn">⚠ 포트 4318 바인딩 실패 — 앱 재시작 필요</p>
+        {:else if otelDataReceived}
+          <p class="hint ok">● OTEL 정상 수신 중. claude 실행 후 10초 이내 갱신.</p>
+        {:else}
+          <p class="hint">~/.claude/settings.json에 자동 추가됨. 새 claude 세션을 시작하세요.</p>
+          <p class="hint">또는 현재 터미널에서 수동 적용:</p>
+        {/if}
+        {#if !otelDataReceived}
+          <code>export CLAUDE_CODE_ENABLE_TELEMETRY=1
 export OTEL_METRICS_EXPORTER=otlp
 export OTEL_LOGS_EXPORTER=otlp
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"</code>
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
+export OTEL_METRIC_EXPORT_INTERVAL=10000</code>
+        {/if}
       </div>
     {/if}
   </div>
@@ -143,7 +154,9 @@ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"</code>
     background: #1c1c1e; border: 1px solid #3a3a3c; border-radius: 6px;
     padding: 8px 10px;
   }
-  .otel-help .hint { color: #8e8e93; font-size: 10px; margin: 0 0 6px; }
+  .otel-help .hint { color: #8e8e93; font-size: 10px; margin: 0 0 4px; }
+  .otel-help .hint.warn { color: #ff453a; }
+  .otel-help .hint.ok { color: #30d158; }
   .otel-help code {
     display: block; white-space: pre;
     color: #30d158; font-size: 10px; font-family: ui-monospace, monospace;
