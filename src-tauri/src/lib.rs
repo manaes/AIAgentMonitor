@@ -161,22 +161,10 @@ pub fn run() {
     let aggregator = Arc::new(Mutex::new(Aggregator::new()));
     let gate = Arc::new(Mutex::new(EmitGate::new(Duration::from_millis(500))));
 
-    // OTEL 첫 수신 시 aggregator의 Claude 데이터 리셋 (jsonl 중복 제거)
-    {
-        let otel_ref  = otel_state.clone();
-        let agg_ref   = aggregator.clone();
-        tauri::async_runtime::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                if otel_ref.data_received.load(Ordering::Relaxed) {
-                    let mut a = agg_ref.lock().await;
-                    a.clear_agent(AgentKind::Claude);
-                    tracing::info!("OTEL 전환 완료 — Claude aggregator 초기화");
-                    break;
-                }
-            }
-        });
-    }
+    // OTEL 활성화 시 별도 aggregator 초기화 불필요.
+    // startup replay로 복원한 5h 과거 데이터를 유지하고,
+    // 이후 OTEL delta를 쌓아가면 과거+현재가 모두 반영됨.
+    // live jsonl 이벤트만 중단(ClaudeWatcher 내부)해서 이중계산 방지.
 
     // Scheduler 초기화 — tauri async_runtime 위에서 block_on
     let scheduler = Arc::new(Mutex::new(
