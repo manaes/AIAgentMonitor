@@ -37,9 +37,10 @@
     <!-- 잔량 / 전체 + 퍼센트 -->
     <div class="row">
       <span class="remain">
-        <span class="val">{formatTokensTotal(remaining ?? 0)}</span>
+        <span class="label-dim">사용</span>
+        <span class="val">{formatTokensTotal(used)}</span>
         <span class="sep"> / </span>
-        <span class="total">{formatTokensTotal(quota_limit)} 남음</span>
+        <span class="total">{formatTokensTotal(quota_limit)}</span>
       </span>
       <span class="pct">{pct?.toFixed(0)}% 사용</span>
     </div>
@@ -47,7 +48,7 @@
       <span class="fill" style="width:{pct}%; background:{barColor}"></span>
     </div>
     <div class="sub-row">
-      <span class="used-label">사용: {formatTokensTotal(used)}</span>
+      <span class="used-label">남음: {formatTokensTotal(remaining ?? 0)}</span>
       {#if reset_at}
         <span class="subtle">reset {formatResetClock(reset_at.secs_since_epoch)}</span>
       {/if}
@@ -67,9 +68,10 @@
   .qb { font-size: 11px; font-variant-numeric: tabular-nums; }
 
   .row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
-  .remain { display: flex; align-items: baseline; gap: 1px; }
+  .remain { display: flex; align-items: baseline; gap: 3px; }
+  .label-dim { color: #636366; font-size: 9px; margin-right: 1px; }
   .val { color: #f2f2f7; font-size: 13px; font-weight: 600; }
-  .sep, .total { color: #8e8e93; font-size: 10px; }
+  .sep, .total { color: #8e8e93; font-size: 11px; }
   .pct { color: #8e8e93; font-size: 10px; }
 
   .bar {
