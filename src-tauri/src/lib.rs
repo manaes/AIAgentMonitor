@@ -1,6 +1,7 @@
 mod aggregator;
 mod clock;
 mod emitter;
+mod otel_receiver;
 mod scheduler;
 mod tray;
 mod types;
@@ -9,9 +10,10 @@ mod watchers;
 use aggregator::Aggregator;
 use clock::SystemClock;
 use emitter::EmitGate;
+use otel_receiver::OtelReceiver;
 use scheduler::{ScheduleRule, Scheduler};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::sync::{mpsc, Mutex};
@@ -36,6 +38,11 @@ fn init_tracing() {
         .with_writer(file_appender)
         .try_init();
     tracing::info!(?log_dir, "tracing initialized");
+}
+
+#[tauri::command]
+fn otel_status(state: tauri::State<'_, Arc<AtomicBool>>) -> bool {
+    state.load(Ordering::Relaxed)
 }
 
 #[tauri::command]
@@ -120,7 +127,21 @@ pub fn run() {
     let _ = watchers::claude::ClaudeWatcher::spawn(claude_root, tx.clone());
     let codex_db = home().join(".codex/state_5.sqlite");
     let _ = watchers::codex::CodexWatcher::spawn(codex_db, tx.clone());
-    drop(tx);
+
+    // OTEL 리시버 spawn (포트 4318) — drop(tx) 이전에 clone
+    let otel_active = Arc::new(AtomicBool::new(false));
+    {
+        let otel_tx = tx.clone();
+        let flag = otel_active.clone();
+        tauri::async_runtime::spawn(async move {
+            match OtelReceiver::spawn(otel_tx, flag).await {
+                Ok(port) => tracing::info!(port, "OTEL 리시버 준비"),
+                Err(e)   => tracing::warn!(%e, "OTEL 리시버 비활성 (포트 4318 사용 불가)"),
+            }
+        });
+    }
+
+    drop(tx); // 모든 producer 등록 완료 후 원본 drop
 
     let aggregator = Arc::new(Mutex::new(Aggregator::new()));
     let gate = Arc::new(Mutex::new(EmitGate::new(Duration::from_millis(500))));
@@ -136,8 +157,10 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(scheduler)
+        .manage(otel_active)
         .invoke_handler(tauri::generate_handler![
             open_detail_window,
+            otel_status,
             list_trigger_rules,
             add_trigger_rule,
             remove_trigger_rule,
