@@ -19,14 +19,29 @@
   // 로컬 계산 (input + output만)
   let localUsed = $derived(tokens_5h.tokens_in + tokens_5h.tokens_out);
 
-  // 실효 %: 수동 입력 % + 입력 이후 신규 토큰 증분
+  // 실효 %: 수동 입력 % + 입력 이후 보정된 증분
+  //
+  // 보정 계수 k = (manual_pct% × limit) / baseline_tokens
+  //   → 로컬 토큰 1개가 실제 사용량에서 몇 배인지
+  //   → 이후 delta_tokens × k 로 실제 증분 추정
   let pct = $derived(
     manual_pct !== null
       ? (() => {
           const delta = baseline_tokens !== null
             ? Math.max(0, localUsed - baseline_tokens)
             : 0;
-          const deltaPct = quota_limit ? (delta / quota_limit * 100) : 0;
+
+          let deltaPct = 0;
+          if (delta > 0 && quota_limit) {
+            // 보정 계수 계산
+            let k = 1.0;
+            if (baseline_tokens && baseline_tokens > 100) {
+              const actualAtCalib = (manual_pct / 100) * quota_limit;
+              k = actualAtCalib / baseline_tokens;
+              k = Math.max(0.05, Math.min(20, k)); // 극단값 방어
+            }
+            deltaPct = (delta * k / quota_limit) * 100;
+          }
           return Math.min(100, manual_pct + deltaPct);
         })()
       : (quota_limit ? Math.min(100, (localUsed / quota_limit) * 100) : null)

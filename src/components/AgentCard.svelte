@@ -11,15 +11,17 @@
     agent.projects.find((p) => p.status === "active") ?? agent.projects[0]
   );
 
-  // ── localStorage 키 ──────────────────────────────────────────────
-  const KEY_LIMIT          = `ai-monitor-quota-limit-${agent.kind}`;
-  const KEY_PLAN           = `ai-monitor-quota-plan-${agent.kind}`;
-  const KEY_MANUAL_PCT     = `ai-monitor-manual-pct-${agent.kind}`;
-  const KEY_MANUAL_RESET   = `ai-monitor-manual-reset-${agent.kind}`;
-  const KEY_BASELINE_TOKENS= `ai-monitor-baseline-tokens-${agent.kind}`; // % 입력 시점의 localUsed
+  // ── localStorage 키 — agent.kind는 고정값이므로 $derived 불필요
+  // eslint-disable-next-line svelte/no-reactive-in-const (kind is constant per instance)
+  const kind = agent.kind;   // 한 번만 읽어서 const에 보관
+  const KEY_LIMIT          = `ai-monitor-quota-limit-${kind}`;
+  const KEY_PLAN           = `ai-monitor-quota-plan-${kind}`;
+  const KEY_MANUAL_PCT     = `ai-monitor-manual-pct-${kind}`;
+  const KEY_MANUAL_RESET   = `ai-monitor-manual-reset-${kind}`;
+  const KEY_BASELINE_TOKENS= `ai-monitor-baseline-tokens-${kind}`;
 
   // ── 플랜 선택 ────────────────────────────────────────────────────
-  const PLANS = agent.kind === "claude"
+  const PLANS = kind === "claude"
     ? [
         { label: "Free",      limit: 30_000 },
         { label: "Pro",       limit: 300_000 },
