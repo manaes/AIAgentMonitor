@@ -11,18 +11,20 @@
     agent.projects.find((p) => p.status === "active") ?? agent.projects[0]
   );
 
-  // Claude Code 요금제별 5h 토큰 한도 (근사치)
-  // 출처: Anthropic 공식 플랜 + 커뮤니티 보고
+  // Claude Code 요금제별 5h "비용 가중 토큰" 한도 (근사치)
+  // QuotaBar가 output*5 + input*1 + cache_create*1.25 + cache_read*0.1 로 계산하므로
+  // 여기 한도도 같은 단위 (input-equivalent weighted tokens)
+  // 출처: 커뮤니티 보고 + Anthropic 가격 구조 역산
   const CLAUDE_PLANS = agent.kind === "claude"
     ? [
-        { label: "Free",      limit: 40_000 },
-        { label: "Pro",       limit: 900_000 },
-        { label: "Max (5×)",  limit: 4_500_000 },
-        { label: "Max (20×)", limit: 18_000_000 },
+        { label: "Free",      limit: 100_000 },
+        { label: "Pro",       limit: 2_000_000 },
+        { label: "Max (5×)",  limit: 10_000_000 },
+        { label: "Max (20×)", limit: 40_000_000 },
       ]
     : [
-        { label: "Codex Free",  limit: 200_000 },
-        { label: "Codex Plus",  limit: 2_000_000 },
+        { label: "Codex Free",  limit: 500_000 },
+        { label: "Codex Plus",  limit: 5_000_000 },
       ];
 
   const STORAGE_KEY      = `ai-monitor-quota-limit-${agent.kind}`;

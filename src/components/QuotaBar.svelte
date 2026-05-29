@@ -8,12 +8,18 @@
     reset_at: { secs_since_epoch: number } | null;
   }>();
 
-  let used = $derived(
-    tokens_5h.tokens_in +
-    tokens_5h.tokens_out +
-    tokens_5h.tokens_cache_create +
-    tokens_5h.tokens_cache_read
-  );
+  // Claude Code 한도 계산: Anthropic 가격 기준 비용 가중치 적용
+  //   input:        1.0x  ($3/1M)
+  //   output:       5.0x  ($15/1M) — 가장 비쌈
+  //   cache_create: 1.25x ($3.75/1M)
+  //   cache_read:   0.1x  ($0.30/1M) — 매우 저렴, 사실상 무시
+  // → "input 환산 토큰" = 실제 Anthropic 한도 소모에 근접한 값
+  let used = $derived(Math.round(
+    tokens_5h.tokens_in * 1.0 +
+    tokens_5h.tokens_out * 5.0 +
+    tokens_5h.tokens_cache_create * 1.25 +
+    tokens_5h.tokens_cache_read * 0.1
+  ));
   let remaining = $derived(quota_limit ? Math.max(0, quota_limit - used) : null);
   let pct = $derived(quota_limit ? Math.min(100, (used / quota_limit) * 100) : null);
 
@@ -47,9 +53,9 @@
       {/if}
     </div>
   {:else}
-    <!-- 한도 미설정: 사용량만 표시 -->
+    <!-- 한도 미설정: 가중 사용량만 표시 -->
     <div class="row">
-      <span class="subtle">5h 사용: {formatTokensTotal(used)}</span>
+      <span class="subtle">5h 환산사용: {formatTokensTotal(used)}</span>
       {#if reset_at}
         <span class="subtle">reset {formatResetClock(reset_at.secs_since_epoch)}</span>
       {/if}
