@@ -11,42 +11,84 @@
     agent.projects.find((p) => p.status === "active") ?? agent.projects[0]
   );
 
-  // localStorage 키 — 에이전트별 사용자 설정 한도 (토큰 수)
-  const STORAGE_KEY = `ai-monitor-quota-limit-${agent.kind}`;
+  // Claude Code 요금제별 5h 토큰 한도 (근사치)
+  // 출처: Anthropic 공식 플랜 + 커뮤니티 보고
+  const CLAUDE_PLANS = agent.kind === "claude"
+    ? [
+        { label: "Free",      limit: 40_000 },
+        { label: "Pro",       limit: 900_000 },
+        { label: "Max (5×)",  limit: 4_500_000 },
+        { label: "Max (20×)", limit: 18_000_000 },
+      ]
+    : [
+        { label: "Codex Free",  limit: 200_000 },
+        { label: "Codex Plus",  limit: 2_000_000 },
+      ];
 
-  let localLimit = $state<number | null>(null);
-  let editing = $state(false);
-  let editValue = $state("");
+  const STORAGE_KEY      = `ai-monitor-quota-limit-${agent.kind}`;
+  const STORAGE_PLAN_KEY = `ai-monitor-quota-plan-${agent.kind}`;
+
+  let localLimit  = $state<number | null>(null);
+  let selectedPlan = $state<string>("custom");   // plan label 또는 "custom"
+  let editingCustom = $state(false);
+  let customValue   = $state("");
 
   onMount(() => {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) localLimit = parseInt(raw, 10) || null;
+    const rawLimit = localStorage.getItem(STORAGE_KEY);
+    const rawPlan  = localStorage.getItem(STORAGE_PLAN_KEY);
+    if (rawLimit) localLimit = parseInt(rawLimit, 10) || null;
+    if (rawPlan)  selectedPlan = rawPlan;
   });
 
-  // Rust가 quota_limit을 알면 우선 사용, 아니면 로컬 설정값
   let effectiveLimit = $derived(agent.quota_limit ?? localLimit);
 
-  function startEdit() {
-    editValue = effectiveLimit ? String(effectiveLimit) : "";
-    editing = true;
+  function onPlanChange(e: Event) {
+    const val = (e.target as HTMLSelectElement).value;
+    selectedPlan = val;
+    localStorage.setItem(STORAGE_PLAN_KEY, val);
+
+    if (val === "custom") {
+      editingCustom = true;
+      customValue = localLimit ? String(localLimit) : "";
+      return;
+    }
+    if (val === "none") {
+      localLimit = null;
+      localStorage.removeItem(STORAGE_KEY);
+      return;
+    }
+    const plan = CLAUDE_PLANS.find(p => p.label === val);
+    if (plan) {
+      localLimit = plan.limit;
+      localStorage.setItem(STORAGE_KEY, String(plan.limit));
+    }
   }
 
-  function commitEdit() {
-    editing = false;
-    const val = parseInt(editValue.replace(/[^0-9]/g, ""), 10);
+  function commitCustom() {
+    editingCustom = false;
+    const val = parseInt(customValue.replace(/[^0-9]/g, ""), 10);
     if (val > 0) {
       localLimit = val;
       localStorage.setItem(STORAGE_KEY, String(val));
     } else {
       localLimit = null;
       localStorage.removeItem(STORAGE_KEY);
+      selectedPlan = "none";
+      localStorage.setItem(STORAGE_PLAN_KEY, "none");
     }
   }
 
-  function onEditKey(e: KeyboardEvent) {
-    if (e.key === "Enter") commitEdit();
-    if (e.key === "Escape") editing = false;
+  function onCustomKey(e: KeyboardEvent) {
+    if (e.key === "Enter") commitCustom();
+    if (e.key === "Escape") { editingCustom = false; }
   }
+
+  // 현재 선택된 플랜 레이블 표시용
+  let planLabel = $derived(
+    selectedPlan === "custom" ? "직접 입력"
+    : selectedPlan === "none"  ? "한도 설정"
+    : selectedPlan
+  );
 </script>
 
 <div class="card">
@@ -67,23 +109,26 @@
     {primaryProj?.name ?? "no active session"}
   </div>
 
-  <!-- 한도 설정 버튼 -->
-  <div class="limit-row">
-    {#if editing}
+  <!-- 플랜 선택 행 -->
+  <div class="plan-row">
+    <select class="plan-sel" value={selectedPlan} onchange={onPlanChange}>
+      <option value="none">— 한도 미설정 —</option>
+      {#each CLAUDE_PLANS as p}
+        <option value={p.label}>{p.label}</option>
+      {/each}
+      <option value="custom">직접 입력…</option>
+    </select>
+
+    {#if editingCustom}
       <input
-        class="limit-input"
+        class="custom-input"
         type="text"
-        bind:value={editValue}
-        onkeydown={onEditKey}
-        onblur={commitEdit}
-        placeholder="ex) 500000"
+        bind:value={customValue}
+        onkeydown={onCustomKey}
+        onblur={commitCustom}
+        placeholder="토큰 수 (예: 500000)"
         autofocus
       />
-      <span class="hint">토큰 수 입력 후 Enter (비우면 삭제)</span>
-    {:else}
-      <button class="limit-btn" onclick={startEdit}>
-        {effectiveLimit ? `한도: ${Number(effectiveLimit).toLocaleString()}` : "한도 설정…"}
-      </button>
     {/if}
   </div>
 
@@ -105,20 +150,24 @@
   .unit { font-size: 11px; color: #8e8e93; font-weight: 500; margin-left: 4px; }
   .proj { margin-bottom: 6px; }
   .subtle { color: #8e8e93; font-size: 11px; }
-  .limit-row { margin-bottom: 6px; }
-  .limit-btn {
-    background: none; border: none;
-    color: #636366; font-size: 10px;
-    padding: 0; cursor: pointer;
-    text-decoration: underline dotted;
+
+  .plan-row {
+    display: flex; align-items: center; gap: 6px;
+    margin-bottom: 8px;
   }
-  .limit-btn:hover { color: #8e8e93; }
-  .limit-input {
+  .plan-sel {
+    background: #1c1c1e; border: 1px solid #3a3a3c;
+    border-radius: 5px; color: #8e8e93;
+    font-size: 10px; padding: 2px 6px;
+    outline: none; cursor: pointer;
+    flex-shrink: 0;
+  }
+  .plan-sel:focus { border-color: #0a84ff; }
+  .custom-input {
     background: #1c1c1e; border: 1px solid #0a84ff;
     border-radius: 4px; color: #f2f2f7;
     font-size: 11px; padding: 2px 6px;
-    outline: none; width: 120px;
+    outline: none; width: 130px;
     font-variant-numeric: tabular-nums;
   }
-  .hint { color: #636366; font-size: 9px; margin-left: 6px; }
 </style>
