@@ -2,28 +2,40 @@
   import { formatTokensTotal } from "../lib/format";
   import type { TokenCounts } from "../lib/tauri";
 
-  let { tokens_5h, quota_limit, reset_at, manual_pct = null, manual_reset = "" } = $props<{
+  let {
+    tokens_5h, quota_limit, reset_at,
+    manual_pct = null,
+    baseline_tokens = null,
+    manual_reset = ""
+  } = $props<{
     tokens_5h: TokenCounts;
     quota_limit: number | null;
     reset_at: { secs_since_epoch: number } | null;
     manual_pct?: number | null;
+    baseline_tokens?: number | null;
     manual_reset?: string;
   }>();
 
   // 로컬 계산 (input + output만)
   let localUsed = $derived(tokens_5h.tokens_in + tokens_5h.tokens_out);
 
-  // 수동 입력된 %가 있으면 우선 사용, 없으면 로컬 계산
+  // 실효 %: 수동 입력 % + 입력 이후 신규 토큰 증분
   let pct = $derived(
     manual_pct !== null
-      ? manual_pct
+      ? (() => {
+          const delta = baseline_tokens !== null
+            ? Math.max(0, localUsed - baseline_tokens)
+            : 0;
+          const deltaPct = quota_limit ? (delta / quota_limit * 100) : 0;
+          return Math.min(100, manual_pct + deltaPct);
+        })()
       : (quota_limit ? Math.min(100, (localUsed / quota_limit) * 100) : null)
   );
 
-  // 수동 입력 % 기반 사용/잔량 (한도가 있을 때)
+  // 표시용 사용량: pct 기반 (한도 있을 때) 또는 로컬
   let usedDisplay = $derived(
-    manual_pct !== null && quota_limit
-      ? Math.round(quota_limit * manual_pct / 100)
+    pct !== null && quota_limit
+      ? Math.round(quota_limit * pct / 100)
       : localUsed
   );
   let remaining = $derived(

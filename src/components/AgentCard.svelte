@@ -12,10 +12,11 @@
   );
 
   // ── localStorage 키 ──────────────────────────────────────────────
-  const KEY_LIMIT     = `ai-monitor-quota-limit-${agent.kind}`;
-  const KEY_PLAN      = `ai-monitor-quota-plan-${agent.kind}`;
-  const KEY_MANUAL_PCT  = `ai-monitor-manual-pct-${agent.kind}`;
-  const KEY_MANUAL_RESET= `ai-monitor-manual-reset-${agent.kind}`; // "HH:MM"
+  const KEY_LIMIT          = `ai-monitor-quota-limit-${agent.kind}`;
+  const KEY_PLAN           = `ai-monitor-quota-plan-${agent.kind}`;
+  const KEY_MANUAL_PCT     = `ai-monitor-manual-pct-${agent.kind}`;
+  const KEY_MANUAL_RESET   = `ai-monitor-manual-reset-${agent.kind}`;
+  const KEY_BASELINE_TOKENS= `ai-monitor-baseline-tokens-${agent.kind}`; // % 입력 시점의 localUsed
 
   // ── 플랜 선택 ────────────────────────────────────────────────────
   const PLANS = agent.kind === "claude"
@@ -34,22 +35,25 @@
   let selectedPlan = $state<string>("none");
 
   // ── 수동 입력 오버라이드 ─────────────────────────────────────────
-  let manualPct   = $state<number | null>(null); // Claude Code에서 직접 읽은 %
-  let manualReset = $state<string>("");          // "HH:MM"
-  let editing     = $state<"none" | "plan" | "pct" | "reset">("none");
-  let editPct     = $state("");
-  let editReset   = $state("");
-  let editCustom  = $state("");
+  let manualPct      = $state<number | null>(null); // % 입력 시점 기준값
+  let baselineTokens = $state<number | null>(null); // % 입력 시점의 input+output 토큰 수
+  let manualReset    = $state<string>("");
+  let editing        = $state<"none" | "plan" | "pct" | "reset">("none");
+  let editPct        = $state("");
+  let editReset      = $state("");
+  let editCustom     = $state("");
 
   onMount(() => {
-    const rawLimit = localStorage.getItem(KEY_LIMIT);
-    const rawPlan  = localStorage.getItem(KEY_PLAN);
-    const rawPct   = localStorage.getItem(KEY_MANUAL_PCT);
-    const rawReset = localStorage.getItem(KEY_MANUAL_RESET);
-    if (rawLimit) localLimit = parseInt(rawLimit, 10) || null;
-    if (rawPlan)  selectedPlan = rawPlan;
-    if (rawPct)   manualPct = parseFloat(rawPct);
-    if (rawReset) manualReset = rawReset;
+    const rawLimit    = localStorage.getItem(KEY_LIMIT);
+    const rawPlan     = localStorage.getItem(KEY_PLAN);
+    const rawPct      = localStorage.getItem(KEY_MANUAL_PCT);
+    const rawReset    = localStorage.getItem(KEY_MANUAL_RESET);
+    const rawBaseline = localStorage.getItem(KEY_BASELINE_TOKENS);
+    if (rawLimit)    localLimit = parseInt(rawLimit, 10) || null;
+    if (rawPlan)     selectedPlan = rawPlan;
+    if (rawPct)      manualPct = parseFloat(rawPct);
+    if (rawReset)    manualReset = rawReset;
+    if (rawBaseline) baselineTokens = parseInt(rawBaseline, 10);
   });
 
   let effectiveLimit = $derived(agent.quota_limit ?? localLimit);
@@ -76,8 +80,19 @@
   function commitPct() {
     editing = "none";
     const v = parseFloat(editPct);
-    if (v >= 0 && v <= 100) { manualPct = v; localStorage.setItem(KEY_MANUAL_PCT, String(v)); }
-    else { manualPct = null; localStorage.removeItem(KEY_MANUAL_PCT); }
+    if (v >= 0 && v <= 100) {
+      manualPct = v;
+      // 입력 시점의 input+output 토큰 수를 baseline으로 기록
+      const snapshot = agent.tokens_5h.tokens_in + agent.tokens_5h.tokens_out;
+      baselineTokens = snapshot;
+      localStorage.setItem(KEY_MANUAL_PCT, String(v));
+      localStorage.setItem(KEY_BASELINE_TOKENS, String(snapshot));
+    } else {
+      manualPct = null;
+      baselineTokens = null;
+      localStorage.removeItem(KEY_MANUAL_PCT);
+      localStorage.removeItem(KEY_BASELINE_TOKENS);
+    }
   }
   function onPctKey(e: KeyboardEvent) { if (e.key === "Enter") commitPct(); if (e.key === "Escape") editing = "none"; }
 
@@ -163,6 +178,7 @@
     quota_limit={effectiveLimit}
     reset_at={agent.quota_reset_at}
     manual_pct={manualPct}
+    baseline_tokens={baselineTokens}
     manual_reset={manualReset}
   />
 </div>
