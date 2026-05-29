@@ -54,27 +54,38 @@
 </script>
 
 <div class="qb">
-  {#if quota_limit}
+  {#if pct !== null}
+    <!-- 한도 설정 또는 수동 % 입력 시 -->
     <div class="row">
-      <span class="usage-text">
-        <span class="val">{formatTokensTotal(usedDisplay)}</span>
-        <span class="sep"> / </span>
-        <span class="total">{formatTokensTotal(quota_limit)}</span>
-      </span>
+      {#if quota_limit}
+        <span class="usage-text">
+          <span class="val">{formatTokensTotal(usedDisplay)}</span>
+          <span class="sep"> / </span>
+          <span class="total">{formatTokensTotal(quota_limit)}</span>
+        </span>
+      {:else}
+        <!-- 한도 미설정, % 만 수동 입력된 경우 -->
+        <span class="subtle">사용 {pct.toFixed(0)}%</span>
+      {/if}
       <span class="pct" class:manual={isManual}>
-        {pct?.toFixed(0)}%{isManual ? "" : " ~"}
+        {pct.toFixed(0)}%{isManual ? "" : " ~"}
       </span>
     </div>
     <div class="bar">
       <span class="fill" style="width:{pct}%; background:{barColor}"></span>
     </div>
     <div class="sub-row">
-      <span class="remain">남음: {formatTokensTotal(remaining ?? 0)}</span>
+      {#if quota_limit}
+        <span class="remain">남음: {formatTokensTotal(remaining ?? 0)}</span>
+      {:else}
+        <span class="remain">&nbsp;</span>
+      {/if}
       {#if resetLabel}
         <span class="subtle">reset {resetLabel}</span>
       {/if}
     </div>
   {:else}
+    <!-- 한도도 수동%도 없음 -->
     <div class="row">
       <span class="subtle">input+output (5h): {formatTokensTotal(localUsed)}</span>
       {#if resetLabel}
