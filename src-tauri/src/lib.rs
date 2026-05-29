@@ -10,10 +10,11 @@ mod watchers;
 use aggregator::Aggregator;
 use clock::SystemClock;
 use emitter::EmitGate;
-use otel_receiver::OtelReceiver;
+use otel_receiver::{OtelReceiver, OtelState};
 use scheduler::{ScheduleRule, Scheduler};
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use serde::Serialize;
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::sync::{mpsc, Mutex};
@@ -40,9 +41,18 @@ fn init_tracing() {
     tracing::info!(?log_dir, "tracing initialized");
 }
 
+#[derive(Serialize)]
+struct OtelStatusResult {
+    port_bound: bool,
+    data_received: bool,
+}
+
 #[tauri::command]
-fn otel_status(state: tauri::State<'_, Arc<AtomicBool>>) -> bool {
-    state.load(Ordering::Relaxed)
+fn otel_status(state: tauri::State<'_, Arc<OtelState>>) -> OtelStatusResult {
+    OtelStatusResult {
+        port_bound: state.port_bound.load(Ordering::Relaxed),
+        data_received: state.data_received.load(Ordering::Relaxed),
+    }
 }
 
 #[tauri::command]
@@ -128,13 +138,16 @@ pub fn run() {
     let codex_db = home().join(".codex/state_5.sqlite");
     let _ = watchers::codex::CodexWatcher::spawn(codex_db, tx.clone());
 
-    // OTEL 리시버 spawn (포트 4318) — drop(tx) 이전에 clone
-    let otel_active = Arc::new(AtomicBool::new(false));
+    // OTEL 리시버 spawn (포트 4318)
+    let otel_state = Arc::new(OtelState {
+        port_bound:    AtomicBool::new(false),
+        data_received: AtomicBool::new(false),
+    });
     {
-        let otel_tx = tx.clone();
-        let flag = otel_active.clone();
+        let otel_tx  = tx.clone();
+        let otel_ref = otel_state.clone();
         tauri::async_runtime::spawn(async move {
-            match OtelReceiver::spawn(otel_tx, flag).await {
+            match OtelReceiver::spawn(otel_tx, otel_ref).await {
                 Ok(port) => tracing::info!(port, "OTEL 리시버 준비"),
                 Err(e)   => tracing::warn!(%e, "OTEL 리시버 비활성 (포트 4318 사용 불가)"),
             }
@@ -157,7 +170,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(scheduler)
-        .manage(otel_active)
+        .manage(otel_state)
         .invoke_handler(tauri::generate_handler![
             open_detail_window,
             otel_status,

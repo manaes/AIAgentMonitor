@@ -8,15 +8,19 @@
   import AddTriggerForm from "../components/AddTriggerForm.svelte";
 
   let activeTab = $state<"sessions" | "triggers">("sessions");
-  let otelActive = $state(false);
+  let otelPortBound = $state(false);
+  let otelDataReceived = $state(false);
   let showOtelHelp = $state(false);
 
   onMount(async () => {
     await store.loadTriggers();
-    // OTEL 연결 상태 확인 (5초마다)
-    const check = async () => { otelActive = await invoke<boolean>("otel_status"); };
+    const check = async () => {
+      const s = await invoke<{ port_bound: boolean; data_received: boolean }>("otel_status");
+      otelPortBound = s.port_bound;
+      otelDataReceived = s.data_received;
+    };
     await check();
-    const timer = setInterval(check, 5000);
+    const timer = setInterval(check, 3000);
     return () => clearInterval(timer);
   });
 </script>
@@ -34,8 +38,19 @@
 
   <!-- OTEL 상태 배지 -->
   <div class="otel-row">
-    <button class="otel-badge" class:active={otelActive} onclick={() => showOtelHelp = !showOtelHelp}>
-      {otelActive ? "● OTEL 수신 중" : "○ OTEL 미연결"}
+    <button
+      class="otel-badge"
+      class:active={otelDataReceived}
+      class:waiting={otelPortBound && !otelDataReceived}
+      onclick={() => showOtelHelp = !showOtelHelp}
+    >
+      {#if otelDataReceived}
+        ● OTEL 수신 중
+      {:else if otelPortBound}
+        ◎ OTEL 대기 중 (포트 4318)
+      {:else}
+        ○ OTEL 비활성
+      {/if}
     </button>
     {#if showOtelHelp}
       <div class="otel-help">
@@ -121,7 +136,8 @@ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"</code>
     border-radius: 4px; color: #636366; cursor: pointer;
     font-size: 10px; padding: 2px 8px;
   }
-  .otel-badge.active { border-color: #30d158; color: #30d158; }
+  .otel-badge.active   { border-color: #30d158; color: #30d158; }
+  .otel-badge.waiting  { border-color: #ff9f0a; color: #ff9f0a; }
   .otel-badge:hover { border-color: #8e8e93; }
   .otel-help {
     background: #1c1c1e; border: 1px solid #3a3a3c; border-radius: 6px;

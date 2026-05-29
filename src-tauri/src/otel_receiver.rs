@@ -22,6 +22,12 @@ use tokio::sync::mpsc;
 
 use crate::types::{AgentKind, TokenCounts, TokenEvent};
 
+/// OTEL 상태 (Tauri State로 공유)
+pub struct OtelState {
+    pub port_bound: AtomicBool,
+    pub data_received: AtomicBool,
+}
+
 // ── OTLP JSON 구조 (protobuf → JSON 변환 스펙 기반) ──────────────────
 
 #[derive(Deserialize, Debug, Default)]
@@ -199,7 +205,7 @@ fn process_metrics(body: &OtlpMetricsBody, tx: &mpsc::UnboundedSender<TokenEvent
 #[derive(Clone)]
 struct AppState {
     tx: Arc<mpsc::UnboundedSender<TokenEvent>>,
-    active: Arc<AtomicBool>,
+    otel: Arc<OtelState>,
 }
 
 // ── 핸들러 ────────────────────────────────────────────────────────────
@@ -208,16 +214,13 @@ async fn handle_metrics(
     State(st): State<AppState>,
     body: Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // 요청이 도달한 순간 즉시 활성화 (파싱 성공 여부와 무관)
-    st.active.store(true, Ordering::Relaxed);
-    tracing::info!("OTEL /v1/metrics 수신 — otel_active=true");
-
-    // 원본 페이로드 INFO 로그 (디버깅용)
+    st.otel.data_received.store(true, Ordering::Relaxed);
+    tracing::info!("OTEL /v1/metrics 수신");
     tracing::info!(payload = %body.0, "OTEL raw payload");
 
     match serde_json::from_value::<OtlpMetricsBody>(body.0) {
         Ok(parsed) => process_metrics(&parsed, &st.tx),
-        Err(e) => tracing::warn!(%e, "OTEL metrics 파싱 실패 — 포맷 불일치 가능"),
+        Err(e) => tracing::warn!(%e, "OTEL metrics 파싱 실패"),
     }
     StatusCode::OK
 }
@@ -242,9 +245,9 @@ impl OtelReceiver {
     /// otel_active: 첫 데이터 수신 시 true로 설정됨 (UI 상태 표시용)
     pub async fn spawn(
         tx: mpsc::UnboundedSender<TokenEvent>,
-        otel_active: Arc<AtomicBool>,
+        otel: Arc<OtelState>,
     ) -> Result<u16, String> {
-        let state = AppState { tx: Arc::new(tx), active: otel_active };
+        let state = AppState { tx: Arc::new(tx), otel: otel.clone() };
 
         let app = Router::new()
             .route("/v1/metrics", post(handle_metrics))
@@ -257,7 +260,8 @@ impl OtelReceiver {
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
                 let port = listener.local_addr().map(|a| a.port()).unwrap_or(4318);
-                tracing::info!(port, "OTEL 리시버 시작 (포트 {})", port);
+                otel.port_bound.store(true, Ordering::Relaxed);
+                tracing::info!(port, "OTEL 리시버 시작");
                 tokio::spawn(async move {
                     if let Err(e) = axum::serve(listener, app).await {
                         tracing::error!(%e, "OTEL 리시버 종료");
