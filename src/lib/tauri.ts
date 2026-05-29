@@ -62,7 +62,8 @@ export async function addTriggerRule(
   working_dir: string,
   prompt: string
 ): Promise<TriggerRule> {
-  return invoke<TriggerRule>("add_trigger_rule", { agent, hour, minute, working_dir, prompt });
+  // Tauri 2는 Rust snake_case → JS camelCase 자동 변환: working_dir → workingDir
+  return invoke<TriggerRule>("add_trigger_rule", { agent, hour, minute, workingDir: working_dir, prompt });
 }
 
 export async function removeTriggerRule(id: string): Promise<void> {
