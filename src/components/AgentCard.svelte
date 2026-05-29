@@ -4,7 +4,7 @@
   import type { AgentState } from "../lib/tauri";
   import QuotaBar from "./QuotaBar.svelte";
 
-  let { agent } = $props<{ agent: AgentState }>();
+  let { agent, otelActive = false } = $props<{ agent: AgentState; otelActive?: boolean }>();
 
   let dotColor = $derived(agent.kind === "claude" ? "#30d158" : "#ff9f0a");
   let primaryProj = $derived(
@@ -192,8 +192,10 @@
 
     <span class="divider">|</span>
 
-    <!-- 실제 사용 % (Claude Code에서 확인한 값 입력) -->
-    {#if editing === "pct"}
+    <!-- 실제 사용 % — OTEL 연결 시 자동, 아니면 수동 -->
+    {#if otelActive && kind === "claude"}
+      <span class="otel-auto">● OTEL 자동</span>
+    {:else if editing === "pct"}
       <input class="mini-input pct-input" bind:value={editPct}
         onblur={commitPct} onkeydown={onPctKey}
         placeholder="0~100" autofocus />
@@ -271,6 +273,7 @@
   .pct-input { width: 45px; }
   .time-input { width: 52px; }
   .unit-hint { color: #8e8e93; font-size: 10px; }
+  .otel-auto { color: #30d158; font-size: 10px; font-weight: 500; }
   .inline-btn {
     background: none; border: none; padding: 0;
     color: #636366; font-size: 10px; cursor: pointer;
