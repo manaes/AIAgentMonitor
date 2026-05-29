@@ -139,8 +139,21 @@ fn process_metrics(body: &OtlpMetricsBody, tx: &mpsc::UnboundedSender<TokenEvent
                     .or_else(|| metric.gauge.as_ref().map(|g| g.data_points.as_slice()))
                     .unwrap_or(&[]);
 
-                // 메트릭 이름이 token 관련인지 확인 (token.count, claude.tokens 등)
-                let is_token_metric = metric.name.contains("token");
+                // 비용 메트릭 로깅 (나중에 UI에 추가 예정)
+                if metric.name == "claude_code.cost.usage" {
+                    for dp in data_points {
+                        if let Some(cost) = dp.as_double {
+                            let attrs = attr_map(&dp.attributes);
+                            let model = attrs.get("model").and_then(|v| v.as_str()).unwrap_or("?");
+                            tracing::info!(cost, model, session_id = %session_id, "OTEL 비용");
+                        }
+                    }
+                    continue;
+                }
+
+                // Claude Code 실제 메트릭명: claude_code.token.usage
+                let is_token_metric = metric.name == "claude_code.token.usage"
+                    || metric.name.contains("token");
                 if !is_token_metric { continue; }
 
                 for dp in data_points {
@@ -148,17 +161,22 @@ fn process_metrics(body: &OtlpMetricsBody, tx: &mpsc::UnboundedSender<TokenEvent
 
                     let token_type = attrs.get("type")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("input"); // fallback
+                        .unwrap_or("input");
 
                     let model = attrs.get("model")
                         .and_then(|v| v.as_str())
                         .unwrap_or("claude-unknown")
+                        // Claude Code 모델명에 붙는 [1m] 같은 suffix 제거
+                        .split('[').next().unwrap_or("claude-unknown")
                         .to_string();
 
-                    let count = dp.as_int.as_ref()
-                        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
-                        .unwrap_or_else(|| dp.as_double.unwrap_or(0.0) as i64)
-                        as u32;
+                    // Claude Code는 asDouble로 전송 (정수여도)
+                    let count = dp.as_double
+                        .map(|v| v as u32)
+                        .or_else(|| dp.as_int.as_ref()
+                            .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+                            .map(|v| v as u32))
+                        .unwrap_or(0);
 
                     if count == 0 { continue; }
 
@@ -166,16 +184,14 @@ fn process_metrics(body: &OtlpMetricsBody, tx: &mpsc::UnboundedSender<TokenEvent
                         .map(|v| nano_to_systime(parse_nanos(v)))
                         .unwrap_or_else(SystemTime::now);
 
+                    // Claude Code 실제 type 값: input, output, cacheRead, cacheCreation
                     let counts = match token_type {
-                        "input" | "input_tokens"   => TokenCounts { tokens_in: count, ..Default::default() },
-                        "output" | "output_tokens" => TokenCounts { tokens_out: count, ..Default::default() },
-                        "cache_read" | "cache_read_input" | "cache_read_tokens"
-                            => TokenCounts { tokens_cache_read: count, ..Default::default() },
-                        "cache_creation" | "cache_creation_input" | "cache_write_tokens"
-                            => TokenCounts { tokens_cache_create: count, ..Default::default() },
+                        "input"                    => TokenCounts { tokens_in: count, ..Default::default() },
+                        "output"                   => TokenCounts { tokens_out: count, ..Default::default() },
+                        "cacheRead"   | "cache_read"   | "cache_read_input"   => TokenCounts { tokens_cache_read: count, ..Default::default() },
+                        "cacheCreation" | "cache_creation" | "cache_creation_input" => TokenCounts { tokens_cache_create: count, ..Default::default() },
                         other => {
-                            tracing::debug!(metric_name = %metric.name, token_type = other, count, "OTEL 알 수 없는 token type — raw 로깅");
-                            // 알 수 없는 타입은 input으로 처리
+                            tracing::debug!(metric_name = %metric.name, token_type = other, count, "OTEL 알 수 없는 token type");
                             TokenCounts { tokens_in: count, ..Default::default() }
                         }
                     };
@@ -184,15 +200,11 @@ fn process_metrics(body: &OtlpMetricsBody, tx: &mpsc::UnboundedSender<TokenEvent
                         agent: AgentKind::Claude,
                         project_path: PathBuf::from(working_dir),
                         session_id: session_id.clone(),
-                        model: model.clone(),
+                        model,
                         ts,
                         counts,
                     };
-
-                    tracing::debug!(
-                        token_type, count, model,
-                        "OTEL TokenEvent 생성"
-                    );
+                    tracing::info!(token_type, count, "OTEL TokenEvent → aggregator");
                     let _ = tx.send(ev);
                 }
             }
