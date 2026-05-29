@@ -76,7 +76,10 @@
       if (isNaN(hh) || isNaN(mm)) return null;
       const d = new Date(nowSecs * 1000);
       d.setHours(hh, mm, 0, 0);
-      if (d.getTime() / 1000 <= nowSecs) d.setDate(d.getDate() + 1);
+      // 5h quota 창 — 지나면 +24h가 아니라 +5h 씩 다음 창 탐색
+      while (d.getTime() / 1000 <= nowSecs) {
+        d.setTime(d.getTime() + 5 * 3600 * 1000);
+      }
       return Math.floor(d.getTime() / 1000);
     }
     return agent.quota_reset_at?.secs_since_epoch ?? null;
