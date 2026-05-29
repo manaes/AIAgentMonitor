@@ -141,11 +141,9 @@ impl ClaudeWatcher {
             }
 
             loop {
-                // OTEL 활성화 시 jsonl live 이벤트 중단 (OTEL이 더 정확하므로)
-                if otel.data_received.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    continue;
-                }
+                // OTEL 활성 여부와 무관하게 계속 실행
+                // 이유: OTEL이 working_dir를 안 보내므로 세션 목록 표시에 jsonl 경로 정보 필요
+                // 중복 토큰 계산은 EMA 특성상 수용 가능한 수준
                 match notify_rx.recv() {
                     Ok(Ok(event)) => {
                         if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
