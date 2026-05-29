@@ -208,13 +208,16 @@ async fn handle_metrics(
     State(st): State<AppState>,
     body: Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    tracing::debug!("OTEL /v1/metrics 수신");
-    // 디버그용 원본 페이로드 로그
-    tracing::trace!(payload = %body.0, "OTEL raw metrics");
+    // 요청이 도달한 순간 즉시 활성화 (파싱 성공 여부와 무관)
+    st.active.store(true, Ordering::Relaxed);
+    tracing::info!("OTEL /v1/metrics 수신 — otel_active=true");
 
-    if let Ok(parsed) = serde_json::from_value::<OtlpMetricsBody>(body.0) {
-        process_metrics(&parsed, &st.tx);
-        st.active.store(true, Ordering::Relaxed);
+    // 원본 페이로드 INFO 로그 (디버깅용)
+    tracing::info!(payload = %body.0, "OTEL raw payload");
+
+    match serde_json::from_value::<OtlpMetricsBody>(body.0) {
+        Ok(parsed) => process_metrics(&parsed, &st.tx),
+        Err(e) => tracing::warn!(%e, "OTEL metrics 파싱 실패 — 포맷 불일치 가능"),
     }
     StatusCode::OK
 }
