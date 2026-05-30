@@ -95,9 +95,6 @@ struct AttrVal {
 
 impl AttrVal {
     fn as_str(&self) -> Option<&str> { self.string_value.as_deref() }
-    fn as_i64(&self) -> Option<i64> {
-        self.int_value.as_ref().and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
-    }
 }
 
 fn attr_map(attrs: &[Attribute]) -> HashMap<&str, &AttrVal> {
@@ -191,8 +188,9 @@ fn process_metrics(body: &OtlpMetricsBody, tx: &mpsc::UnboundedSender<TokenEvent
                         "cacheRead"   | "cache_read"   | "cache_read_input"   => TokenCounts { tokens_cache_read: count, ..Default::default() },
                         "cacheCreation" | "cache_creation" | "cache_creation_input" => TokenCounts { tokens_cache_create: count, ..Default::default() },
                         other => {
-                            tracing::debug!(metric_name = %metric.name, token_type = other, count, "OTEL 알 수 없는 token type");
-                            TokenCounts { tokens_in: count, ..Default::default() }
+                            // 미상 token type은 input으로 흡수하지 않고 건너뛴다 (input 과대계상 방지)
+                            tracing::warn!(metric_name = %metric.name, token_type = other, count, "OTEL 알 수 없는 token type — 건너뜀");
+                            continue;
                         }
                     };
 

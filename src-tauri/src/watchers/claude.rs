@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -124,20 +125,16 @@ impl ClaudeWatcher {
                 return;
             }
 
-            // 시작 시점에 기존 파일들의 offset = 파일 끝으로 (이미 본 것 무시)
-            for entry in walk_jsonl(&projects_root) {
-                if let Ok(meta) = std::fs::metadata(&entry) {
-                    offsets.insert(entry, meta.len());
-                }
-            }
-
-            // 5h 데이터 복원: 기존 파일들을 offset=0부터 다시 읽어 aggregator에 흘려넣음.
-            // offset 캐시는 업데이트하지 않음 — FSEvents 후속 이벤트는 file end 기준으로만 잡힘.
+            // 시작 시 5h 데이터 복원과 offset 초기화를 한 번에 처리한다.
+            // 각 파일을 0부터 읽어 aggregator에 흘려넣고, 읽기가 끝난 지점(EOF offset)을 저장한다.
+            // 이렇게 하면 이후 live tailing이 정확히 그 지점부터 이어받아 같은 줄을 두 번 세지 않는다.
+            // (이전 2-pass는 offset=file_len 스냅 후 0부터 재생해서, 그 사이 추가된 줄이 중복 집계되었다)
             for entry in walk_jsonl(&projects_root) {
                 let project_dir = entry.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                 let session_id = entry.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
                 let decoded = decode_project_path(&project_dir);
-                tail_file(&entry, 0, &decoded, &session_id, &tx);
+                let end = tail_file(&entry, 0, &decoded, &session_id, &tx, &otel);
+                offsets.insert(entry, end);
             }
 
             loop {
@@ -153,7 +150,7 @@ impl ClaudeWatcher {
                                     let session_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
                                     let decoded = decode_project_path(&project_dir);
                                     let offset = offsets.entry(path.clone()).or_insert(0);
-                                    *offset = tail_file(&path, *offset, &decoded, &session_id, &tx);
+                                    *offset = tail_file(&path, *offset, &decoded, &session_id, &tx, &otel);
                                 }
                             }
                         }
@@ -184,18 +181,37 @@ fn walk_jsonl(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn tail_file(path: &Path, offset: u64, project: &Path, session_id: &str, tx: &mpsc::UnboundedSender<TokenEvent>) -> u64 {
+fn tail_file(path: &Path, offset: u64, project: &Path, session_id: &str, tx: &mpsc::UnboundedSender<TokenEvent>, otel: &OtelState) -> u64 {
     let mut f = match File::open(path) { Ok(f) => f, Err(_) => return offset };
     let file_len = f.metadata().map(|m| m.len()).unwrap_or(offset);
     // 파일이 회전/잘림되어 현재 offset보다 작아진 경우, 처음부터 다시 읽음.
     let effective_offset = if file_len < offset { 0 } else { offset };
     if f.seek(SeekFrom::Start(effective_offset)).is_err() { return offset; }
-    let reader = BufReader::new(&f);
+    let mut reader = BufReader::new(&f);
     let mut new_offset = effective_offset;
-    for line in reader.lines().map_while(|r| r.ok()) {
-        new_offset += line.len() as u64 + 1;
-        match parse_line(&line, project, session_id) {
-            Ok(Some(ev)) => { let _ = tx.send(ev); }
+    let mut buf = Vec::new();
+    // read_until으로 실제 소비된 바이트(개행·\r 포함)만큼만 offset을 전진시킨다.
+    // 개행으로 끝나지 않은 마지막(부분) 줄은 처리하지 않고 다음 이벤트에서 다시 읽는다.
+    // (이전 구현은 line.len()+1로 개행 1바이트를 가정해, 부분 줄/CRLF에서 offset이 어긋났다)
+    loop {
+        buf.clear();
+        let n = match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if !buf.ends_with(b"\n") { break; } // 부분(미완) 줄 — 다음 읽기까지 보류
+        new_offset += n as u64;
+        let line = String::from_utf8_lossy(&buf);
+        match parse_line(line.trim_end(), project, session_id) {
+            Ok(Some(mut ev)) => {
+                // OTEL 수신 중이면 jsonl은 프로젝트/세션 메타데이터만 갱신하고
+                // 토큰 카운트는 0으로 비운다 — OTEL이 같은 토큰을 보내므로 이중계산을 방지한다.
+                if otel.data_received.load(Ordering::Relaxed) {
+                    ev.counts = TokenCounts::default();
+                }
+                let _ = tx.send(ev);
+            }
             Ok(None) => {}
             Err(e) => tracing::debug!(?path, %e, "jsonl line parse error"),
         }

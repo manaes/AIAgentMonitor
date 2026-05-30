@@ -18,7 +18,7 @@ use serde::Serialize;
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::sync::{mpsc, Mutex};
-use types::{AgentKind, TokenEvent};
+use types::TokenEvent;
 
 fn home() -> PathBuf {
     dirs_next::home_dir().expect("home dir")
