@@ -62,6 +62,10 @@ async fn open_detail_window(app: tauri::AppHandle) -> Result<(), String> {
         w.show().map_err(|e| e.to_string())?;
         w.set_focus().map_err(|e| e.to_string())?;
     }
+    // detail을 열면 popover는 닫는다 (백엔드 hide는 capability 권한이 필요 없음)
+    if let Some(p) = app.get_webview_window("popover") {
+        let _ = p.hide();
+    }
     Ok(())
 }
 
