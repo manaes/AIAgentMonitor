@@ -3,6 +3,7 @@
   import { formatTokensPerSec } from "../lib/format";
   import type { AgentState } from "../lib/tauri";
   import QuotaBar from "./QuotaBar.svelte";
+  import { invoke } from "@tauri-apps/api/core";
 
   let { agent, otelActive = false }: { agent: AgentState; otelActive?: boolean } = $props();
 
@@ -152,6 +153,15 @@
     else { manualReset = ""; localStorage.removeItem(KEY_MANUAL_RESET); }
   }
   function onResetKey(e: KeyboardEvent) { if (e.key === "Enter") commitReset(); if (e.key === "Escape") editing = "none"; }
+
+  // 수동 동기화: claude를 프록시 경유로 1회 핑(이 핑만 프록시를 거침). 값은 스냅샷으로 자동 반영.
+  let syncing = $state(false);
+  async function syncQuota() {
+    if (syncing) return;
+    syncing = true;
+    try { await invoke("sync_quota"); } catch (e) { console.error("sync_quota", e); }
+    setTimeout(() => { syncing = false; }, 6000);
+  }
 </script>
 
 <div class="card">
@@ -225,6 +235,14 @@
       <button class="inline-btn" onclick={startEditReset}
         title="Claude Code에서 확인한 리셋 시각 (예: 11:50)">
         {manualReset || "리셋시각 ✎"}
+      </button>
+    {/if}
+
+    {#if agent.kind === "claude"}
+      <span class="divider">|</span>
+      <button class="inline-btn sync-btn" onclick={syncQuota} disabled={syncing}
+        title="프록시로 실제 5h 사용량 동기화 (claude를 1회 핑). 10분마다 자동으로도 보정됨.">
+        {syncing ? "동기화 중…" : "🔄 동기화"}
       </button>
     {/if}
   </div>

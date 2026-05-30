@@ -44,6 +44,14 @@ impl Default for AgentBucket {
 impl Aggregator {
     pub fn new() -> Self { Self::default() }
 
+    /// 모든 에이전트 통틀어 가장 최근 이벤트 시각 (주기적 자동 동기화 활동 판단용)
+    pub fn last_event_at(&self) -> Option<SystemTime> {
+        self.by_agent
+            .values()
+            .filter_map(|b| b.event_times.iter().max().copied())
+            .max()
+    }
+
     pub fn push(&mut self, ev: TokenEvent) {
         let bucket = self.by_agent.entry(ev.agent).or_default();
         bucket.rotating.add(ev.ts, &ev.counts);

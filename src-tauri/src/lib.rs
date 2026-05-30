@@ -131,6 +131,38 @@ async fn fire_trigger_now(
     Ok(())
 }
 
+// claude를 프록시(:4319) 경유로 1회 핑 → 응답 ratelimit 헤더에서 5h 사용률/리셋을 캡처.
+// ANTHROPIC_BASE_URL은 이 자식 프로세스에만 설정되므로 사용자의 일반 Claude Code 세션은
+// 프록시를 거치지 않는다(상시 경유 footgun 회피). GUI 앱 PATH 대비 절대경로 우선.
+fn spawn_quota_ping() {
+    let bin = {
+        let p = home().join(".local/bin/claude");
+        if p.exists() {
+            p.into_os_string().into_string().unwrap_or_else(|_| "claude".to_string())
+        } else {
+            "claude".to_string()
+        }
+    };
+    let r = tokio::process::Command::new(bin)
+        .args(["-p", "ping"])
+        .current_dir(home())
+        .env("ANTHROPIC_BASE_URL", "http://localhost:4319")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Err(e) = r {
+        tracing::warn!(%e, "quota 동기화 핑 실행 실패 (claude 미발견?)");
+    }
+}
+
+// 수동 동기화 (UI 버튼)
+#[tauri::command]
+async fn sync_quota() -> Result<(), String> {
+    spawn_quota_ping();
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
@@ -178,6 +210,28 @@ pub fn run() {
     drop(tx); // 모든 producer 등록 완료 후 원본 drop
 
     let aggregator = Arc::new(Mutex::new(Aggregator::new()));
+
+    // 주기적 자동 동기화: 최근(15분 내) 활동이 있으면 10분마다 프록시 핑으로 사용량을 보정.
+    // 핑만 프록시를 거치므로 일반 세션엔 영향 없고, 유휴 시엔 quota 낭비를 막기 위해 생략한다.
+    {
+        let agg = aggregator.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(8)).await; // 시작 시 startup replay 완료 대기
+            let mut ticker = tokio::time::interval(Duration::from_secs(600)); // 10분
+            loop {
+                ticker.tick().await;
+                let recent = { agg.lock().await.last_event_at() };
+                let active = recent
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|e| e < Duration::from_secs(900))
+                    .unwrap_or(false);
+                if active {
+                    tracing::info!("주기 자동 동기화 핑");
+                    spawn_quota_ping();
+                }
+            }
+        });
+    }
     let gate = Arc::new(Mutex::new(EmitGate::new(Duration::from_millis(500))));
 
     // OTEL 활성화 시 별도 aggregator 초기화 불필요.
@@ -205,6 +259,7 @@ pub fn run() {
             remove_trigger_rule,
             toggle_trigger_rule,
             fire_trigger_now,
+            sync_quota,
         ])
         .setup({
             let aggregator = aggregator.clone();
