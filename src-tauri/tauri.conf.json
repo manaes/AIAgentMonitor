@@ -14,7 +14,7 @@
       {
         "label": "popover",
         "title": "AI Agent Monitor",
-        "width": 360,
+        "width": 340,
         "height": 280,
         "decorations": false,
         "transparent": true,

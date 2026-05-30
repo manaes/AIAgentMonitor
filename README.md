@@ -26,7 +26,7 @@ pnpm tauri build  # 릴리즈 빌드 → target/release/bundle/dmg/
 
 ## UI
 
-- **Menubar 아이콘 (좌클릭)**: 320px popover. 에이전트별 Big-Number 카드 (속도 + quota bar + 모델·프로젝트).
+- **Menubar 아이콘 (좌클릭)**: 340px popover. 에이전트별 Big-Number 카드 (속도 + quota bar + 모델·프로젝트).
 - **Menubar 아이콘 (우클릭)**: Open Detail Window / Open Log Folder / Quit AI Monitor
 - **Detail 윈도우**: AgentCard 2-column grid + Active sessions 리스트 (프로젝트별, 최근 활동 순)
 

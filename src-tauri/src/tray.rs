@@ -1,7 +1,7 @@
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
-    AppHandle, Manager, Runtime,
+    AppHandle, Manager, PhysicalPosition, Runtime,
 };
 
 pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
@@ -20,19 +20,38 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     tray.set_menu(Some(menu))?;
     tray.set_show_menu_on_left_click(false)?;
 
+    // 좌클릭: popover를 트레이 아이콘 바로 아래(가로 중앙)에 띄운다. 다시 누르면 숨김.
     tray.on_tray_icon_event(|tray, event| {
         if let TrayIconEvent::Click {
             button: MouseButton::Left,
             button_state: MouseButtonState::Up,
+            rect,
             ..
         } = event
         {
-            // 팝오버 대신 Detail 창을 직접 토글
             let app = tray.app_handle();
-            if let Some(w) = app.get_webview_window("detail") {
+            if let Some(w) = app.get_webview_window("popover") {
                 if w.is_visible().unwrap_or(false) {
                     let _ = w.hide();
-                } else {
+                } else if let Ok(win_size) = w.outer_size() {
+                    // rect.position/size는 tauri::Position/Size enum → 물리 좌표로 변환.
+                    // 아이콘 가로 중앙에 창 중앙을 맞추고, 메뉴바 바로 아래에 놓는다.
+                    let scale = w.scale_factor().unwrap_or(1.0);
+                    let icon_pos = rect.position.to_physical::<f64>(scale);
+                    let icon_size = rect.size.to_physical::<f64>(scale);
+                    let icon_cx = icon_pos.x + icon_size.width / 2.0;
+                    let mut x = icon_cx - win_size.width as f64 / 2.0;
+                    let y = icon_pos.y + icon_size.height;
+                    // 모니터 경계를 벗어나지 않도록 보정 (아이콘이 화면 오른쪽 끝일 때 대비)
+                    if let Ok(Some(mon)) = w.current_monitor() {
+                        let left = mon.position().x as f64 + 4.0;
+                        let right =
+                            mon.position().x as f64 + mon.size().width as f64 - win_size.width as f64 - 4.0;
+                        if right >= left {
+                            x = x.clamp(left, right);
+                        }
+                    }
+                    let _ = w.set_position(PhysicalPosition::new(x, y));
                     let _ = w.show();
                     let _ = w.set_focus();
                 }
