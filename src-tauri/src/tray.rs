@@ -39,9 +39,8 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                     let scale = w.scale_factor().unwrap_or(1.0);
                     let icon_pos = rect.position.to_physical::<f64>(scale);
                     let icon_size = rect.size.to_physical::<f64>(scale);
-                    // popover 오른쪽 끝을 아이콘 오른쪽 끝에 맞춘다(우측 메뉴바 아이콘에서 자연스러운 방향).
-                    let icon_right = icon_pos.x + icon_size.width;
-                    let mut x = icon_right - win_size.width as f64;
+                    // popover 왼쪽 끝을 아이콘 왼쪽 끝에 맞춘다(좌측 정렬 → 아이콘 아래 오른쪽으로 펼쳐짐).
+                    let mut x = icon_pos.x;
                     let y = icon_pos.y + icon_size.height;
                     // 모니터 경계를 벗어나지 않도록 보정 (아이콘이 화면 오른쪽 끝일 때 대비)
                     if let Ok(Some(mon)) = w.current_monitor() {
