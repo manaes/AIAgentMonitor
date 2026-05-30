@@ -8,6 +8,7 @@
 
   async function openDetail() {
     await invoke("open_detail_window");
+    await getCurrentWindow().hide(); // detail 창을 열면 popover는 닫는다
   }
 
   // 콘텐츠 크기에 맞춰 popover 창을 리사이즈 → 스크롤 없이 전체가 보이도록 한다.
