@@ -49,14 +49,6 @@ impl RotatingBucket {
         total
     }
 
-    pub fn oldest_non_empty<C: Clock>(&self, clock: &C) -> Option<SystemTime> {
-        let now = clock.now();
-        let cutoff = now.checked_sub(Duration::from_secs(5 * 3600)).unwrap_or(SystemTime::UNIX_EPOCH);
-        self.cells.iter()
-            .filter(|(bs, c)| *bs >= cutoff && c.total() > 0)
-            .map(|(bs, _)| *bs)
-            .min()
-    }
 }
 
 #[cfg(test)]
@@ -97,15 +89,4 @@ mod tests {
         assert_eq!(rb.sum_5h(&clock).tokens_in, 0);
     }
 
-    #[test]
-    fn oldest_non_empty_bucket_time() {
-        let clock = MockClock::new(1_000_000);
-        let mut rb = RotatingBucket::new();
-        let t0 = clock.now();
-        rb.add(t0, &TokenCounts { tokens_in: 1, ..Default::default() });
-        clock.advance(Duration::from_secs(120));
-        rb.add(clock.now(), &TokenCounts { tokens_in: 1, ..Default::default() });
-        let oldest = rb.oldest_non_empty(&clock).unwrap();
-        assert!(oldest <= t0 + Duration::from_secs(60));
-    }
 }
