@@ -30,7 +30,7 @@
   {#if store.snap}
     <div class="agents">
       {#each store.snap.agents as agent (agent.kind)}
-        <AgentCard {agent} otelActive={otelDataReceived} />
+        <AgentCard {agent} />
       {/each}
     </div>
   {:else}
