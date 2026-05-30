@@ -10,6 +10,8 @@ pnpm tauri dev    # 개발용 (GUI 실행)
 pnpm tauri build  # 릴리즈 빌드 → target/release/bundle/dmg/
 ```
 
+> 릴리즈·배포·코드서명(공증) 상세는 [docs/RELEASE.md](docs/RELEASE.md) 참고.
+
 ## 데이터 소스 (read-only)
 
 - **Claude Code**: `~/.claude/projects/<인코딩된 프로젝트 경로>/<session-uuid>.jsonl`
