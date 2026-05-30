@@ -1,7 +1,6 @@
 mod aggregator;
 mod clock;
 mod emitter;
-mod otel_receiver;
 mod quota_proxy;
 mod scheduler;
 mod tray;
@@ -11,11 +10,9 @@ mod watchers;
 use aggregator::Aggregator;
 use clock::SystemClock;
 use emitter::EmitGate;
-use otel_receiver::{OtelReceiver, OtelState};
 use scheduler::{ScheduleRule, Scheduler};
 use std::path::PathBuf;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use serde::Serialize;
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::sync::{mpsc, Mutex};
@@ -40,20 +37,6 @@ fn init_tracing() {
         .with_writer(file_appender)
         .try_init();
     tracing::info!(?log_dir, "tracing initialized");
-}
-
-#[derive(Serialize)]
-struct OtelStatusResult {
-    port_bound: bool,
-    data_received: bool,
-}
-
-#[tauri::command]
-fn otel_status(state: tauri::State<'_, Arc<OtelState>>) -> OtelStatusResult {
-    OtelStatusResult {
-        port_bound: state.port_bound.load(Ordering::Relaxed),
-        data_received: state.data_received.load(Ordering::Relaxed),
-    }
 }
 
 #[tauri::command]
@@ -169,32 +152,14 @@ pub fn run() {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<TokenEvent>();
 
-    // OTEL 상태 먼저 생성 (Watcher에 전달 필요)
-    let otel_state = Arc::new(OtelState {
-        port_bound:    AtomicBool::new(false),
-        data_received: AtomicBool::new(false),
-    });
-
     // quota 프록시 상태 (실제 ratelimit 헤더에서 캡처한 5h 사용률/리셋)
     let quota_state = Arc::new(quota_proxy::QuotaState::default());
 
     // Watchers (Claude + Codex). 둘 다 실패해도 앱은 띄움.
     let claude_root = home().join(".claude/projects");
-    let _ = watchers::claude::ClaudeWatcher::spawn(claude_root, tx.clone(), otel_state.clone());
+    let _ = watchers::claude::ClaudeWatcher::spawn(claude_root, tx.clone());
     let codex_db = home().join(".codex/state_5.sqlite");
     let _ = watchers::codex::CodexWatcher::spawn(codex_db, tx.clone());
-
-    // OTEL 리시버 spawn (포트 4318)
-    {
-        let otel_tx  = tx.clone();
-        let otel_ref = otel_state.clone();
-        tauri::async_runtime::spawn(async move {
-            match OtelReceiver::spawn(otel_tx, otel_ref).await {
-                Ok(port) => tracing::info!(port, "OTEL 리시버 준비"),
-                Err(e)   => tracing::warn!(%e, "OTEL 리시버 비활성 (포트 4318 사용 불가)"),
-            }
-        });
-    }
 
     // quota 프록시 spawn (포트 4319). Claude Code에 ANTHROPIC_BASE_URL 설정 시에만 트래픽이 흐른다.
     {
@@ -234,11 +199,6 @@ pub fn run() {
     }
     let gate = Arc::new(Mutex::new(EmitGate::new(Duration::from_millis(500))));
 
-    // OTEL 활성화 시 별도 aggregator 초기화 불필요.
-    // startup replay로 복원한 5h 과거 데이터를 유지하고,
-    // 이후 OTEL delta를 쌓아가면 과거+현재가 모두 반영됨.
-    // live jsonl 이벤트만 중단(ClaudeWatcher 내부)해서 이중계산 방지.
-
     // Scheduler 초기화 — tauri async_runtime 위에서 block_on
     let scheduler = Arc::new(Mutex::new(
         tauri::async_runtime::block_on(async {
@@ -250,10 +210,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(scheduler)
-        .manage(otel_state)
         .invoke_handler(tauri::generate_handler![
             open_detail_window,
-            otel_status,
             list_trigger_rules,
             add_trigger_rule,
             remove_trigger_rule,

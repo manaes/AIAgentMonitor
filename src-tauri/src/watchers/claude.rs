@@ -1,4 +1,3 @@
-use crate::otel_receiver::OtelState;
 use crate::types::{AgentKind, TokenCounts, TokenEvent};
 use anyhow::{anyhow, Result};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
@@ -7,7 +6,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -103,11 +101,9 @@ pub struct ClaudeWatcher;
 
 impl ClaudeWatcher {
     /// projects_root: 보통 ~/.claude/projects
-    /// otel_active: OTEL이 활성화되면 jsonl live 이벤트를 중단
     pub fn spawn(
         projects_root: PathBuf,
         tx: mpsc::UnboundedSender<TokenEvent>,
-        otel: std::sync::Arc<OtelState>,
     ) -> Result<()> {
         std::thread::spawn(move || {
             if !projects_root.exists() {
@@ -133,14 +129,11 @@ impl ClaudeWatcher {
                 let project_dir = entry.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                 let session_id = entry.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
                 let decoded = decode_project_path(&project_dir);
-                let end = tail_file(&entry, 0, &decoded, &session_id, &tx, &otel);
+                let end = tail_file(&entry, 0, &decoded, &session_id, &tx);
                 offsets.insert(entry, end);
             }
 
             loop {
-                // OTEL 활성 여부와 무관하게 계속 실행
-                // 이유: OTEL이 working_dir를 안 보내므로 세션 목록 표시에 jsonl 경로 정보 필요
-                // 중복 토큰 계산은 EMA 특성상 수용 가능한 수준
                 match notify_rx.recv() {
                     Ok(Ok(event)) => {
                         if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
@@ -150,7 +143,7 @@ impl ClaudeWatcher {
                                     let session_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
                                     let decoded = decode_project_path(&project_dir);
                                     let offset = offsets.entry(path.clone()).or_insert(0);
-                                    *offset = tail_file(&path, *offset, &decoded, &session_id, &tx, &otel);
+                                    *offset = tail_file(&path, *offset, &decoded, &session_id, &tx);
                                 }
                             }
                         }
@@ -181,7 +174,7 @@ fn walk_jsonl(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn tail_file(path: &Path, offset: u64, project: &Path, session_id: &str, tx: &mpsc::UnboundedSender<TokenEvent>, otel: &OtelState) -> u64 {
+fn tail_file(path: &Path, offset: u64, project: &Path, session_id: &str, tx: &mpsc::UnboundedSender<TokenEvent>) -> u64 {
     let mut f = match File::open(path) { Ok(f) => f, Err(_) => return offset };
     let file_len = f.metadata().map(|m| m.len()).unwrap_or(offset);
     // 파일이 회전/잘림되어 현재 offset보다 작아진 경우, 처음부터 다시 읽음.
@@ -204,14 +197,7 @@ fn tail_file(path: &Path, offset: u64, project: &Path, session_id: &str, tx: &mp
         new_offset += n as u64;
         let line = String::from_utf8_lossy(&buf);
         match parse_line(line.trim_end(), project, session_id) {
-            Ok(Some(mut ev)) => {
-                // OTEL 수신 중이면 jsonl은 프로젝트/세션 메타데이터만 갱신하고
-                // 토큰 카운트는 0으로 비운다 — OTEL이 같은 토큰을 보내므로 이중계산을 방지한다.
-                if otel.data_received.load(Ordering::Relaxed) {
-                    ev.counts = TokenCounts::default();
-                }
-                let _ = tx.send(ev);
-            }
+            Ok(Some(ev)) => { let _ = tx.send(ev); }
             Ok(None) => {}
             Err(e) => tracing::debug!(?path, %e, "jsonl line parse error"),
         }
