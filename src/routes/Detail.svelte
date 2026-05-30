@@ -12,14 +12,15 @@
   let otelDataReceived = $state(false);
   let showOtelHelp = $state(false);
 
-  onMount(async () => {
-    await store.loadTriggers();
+  // onMount는 동기로 둔다 — async onMount가 반환하는 cleanup은 Svelte가 무시하므로 타이머가 누수된다.
+  onMount(() => {
+    store.loadTriggers();
     const check = async () => {
       const s = await invoke<{ port_bound: boolean; data_received: boolean }>("otel_status");
       otelPortBound = s.port_bound;
       otelDataReceived = s.data_received;
     };
-    await check();
+    check();
     const timer = setInterval(check, 3000);
     return () => clearInterval(timer);
   });

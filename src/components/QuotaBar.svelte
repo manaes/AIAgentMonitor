@@ -3,18 +3,17 @@
   import type { TokenCounts } from "../lib/tauri";
 
   let {
-    tokens_5h, quota_limit, reset_at,
+    tokens_5h, quota_limit,
     manual_pct = null,
     baseline_tokens = null,
     manual_reset = ""
-  } = $props<{
+  }: {
     tokens_5h: TokenCounts;
     quota_limit: number | null;
-    reset_at: { secs_since_epoch: number } | null;
     manual_pct?: number | null;
     baseline_tokens?: number | null;
     manual_reset?: string;
-  }>();
+  } = $props();
 
   // 로컬 계산 (input + output만)
   let localUsed = $derived(tokens_5h.tokens_in + tokens_5h.tokens_out);

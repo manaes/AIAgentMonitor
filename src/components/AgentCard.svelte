@@ -4,7 +4,7 @@
   import type { AgentState } from "../lib/tauri";
   import QuotaBar from "./QuotaBar.svelte";
 
-  let { agent, otelActive = false } = $props<{ agent: AgentState; otelActive?: boolean }>();
+  let { agent, otelActive = false }: { agent: AgentState; otelActive?: boolean } = $props();
 
   let dotColor = $derived(agent.kind === "claude" ? "#30d158" : "#ff9f0a");
   let primaryProj = $derived(
@@ -70,7 +70,7 @@
   });
 
   // reset_at을 epoch seconds로 통일
-  let resetEpochSecs = $derived((): number | null => {
+  let resetEpochSecs = $derived.by((): number | null => {
     if (manualReset) {
       const [hh, mm] = manualReset.split(":").map(Number);
       if (isNaN(hh) || isNaN(mm)) return null;
@@ -86,8 +86,8 @@
   });
 
   // "약 NNN분 SS초 남음" 형태 카운트다운
-  let countdown = $derived((): string | null => {
-    const r = resetEpochSecs();
+  let countdown = $derived.by((): string | null => {
+    const r = resetEpochSecs;
     if (r === null) return null;
     const rem = r - nowSecs;
     if (rem <= 0) return "리셋됨";
@@ -170,8 +170,8 @@
 
   <div class="proj-row">
     <span class="subtle">{primaryProj?.name ?? "no active session"}</span>
-    {#if countdown()}
-      <span class="countdown">{countdown()}</span>
+    {#if countdown}
+      <span class="countdown">{countdown}</span>
     {/if}
   </div>
 
@@ -232,7 +232,6 @@
   <QuotaBar
     tokens_5h={agent.tokens_5h}
     quota_limit={effectiveLimit}
-    reset_at={agent.quota_reset_at}
     manual_pct={manualPct}
     baseline_tokens={baselineTokens}
     manual_reset={manualReset}

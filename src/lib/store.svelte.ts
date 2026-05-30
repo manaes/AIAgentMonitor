@@ -17,15 +17,31 @@ class SnapshotStore {
   // Anchor Trigger 룰 목록
   triggers = $state<TriggerRule[]>([]);
 
+  // teardown용 핸들 — init은 멱등(중복 호출 무시)이라 리스너/타이머가 쌓이지 않는다
+  #initialized = false;
+  #unlisten: (() => void) | null = null;
+  #staleTimer: ReturnType<typeof setInterval> | null = null;
+
   async init() {
-    const unlisten = await listenSnapshot((s) => {
+    if (this.#initialized) return;
+    this.#initialized = true;
+    this.#unlisten = await listenSnapshot((s) => {
       this.snap = s;
       this.lastReceived = Date.now();
     });
-    setInterval(() => {
+    this.#staleTimer = setInterval(() => {
       this.staleSeconds = Math.floor((Date.now() - this.lastReceived) / 1000);
     }, 1000);
-    return unlisten;
+  }
+
+  dispose() {
+    this.#unlisten?.();
+    this.#unlisten = null;
+    if (this.#staleTimer !== null) {
+      clearInterval(this.#staleTimer);
+      this.#staleTimer = null;
+    }
+    this.#initialized = false;
   }
 
   async loadTriggers() {

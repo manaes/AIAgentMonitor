@@ -2,7 +2,7 @@
   import { formatTokensPerSec, relativeTime } from "../lib/format";
   import type { Snapshot, ProjectActivity } from "../lib/tauri";
 
-  let { snap } = $props<{ snap: Snapshot }>();
+  let { snap }: { snap: Snapshot } = $props();
 
   type Row = ProjectActivity & { agent: "claude" | "codex" };
   let rows = $derived<Row[]>(
