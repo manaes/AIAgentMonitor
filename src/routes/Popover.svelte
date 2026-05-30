@@ -2,13 +2,28 @@
   import { store } from "../lib/store.svelte";
   import AgentCard from "../components/AgentCard.svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+
+  let rootEl = $state<HTMLElement | null>(null);
 
   async function openDetail() {
     await invoke("open_detail_window");
   }
+
+  // 콘텐츠 크기에 맞춰 popover 창을 리사이즈 → 스크롤 없이 전체가 보이도록 한다.
+  $effect(() => {
+    const el = rootEl;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect();
+      getCurrentWindow().setSize(new LogicalSize(Math.ceil(r.width), Math.ceil(r.height)));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
 </script>
 
-<div class="popover-root">
+<div class="popover-root" bind:this={rootEl}>
   {#if store.snap}
     {#each store.snap.agents as agent (agent.kind)}
       <AgentCard {agent} />

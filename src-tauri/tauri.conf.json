@@ -15,13 +15,13 @@
         "label": "popover",
         "title": "AI Agent Monitor",
         "width": 340,
-        "height": 280,
+        "height": 420,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "visible": false,
-        "resizable": false
+        "resizable": true
       },
       {
         "label": "detail",
