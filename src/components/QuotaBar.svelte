@@ -6,13 +6,15 @@
     tokens_5h, quota_limit,
     manual_pct = null,
     baseline_tokens = null,
-    manual_reset = ""
+    manual_reset = "",
+    auto_pct = null
   }: {
     tokens_5h: TokenCounts;
     quota_limit: number | null;
     manual_pct?: number | null;
     baseline_tokens?: number | null;
     manual_reset?: string;
+    auto_pct?: number | null;
   } = $props();
 
   // 로컬 계산 (input + output만)
@@ -23,7 +25,9 @@
   // Anthropic 서버 계산 공식이 비공개라 보정 계수는 불안정 → 제거.
   // 대신 delta를 보수적으로 합산하고, 주기적으로 사용자가 % 재입력.
   let pct = $derived(
-    manual_pct !== null
+    auto_pct !== null
+      ? Math.min(100, auto_pct)
+      : manual_pct !== null
       ? (() => {
           const delta = baseline_tokens !== null
             ? Math.max(0, localUsed - baseline_tokens)
@@ -59,6 +63,7 @@
 
   // 수동 입력 여부 표시
   let isManual = $derived(manual_pct !== null || !!manual_reset);
+  let isAuto = $derived(auto_pct !== null);
 </script>
 
 <div class="qb">
@@ -75,8 +80,8 @@
         <!-- 한도 미설정, % 만 수동 입력된 경우 -->
         <span class="subtle">사용 {pct.toFixed(0)}%</span>
       {/if}
-      <span class="pct" class:manual={isManual}>
-        {pct.toFixed(0)}%{isManual ? "" : " ~"}
+      <span class="pct" class:manual={isManual} class:auto={isAuto}>
+        {pct.toFixed(0)}%{isAuto || isManual ? "" : " ~"}
       </span>
     </div>
     <div class="bar">
@@ -111,6 +116,7 @@
   .sep, .total { color: #8e8e93; font-size: 11px; }
   .pct { color: #8e8e93; font-size: 10px; }
   .pct.manual { color: #0a84ff; }   /* 수동 입력 시 파란색으로 구분 */
+  .pct.auto { color: #30d158; }     /* 프록시 실측값 — 초록색 */
   .bar { height: 6px; background: #1c1c1e; border-radius: 3px; overflow: hidden; margin-bottom: 4px; }
   .fill { display: block; height: 100%; border-radius: 3px; transition: width 0.4s ease; }
   .sub-row { display: flex; justify-content: space-between; }

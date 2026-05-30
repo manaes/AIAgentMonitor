@@ -94,6 +94,7 @@ impl Aggregator {
                 tokens_5h,
                 quota_limit: None,
                 quota_reset_at,
+                quota_used_pct: None,
                 projects,
                 triggered_by: None,
             });

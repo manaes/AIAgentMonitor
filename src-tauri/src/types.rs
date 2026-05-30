@@ -60,6 +60,7 @@ pub struct AgentState {
     pub tokens_5h: TokenCounts,
     pub quota_limit: Option<u32>,
     pub quota_reset_at: Option<SystemTime>,
+    pub quota_used_pct: Option<f32>,   // 프록시가 헤더에서 읽은 실제 5h 사용률(%) — 있으면 권위값
     pub projects: Vec<ProjectActivity>,
     pub triggered_by: Option<String>,  // v1.1 자리, v1에는 항상 None
 }

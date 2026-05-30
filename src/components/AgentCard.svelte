@@ -235,6 +235,7 @@
     manual_pct={manualPct}
     baseline_tokens={baselineTokens}
     manual_reset={manualReset}
+    auto_pct={agent.quota_used_pct}
   />
 </div>
 

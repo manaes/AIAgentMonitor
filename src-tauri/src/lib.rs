@@ -2,6 +2,7 @@ mod aggregator;
 mod clock;
 mod emitter;
 mod otel_receiver;
+mod quota_proxy;
 mod scheduler;
 mod tray;
 mod types;
@@ -18,7 +19,7 @@ use serde::Serialize;
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::sync::{mpsc, Mutex};
-use types::TokenEvent;
+use types::{AgentKind, TokenEvent};
 
 fn home() -> PathBuf {
     dirs_next::home_dir().expect("home dir")
@@ -142,6 +143,9 @@ pub fn run() {
         data_received: AtomicBool::new(false),
     });
 
+    // quota 프록시 상태 (실제 ratelimit 헤더에서 캡처한 5h 사용률/리셋)
+    let quota_state = Arc::new(quota_proxy::QuotaState::default());
+
     // Watchers (Claude + Codex). 둘 다 실패해도 앱은 띄움.
     let claude_root = home().join(".claude/projects");
     let _ = watchers::claude::ClaudeWatcher::spawn(claude_root, tx.clone(), otel_state.clone());
@@ -156,6 +160,17 @@ pub fn run() {
             match OtelReceiver::spawn(otel_tx, otel_ref).await {
                 Ok(port) => tracing::info!(port, "OTEL 리시버 준비"),
                 Err(e)   => tracing::warn!(%e, "OTEL 리시버 비활성 (포트 4318 사용 불가)"),
+            }
+        });
+    }
+
+    // quota 프록시 spawn (포트 4319). Claude Code에 ANTHROPIC_BASE_URL 설정 시에만 트래픽이 흐른다.
+    {
+        let q = quota_state.clone();
+        tauri::async_runtime::spawn(async move {
+            match quota_proxy::QuotaProxy::spawn(q).await {
+                Ok(port) => tracing::info!(port, "quota 프록시 준비"),
+                Err(e)   => tracing::warn!(%e, "quota 프록시 비활성 (포트 4319 사용 불가)"),
             }
         });
     }
@@ -194,6 +209,7 @@ pub fn run() {
         .setup({
             let aggregator = aggregator.clone();
             let gate = gate.clone();
+            let quota_state = quota_state.clone();
             move |app| {
                 // Dock 아이콘 숨김 — setup 초반에 호출
                 #[cfg(target_os = "macos")]
@@ -212,14 +228,24 @@ pub fn run() {
 
                 let agg_for_tick = aggregator.clone();
                 let gate_for_tick = gate.clone();
+                let quota_for_tick = quota_state.clone();
                 tauri::async_runtime::spawn(async move {
                     let clock = SystemClock;
                     let mut ticker = tokio::time::interval(Duration::from_millis(250));
                     loop {
                         ticker.tick().await;
                         let mut a = agg_for_tick.lock().await;
-                        let snap = a.snapshot(&clock);
+                        let mut snap = a.snapshot(&clock);
                         drop(a);
+                        // 프록시가 캡처한 실제 quota(%/리셋)를 Claude 카드에 주입 (있을 때만)
+                        let used = *quota_for_tick.used_pct.lock().unwrap();
+                        let reset = *quota_for_tick.reset_at.lock().unwrap();
+                        if used.is_some() || reset.is_some() {
+                            if let Some(c) = snap.agents.iter_mut().find(|a| a.kind == AgentKind::Claude) {
+                                if used.is_some() { c.quota_used_pct = used; }
+                                if let Some(r) = reset { c.quota_reset_at = Some(r); }
+                            }
+                        }
                         let mut g = gate_for_tick.lock().await;
                         if g.should_emit(&snap, std::time::SystemTime::now()) {
                             let _ = app_handle.emit("snapshot", &snap);
