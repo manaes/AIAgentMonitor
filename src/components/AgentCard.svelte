@@ -64,7 +64,7 @@
     {/if}
   </div>
 
-  <QuotaBar tokens_5h={agent.tokens_5h} auto_pct={agent.quota_used_pct} />
+  <QuotaBar tokens_5h={agent.tokens_5h} auto_pct={agent.quota_used_pct} weekly_pct={agent.quota_used_pct_weekly} />
 
   {#if agent.kind === "claude"}
     <div class="sync-row">

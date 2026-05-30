@@ -37,6 +37,7 @@ fn hash_snapshot(s: &Snapshot) -> u64 {
         a.tokens_5h.total().hash(&mut h);
         a.quota_limit.hash(&mut h);
         a.quota_used_pct.map(|p| p.to_bits()).hash(&mut h);
+        a.quota_used_pct_weekly.map(|p| p.to_bits()).hash(&mut h);
         a.projects.len().hash(&mut h);
         for p in &a.projects {
             p.path.hash(&mut h);
@@ -58,7 +59,9 @@ mod tests {
         AgentState {
             kind: AgentKind::Claude, rate_tok_per_sec: rate,
             tokens_5h: TokenCounts::default(), quota_limit: None,
-            quota_reset_at: None, quota_used_pct: None, projects: vec![], triggered_by: None,
+            quota_reset_at: None, quota_used_pct: None,
+            quota_reset_at_weekly: None, quota_used_pct_weekly: None,
+            projects: vec![], triggered_by: None,
         }
     }
 

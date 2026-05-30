@@ -76,8 +76,14 @@ impl Aggregator {
             let tokens_5h = bucket.rotating.sum_5h(clock);
             // Anthropic 5h 롤링 윈도우 시작점(anchor) + 5h. trailing cutoff가 아니라 실제 윈도우
             // 첫 메시지를 anchor로 잡아 연속사용(>5h)/유휴갭/연속윈도우를 올바르게 처리한다.
-            let quota_reset_at = current_window_anchor(&mut bucket.event_times, now)
-                .map(|a| a + QUOTA_WINDOW);
+            // 첫-메시지 앵커+5h 추정은 Claude 폴백용. Codex는 실제 rate_limits를 lib.rs 틱이
+            // 주입하므로 여기선 None으로 둬 가짜 카운트다운을 막는다. (event_times prune은 양쪽 모두)
+            let anchor = current_window_anchor(&mut bucket.event_times, now);
+            let quota_reset_at = if kind == AgentKind::Claude {
+                anchor.map(|a| a + QUOTA_WINDOW)
+            } else {
+                None
+            };
 
             let mut projects: Vec<ProjectActivity> = bucket.projects.iter_mut().map(|(path, ps)| {
                 let elapsed = now.duration_since(ps.last_event_at).unwrap_or_default();
@@ -103,6 +109,8 @@ impl Aggregator {
                 quota_limit: None,
                 quota_reset_at,
                 quota_used_pct: None,
+                quota_reset_at_weekly: None,
+                quota_used_pct_weekly: None,
                 projects,
                 triggered_by: None,
             });

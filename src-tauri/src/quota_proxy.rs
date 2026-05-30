@@ -24,8 +24,10 @@ const UPSTREAM: &str = "https://api.anthropic.com";
 /// 프록시가 캡처한 실제 quota 상태. lib.rs 틱 루프가 읽어 스냅샷에 주입한다.
 #[derive(Default)]
 pub struct QuotaState {
-    pub used_pct: Mutex<Option<f32>>, // 0..100
+    pub used_pct: Mutex<Option<f32>>, // 0..100 (5h)
     pub reset_at: Mutex<Option<SystemTime>>,
+    pub used_pct_weekly: Mutex<Option<f32>>, // 0..100 (7d)
+    pub reset_weekly: Mutex<Option<SystemTime>>,
     pub active: Mutex<bool>, // 프록시를 통한 트래픽을 본 적 있는지
 }
 
@@ -70,6 +72,17 @@ fn observe(headers: &HeaderMap, quota: &Arc<QuotaState>) {
     if let Some(r) = reset {
         if r > 1_000_000_000.0 {
             *quota.reset_at.lock().unwrap() = Some(UNIX_EPOCH + Duration::from_secs(r as u64));
+        }
+    }
+
+    // 주간(7d) 창
+    if let Some(u) = parse_f64(headers, "anthropic-ratelimit-unified-7d-utilization") {
+        let pct = if u <= 1.0 { (u * 100.0) as f32 } else { u as f32 };
+        *quota.used_pct_weekly.lock().unwrap() = Some(pct.clamp(0.0, 100.0));
+    }
+    if let Some(r) = parse_f64(headers, "anthropic-ratelimit-unified-7d-reset") {
+        if r > 1_000_000_000.0 {
+            *quota.reset_weekly.lock().unwrap() = Some(UNIX_EPOCH + Duration::from_secs(r as u64));
         }
     }
 

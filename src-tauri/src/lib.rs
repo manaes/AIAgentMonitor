@@ -152,14 +152,15 @@ pub fn run() {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<TokenEvent>();
 
-    // quota 프록시 상태 (실제 ratelimit 헤더에서 캡처한 5h 사용률/리셋)
+    // quota 상태 — Claude: anthropic-ratelimit 헤더(프록시), Codex: rollout rate_limits
     let quota_state = Arc::new(quota_proxy::QuotaState::default());
+    let codex_quota = Arc::new(watchers::codex::CodexQuota::default());
 
     // Watchers (Claude + Codex). 둘 다 실패해도 앱은 띄움.
     let claude_root = home().join(".claude/projects");
     let _ = watchers::claude::ClaudeWatcher::spawn(claude_root, tx.clone());
     let codex_db = home().join(".codex/state_5.sqlite");
-    let _ = watchers::codex::CodexWatcher::spawn(codex_db, tx.clone());
+    let _ = watchers::codex::CodexWatcher::spawn(codex_db, tx.clone(), codex_quota.clone());
 
     // quota 프록시 spawn (포트 4319). Claude Code에 ANTHROPIC_BASE_URL 설정 시에만 트래픽이 흐른다.
     {
@@ -223,6 +224,7 @@ pub fn run() {
             let aggregator = aggregator.clone();
             let gate = gate.clone();
             let quota_state = quota_state.clone();
+            let codex_quota = codex_quota.clone();
             move |app| {
                 // Dock 아이콘 숨김 — setup 초반에 호출
                 #[cfg(target_os = "macos")]
@@ -242,6 +244,7 @@ pub fn run() {
                 let agg_for_tick = aggregator.clone();
                 let gate_for_tick = gate.clone();
                 let quota_for_tick = quota_state.clone();
+                let codex_for_tick = codex_quota.clone();
                 tauri::async_runtime::spawn(async move {
                     let clock = SystemClock;
                     let mut ticker = tokio::time::interval(Duration::from_millis(250));
@@ -250,14 +253,18 @@ pub fn run() {
                         let mut a = agg_for_tick.lock().await;
                         let mut snap = a.snapshot(&clock);
                         drop(a);
-                        // 프록시가 캡처한 실제 quota(%/리셋)를 Claude 카드에 주입 (있을 때만)
-                        let used = *quota_for_tick.used_pct.lock().unwrap();
-                        let reset = *quota_for_tick.reset_at.lock().unwrap();
-                        if used.is_some() || reset.is_some() {
-                            if let Some(c) = snap.agents.iter_mut().find(|a| a.kind == AgentKind::Claude) {
-                                if used.is_some() { c.quota_used_pct = used; }
-                                if let Some(r) = reset { c.quota_reset_at = Some(r); }
-                            }
+                        // 실제 quota 주입(있을 때만): Claude=프록시 헤더, Codex=rollout rate_limits
+                        if let Some(c) = snap.agents.iter_mut().find(|a| a.kind == AgentKind::Claude) {
+                            if let Some(u) = *quota_for_tick.used_pct.lock().unwrap() { c.quota_used_pct = Some(u); }
+                            if let Some(r) = *quota_for_tick.reset_at.lock().unwrap() { c.quota_reset_at = Some(r); }
+                            if let Some(u) = *quota_for_tick.used_pct_weekly.lock().unwrap() { c.quota_used_pct_weekly = Some(u); }
+                            if let Some(r) = *quota_for_tick.reset_weekly.lock().unwrap() { c.quota_reset_at_weekly = Some(r); }
+                        }
+                        if let Some(c) = snap.agents.iter_mut().find(|a| a.kind == AgentKind::Codex) {
+                            if let Some(u) = *codex_for_tick.used_pct_5h.lock().unwrap() { c.quota_used_pct = Some(u); }
+                            if let Some(r) = *codex_for_tick.reset_5h.lock().unwrap() { c.quota_reset_at = Some(r); }
+                            if let Some(u) = *codex_for_tick.used_pct_weekly.lock().unwrap() { c.quota_used_pct_weekly = Some(u); }
+                            if let Some(r) = *codex_for_tick.reset_weekly.lock().unwrap() { c.quota_reset_at_weekly = Some(r); }
                         }
                         let mut g = gate_for_tick.lock().await;
                         if g.should_emit(&snap, std::time::SystemTime::now()) {

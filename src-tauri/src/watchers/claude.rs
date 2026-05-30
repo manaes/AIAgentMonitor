@@ -56,7 +56,7 @@ pub fn parse_line(line: &str, project_path: &Path, fallback_session: &str) -> Re
     }))
 }
 
-fn parse_iso8601(s: &str) -> Option<SystemTime> {
+pub(crate) fn parse_iso8601(s: &str) -> Option<SystemTime> {
     let mut iter = s.splitn(2, 'T');
     let date = iter.next()?;
     let rest = iter.next()?.trim_end_matches('Z');

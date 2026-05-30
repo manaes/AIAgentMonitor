@@ -32,6 +32,8 @@ export type AgentState = {
   quota_limit: number | null;
   quota_reset_at: { secs_since_epoch: number } | null;
   quota_used_pct: number | null;
+  quota_reset_at_weekly: { secs_since_epoch: number } | null;
+  quota_used_pct_weekly: number | null;
   projects: ProjectActivity[];
   triggered_by: string | null;
 };
