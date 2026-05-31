@@ -12,7 +12,10 @@ use clock::SystemClock;
 use emitter::EmitGate;
 use scheduler::{ScheduleRule, Scheduler};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::sync::{mpsc, Mutex};
@@ -20,6 +23,15 @@ use types::{AgentKind, TokenEvent};
 
 fn home() -> PathBuf {
     dirs_next::home_dir().expect("home dir")
+}
+
+fn find_binary(name: &str, candidates: &[PathBuf]) -> String {
+    for p in candidates {
+        if p.exists() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    name.to_string()
 }
 
 fn init_tracing() {
@@ -118,18 +130,11 @@ async fn fire_trigger_now(
 // ANTHROPIC_BASE_URL은 이 자식 프로세스에만 설정되므로 사용자의 일반 Claude Code 세션은
 // 프록시를 거치지 않는다(상시 경유 footgun 회피). GUI 앱 PATH 대비 절대경로 우선.
 fn spawn_quota_ping() {
-    let bin = {
-        let p = home().join(".local/bin/claude");
-        if p.exists() {
-            p.into_os_string().into_string().unwrap_or_else(|_| "claude".to_string())
-        } else {
-            "claude".to_string()
-        }
-    };
+    let bin = find_binary("claude", &[home().join(".local/bin/claude")]);
     let r = tokio::process::Command::new(bin)
         .args(["-p", "ping"])
         .current_dir(home())
-        .env("ANTHROPIC_BASE_URL", "http://localhost:4319")
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:4319")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -137,6 +142,61 @@ fn spawn_quota_ping() {
     if let Err(e) = r {
         tracing::warn!(%e, "quota 동기화 핑 실행 실패 (claude 미발견?)");
     }
+}
+
+// Codex quota는 rollout의 token_count.rate_limits에서만 갱신된다. 사용자가 유휴 상태면
+// 새 rollout 이벤트가 없으므로, 아주 가벼운 exec를 주기적으로 실행해 서버 보고값을 새로 받는다.
+fn spawn_codex_quota_ping(running: Arc<AtomicBool>) {
+    if running.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let bin = find_binary(
+            "codex",
+            &[
+                home().join(".local/bin/codex"),
+                PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"),
+                PathBuf::from("/opt/homebrew/bin/codex"),
+                PathBuf::from("/usr/local/bin/codex"),
+            ],
+        );
+        let home_dir = home();
+        let home_arg = home_dir.to_string_lossy().into_owned();
+
+        let mut child = match tokio::process::Command::new(bin)
+            .args([
+                "exec",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "-C",
+                home_arg.as_str(),
+                "Reply exactly with the word ok and do not run commands.",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                tracing::warn!(%e, "codex quota 동기화 실행 실패 (codex 미발견?)");
+                running.store(false, Ordering::SeqCst);
+                return;
+            }
+        };
+
+        match tokio::time::timeout(Duration::from_secs(120), child.wait()).await {
+            Ok(Ok(status)) => tracing::info!(?status, "codex quota 동기화 완료"),
+            Ok(Err(e)) => tracing::warn!(%e, "codex quota 동기화 대기 실패"),
+            Err(_) => {
+                let _ = child.kill().await;
+                tracing::warn!("codex quota 동기화 timeout");
+            }
+        }
+        running.store(false, Ordering::SeqCst);
+    });
 }
 
 // 수동 동기화 (UI 버튼)
@@ -154,7 +214,9 @@ pub fn run() {
 
     // quota 상태 — Claude: anthropic-ratelimit 헤더(프록시), Codex: rollout rate_limits
     let quota_state = Arc::new(quota_proxy::QuotaState::default());
+    quota_state.load_persisted();
     let codex_quota = Arc::new(watchers::codex::CodexQuota::default());
+    let codex_quota_ping_running = Arc::new(AtomicBool::new(false));
 
     // Watchers (Claude + Codex). 둘 다 실패해도 앱은 띄움.
     let claude_root = home().join(".claude/projects");
@@ -166,9 +228,17 @@ pub fn run() {
     {
         let q = quota_state.clone();
         tauri::async_runtime::spawn(async move {
-            match quota_proxy::QuotaProxy::spawn(q).await {
-                Ok(port) => tracing::info!(port, "quota 프록시 준비"),
-                Err(e)   => tracing::warn!(%e, "quota 프록시 비활성 (포트 4319 사용 불가)"),
+            loop {
+                match quota_proxy::QuotaProxy::spawn(q.clone()).await {
+                    Ok(port) => {
+                        tracing::info!(port, "quota 프록시 준비");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "quota 프록시 바인딩 실패, 5초 뒤 재시도");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
             }
         });
     }
@@ -198,14 +268,34 @@ pub fn run() {
             }
         });
     }
+
+    // Codex는 사용자가 아무 입력을 하지 않으면 새 rate_limits 이벤트가 기록되지 않는다.
+    // 한 번이라도 Codex quota를 관측한 뒤에는 10분마다 가벼운 exec로 서버 상태를 새로 받아온다.
+    {
+        let quota = codex_quota.clone();
+        let running = codex_quota_ping_running.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            let mut ticker = tokio::time::interval(Duration::from_secs(600));
+            loop {
+                ticker.tick().await;
+                let seen_codex_quota = quota.used_pct_5h.lock().unwrap().is_some()
+                    || quota.reset_5h.lock().unwrap().is_some()
+                    || quota.used_pct_weekly.lock().unwrap().is_some()
+                    || quota.reset_weekly.lock().unwrap().is_some();
+                if seen_codex_quota {
+                    tracing::info!("codex quota 주기 동기화 핑");
+                    spawn_codex_quota_ping(running.clone());
+                }
+            }
+        });
+    }
     let gate = Arc::new(Mutex::new(EmitGate::new(Duration::from_millis(500))));
 
     // Scheduler 초기화 — tauri async_runtime 위에서 block_on
-    let scheduler = Arc::new(Mutex::new(
-        tauri::async_runtime::block_on(async {
-            Scheduler::new().await.expect("Scheduler 초기화 실패")
-        })
-    ));
+    let scheduler = Arc::new(Mutex::new(tauri::async_runtime::block_on(async {
+        Scheduler::new().await.expect("Scheduler 초기화 실패")
+    })));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -254,17 +344,36 @@ pub fn run() {
                         let mut snap = a.snapshot(&clock);
                         drop(a);
                         // 실제 quota 주입(있을 때만): Claude=프록시 헤더, Codex=rollout rate_limits
-                        if let Some(c) = snap.agents.iter_mut().find(|a| a.kind == AgentKind::Claude) {
-                            if let Some(u) = *quota_for_tick.used_pct.lock().unwrap() { c.quota_used_pct = Some(u); }
-                            if let Some(r) = *quota_for_tick.reset_at.lock().unwrap() { c.quota_reset_at = Some(r); }
-                            if let Some(u) = *quota_for_tick.used_pct_weekly.lock().unwrap() { c.quota_used_pct_weekly = Some(u); }
-                            if let Some(r) = *quota_for_tick.reset_weekly.lock().unwrap() { c.quota_reset_at_weekly = Some(r); }
+                        if let Some(c) =
+                            snap.agents.iter_mut().find(|a| a.kind == AgentKind::Claude)
+                        {
+                            if let Some(u) = *quota_for_tick.used_pct.lock().unwrap() {
+                                c.quota_used_pct = Some(u);
+                            }
+                            if let Some(r) = *quota_for_tick.reset_at.lock().unwrap() {
+                                c.quota_reset_at = Some(r);
+                            }
+                            if let Some(u) = *quota_for_tick.used_pct_weekly.lock().unwrap() {
+                                c.quota_used_pct_weekly = Some(u);
+                            }
+                            if let Some(r) = *quota_for_tick.reset_weekly.lock().unwrap() {
+                                c.quota_reset_at_weekly = Some(r);
+                            }
                         }
-                        if let Some(c) = snap.agents.iter_mut().find(|a| a.kind == AgentKind::Codex) {
-                            if let Some(u) = *codex_for_tick.used_pct_5h.lock().unwrap() { c.quota_used_pct = Some(u); }
-                            if let Some(r) = *codex_for_tick.reset_5h.lock().unwrap() { c.quota_reset_at = Some(r); }
-                            if let Some(u) = *codex_for_tick.used_pct_weekly.lock().unwrap() { c.quota_used_pct_weekly = Some(u); }
-                            if let Some(r) = *codex_for_tick.reset_weekly.lock().unwrap() { c.quota_reset_at_weekly = Some(r); }
+                        if let Some(c) = snap.agents.iter_mut().find(|a| a.kind == AgentKind::Codex)
+                        {
+                            if let Some(u) = *codex_for_tick.used_pct_5h.lock().unwrap() {
+                                c.quota_used_pct = Some(u);
+                            }
+                            if let Some(r) = *codex_for_tick.reset_5h.lock().unwrap() {
+                                c.quota_reset_at = Some(r);
+                            }
+                            if let Some(u) = *codex_for_tick.used_pct_weekly.lock().unwrap() {
+                                c.quota_used_pct_weekly = Some(u);
+                            }
+                            if let Some(r) = *codex_for_tick.reset_weekly.lock().unwrap() {
+                                c.quota_reset_at_weekly = Some(r);
+                            }
                         }
                         let mut g = gate_for_tick.lock().await;
                         if g.should_emit(&snap, std::time::SystemTime::now()) {

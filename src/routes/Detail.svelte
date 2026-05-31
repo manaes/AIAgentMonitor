@@ -52,7 +52,7 @@
 
 <style>
   .window-root { display: flex; flex-direction: column; gap: 12px; }
-  .agents { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .agents { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 8px; }
   .agents :global(.card + .card) { margin-top: 0; }
 
   .tab-bar {
@@ -80,4 +80,14 @@
     color: #c7c7cc;
   }
   .triggers { display: flex; flex-direction: column; gap: 0; }
+
+  @media (max-width: 600px) {
+    .agents {
+      grid-template-columns: 1fr;
+    }
+
+    .agents :global(.card + .card) {
+      margin-top: 0;
+    }
+  }
 </style>

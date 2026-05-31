@@ -1,6 +1,6 @@
 //! 로컬 API 프록시 (포트 4319).
 //!
-//! Claude Code의 ANTHROPIC_BASE_URL=http://localhost:4319 로 지정하면, 이 프록시가
+//! Claude Code의 ANTHROPIC_BASE_URL=http://127.0.0.1:4319 로 지정하면, 이 프록시가
 //! 모든 요청을 https://api.anthropic.com 으로 **변형 없이** 포워딩하면서 응답의
 //! `anthropic-ratelimit-unified-*` 헤더를 읽어 실제 5h 사용률/리셋을 캡처한다.
 //! - TLS는 프록시가 업스트림의 클라이언트로서 처리 → Claude Code↔localhost는 평문,
@@ -15,6 +15,8 @@ use axum::{
     response::Response,
     Router,
 };
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -29,6 +31,69 @@ pub struct QuotaState {
     pub used_pct_weekly: Mutex<Option<f32>>, // 0..100 (7d)
     pub reset_weekly: Mutex<Option<SystemTime>>,
     pub active: Mutex<bool>, // 프록시를 통한 트래픽을 본 적 있는지
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PersistedQuota {
+    used_pct: Option<f32>,
+    reset_at: Option<u64>,
+    used_pct_weekly: Option<f32>,
+    reset_weekly: Option<u64>,
+}
+
+fn persist_path() -> PathBuf {
+    dirs_next::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("ai-agent-monitor/claude-quota.json")
+}
+
+fn system_time_to_epoch(t: SystemTime) -> Option<u64> {
+    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+}
+
+fn epoch_to_system_time(secs: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(secs)
+}
+
+impl QuotaState {
+    pub fn load_persisted(&self) {
+        let path = persist_path();
+        let Ok(json) = std::fs::read_to_string(&path) else { return; };
+        let Ok(p) = serde_json::from_str::<PersistedQuota>(&json) else {
+            tracing::warn!(?path, "Claude quota 캐시 파싱 실패");
+            return;
+        };
+
+        *self.used_pct.lock().unwrap() = p.used_pct;
+        *self.reset_at.lock().unwrap() = p.reset_at.map(epoch_to_system_time);
+        *self.used_pct_weekly.lock().unwrap() = p.used_pct_weekly;
+        *self.reset_weekly.lock().unwrap() = p.reset_weekly.map(epoch_to_system_time);
+        *self.active.lock().unwrap() = p.used_pct.is_some() || p.used_pct_weekly.is_some();
+        tracing::info!(?path, "Claude quota 캐시 로드");
+    }
+
+    fn save_persisted(&self) {
+        let path = persist_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let p = PersistedQuota {
+            used_pct: *self.used_pct.lock().unwrap(),
+            reset_at: self.reset_at.lock().unwrap().and_then(system_time_to_epoch),
+            used_pct_weekly: *self.used_pct_weekly.lock().unwrap(),
+            reset_weekly: self.reset_weekly.lock().unwrap().and_then(system_time_to_epoch),
+        };
+
+        match serde_json::to_string_pretty(&p) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    tracing::warn!(%e, ?path, "Claude quota 캐시 저장 실패");
+                }
+            }
+            Err(e) => tracing::warn!(%e, "Claude quota 캐시 직렬화 실패"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -88,6 +153,7 @@ fn observe(headers: &HeaderMap, quota: &Arc<QuotaState>) {
 
     if saw_any {
         *quota.active.lock().unwrap() = true;
+        quota.save_persisted();
     }
 }
 
@@ -162,7 +228,7 @@ impl QuotaProxy {
                 let port = listener.local_addr().map(|a| a.port()).unwrap_or(4319);
                 tracing::info!(
                     port,
-                    "quota 프록시 시작 (Claude Code에 ANTHROPIC_BASE_URL=http://localhost:4319 설정 시 사용)"
+                    "quota 프록시 시작 (Claude Code에 ANTHROPIC_BASE_URL=http://127.0.0.1:4319 설정 시 사용)"
                 );
                 tokio::spawn(async move {
                     if let Err(e) = axum::serve(listener, app).await {
