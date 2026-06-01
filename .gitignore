@@ -1,5 +1,19 @@
 .DS_Store
 node_modules
+
+# 로컬 DB / 벡터 인덱스 파일
+*.db
+*.db-shm
+*.db-wal
+*.rvf
+*.rvf.lock
+ruvector.db
+agentdb.rvf
+agentdb.rvf.lock
+
+# 빌드 도구 캐시
+.claude-flow/
+.superpowers/
 /dist
 /.svelte-kit
 /package
