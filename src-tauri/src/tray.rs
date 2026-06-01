@@ -11,6 +11,16 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .tray_by_id("main")
         .ok_or_else(|| tauri::Error::AssetNotFound("tray id 'main' not found".into()))?;
 
+    // Windows: .ico 파일 사용 + 템플릿 비활성화 (32x32.png는 흰색 실루엣이 되어 안 보임)
+    #[cfg(target_os = "windows")]
+    {
+        tray.set_icon(Some(tauri::include_image!("icons/icon.ico")))?;
+        tray.set_icon_as_template(false)?;
+    }
+    // macOS: 템플릿 모드 유지 (다크/라이트 메뉴바 자동 대응)
+    #[cfg(target_os = "macos")]
+    tray.set_icon_as_template(true)?;
+
     let detail = MenuItem::with_id(app, "detail", "Open Detail Window…", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "logs", "Open Log Folder", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
