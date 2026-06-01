@@ -32,11 +32,6 @@
         "resizable": true
       }
     ],
-    "trayIcon": {
-      "id": "main",
-      "iconPath": "icons/32x32.png",
-      "iconAsTemplate": false
-    },
     "macOSPrivateApi": true,
     "security": {
       "csp": null
