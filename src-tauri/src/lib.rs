@@ -337,6 +337,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        // 중복 실행 방지: 두 번째 실행 시 기존 창을 앞으로 가져오고 종료
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            use tauri::Manager;
+            tracing::info!("두 번째 인스턴스 감지 — 기존 창 포커스");
+            if let Some(w) = app.get_webview_window("detail") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .manage(scheduler)
         .invoke_handler(tauri::generate_handler![
             open_detail_window,
@@ -358,6 +367,23 @@ pub fn run() {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
                 tray::install(app.handle())?;
+
+                // 창 X 버튼 클릭 → 숨김(hide). 트레이 → Quit로만 완전 종료.
+                // Windows에서 X 누르면 프로세스가 죽는 기본 동작을 방지한다.
+                {
+                    use tauri::Manager;
+                    for label in ["detail", "popover"] {
+                        if let Some(win) = app.handle().get_webview_window(label) {
+                            let win_clone = win.clone();
+                            win.on_window_event(move |event| {
+                                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                                    api.prevent_close();
+                                    let _ = win_clone.hide();
+                                }
+                            });
+                        }
+                    }
+                }
 
                 // Windows: 시작 시 Detail 창 한 번 표시 (트레이 앱임을 인지할 수 있도록)
                 #[cfg(target_os = "windows")]
