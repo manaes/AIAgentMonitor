@@ -1,94 +1,155 @@
 # AI Agent Monitor
 
-Claude Code와 Codex의 토큰 사용을 macOS menubar에서 실시간으로 보여주는 Tauri 앱 (v1).
+> Claude Code와 Codex의 토큰 사용량을 macOS 상태 바에서 실시간으로 모니터링하는 네이티브 앱
 
-## Build
+[![Release](https://img.shields.io/github/v/release/manaes/AIAgentMonitor)](https://github.com/manaes/AIAgentMonitor/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)](#설치)
+[![License](https://img.shields.io/badge/license-MIT-blue)](#)
+
+---
+
+## 스크린샷
+
+| Detail 창 — 세션 목록 | Detail 창 — 사용량 |
+|---|---|
+| ![Detail Sessions](docs/screenshots/detail-sessions.png) | ![Detail Usage](docs/screenshots/detail-usage.png) |
+
+> 📸 *스크린샷은 실제 사용 화면입니다. OTEL 연결 시 정확한 실시간 수치를 표시합니다.*
+
+---
+
+## 주요 기능
+
+### 📊 실시간 토큰 모니터링
+- **tok/s** — 현재 AI 응답 속도 (10초 EMA)
+- **5h 사용량 바** — 요금제 한도 대비 현재 사용량 (%)
+- **리셋 카운트다운** — "약 X시간 Y분 Z초 남음" 실시간 표시
+- **활성 세션 목록** — 프로젝트별 / 모델별 분리 (Active/Idle/Dormant)
+
+### 🎯 OTEL 정밀 모드
+Claude Code의 OpenTelemetry 텔레메트리를 직접 수신해서 **Anthropic 서버 계산 기준**의 정확한 토큰 수를 표시합니다.
+
+```json
+// ~/.claude/settings.json 에 추가하면 모든 세션에 자동 적용
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+    "OTEL_METRIC_EXPORT_INTERVAL": "10000"
+  }
+}
+```
+
+### ⏰ Anchor Trigger (v1.1)
+정해진 시각에 자동으로 가벼운 프롬프트를 발사해 5h quota window의 reset 타이밍을 생활 패턴(점심/퇴근)에 고정합니다.
+
+예) 08:00에 ping → 13:00/18:00에 reset → 점심 직후·퇴근 직후 새 quota
+
+---
+
+## 설치
+
+### 다운로드 (권장)
+
+[**최신 릴리즈 다운로드 →**](https://github.com/manaes/AIAgentMonitor/releases/latest)
+
+| 플랫폼 | 파일 | 비고 |
+|---|---|---|
+| macOS Apple Silicon | `AI.Agent.Monitor_*_aarch64.dmg` | M1/M2/M3/M4 |
+| macOS Intel | `AI.Agent.Monitor_*_x64.dmg` | Intel Mac |
+| Windows | `AI.Agent.Monitor_*_x64_en-US.msi` | Windows 10/11 |
+
+**macOS 첫 실행 시** Gatekeeper 경고가 뜨면:
+```bash
+xattr -cr "/Applications/AI Agent Monitor.app"
+```
+또는 시스템 설정 → 개인 정보 보호 및 보안 → 앱 허용
+
+---
+
+## 사용 방법
+
+### 기본 사용
+
+1. 앱 실행 → 상단 메뉴바에 아이콘 표시
+2. **아이콘 클릭** → Detail 창 열기 (Sessions / Triggers 탭)
+3. **우클릭** → Open Log Folder / Quit
+
+### 요금제 한도 설정
+
+Detail 창 → 에이전트 카드 → 플랜 드롭다운에서 선택:
+
+| 플랜 | input+output 한도 |
+|---|---|
+| Free | 30,000 tok |
+| Pro | 300,000 tok |
+| Max (5×) | 1,500,000 tok |
+| Max (20×) | 6,000,000 tok |
+| 직접 입력 | 사용자 지정 |
+
+### OTEL 정밀 모드 설정
+
+1. `~/.claude/settings.json`에 위 env 블록 추가
+2. 새 Claude 세션 시작
+3. Detail 창 상단 **"◎ OTEL 대기 중"** → 10초 내 **"● OTEL 수신 중"** 으로 변경
+
+### Anchor Trigger 사용
+
+1. Detail 창 → **Triggers** 탭
+2. **새 트리거 추가**: 에이전트 / 실행 시각(HH:MM) / 작업 디렉토리 / 프롬프트 입력
+3. 📁 버튼으로 폴더 선택 가능
+4. **▶ 지금 실행** 버튼으로 즉시 테스트
+
+---
+
+## 데이터 소스
+
+| 소스 | 접근 방식 | 데이터 |
+|---|---|---|
+| Claude Code | `~/.claude/projects/*/*.jsonl` FSEvents tail | 토큰 (in/out/cache), 세션, 모델 |
+| Claude Code (OTEL) | `localhost:4318` HTTP JSON 수신 | 정확한 tok/s, 비용($) |
+| Codex | `~/.codex/state_5.sqlite` 2s polling | 누적 토큰 delta |
+
+모든 접근은 **read-only** 또는 로컬 HTTP 수신이며 외부 서버로 데이터가 전송되지 않습니다.
+
+---
+
+## 아키텍처
+
+```
+DATA SOURCES (read-only)
+Claude jsonl ──FSEvents──┐
+Claude OTEL ──HTTP 4318──┤──▶ aggregator ──▶ emit_gate ──▶ Tauri "snapshot" ──▶ Svelte 5 UI
+Codex sqlite ──2s poll───┘    (ring + 5h)    (500ms)
+```
+
+**Tech Stack**: Tauri 2 · Rust (tokio, notify, rusqlite, axum) · Svelte 5 · TypeScript
+
+---
+
+## 개발
 
 ```bash
+# 의존성 설치
 pnpm install
-pnpm tauri dev    # 개발용 (GUI 실행)
-pnpm tauri build  # 릴리즈 빌드 → target/release/bundle/dmg/
+
+# 개발 서버 (hot reload)
+pnpm tauri dev
+
+# 릴리즈 빌드
+pnpm tauri build
 ```
 
-> 릴리즈·배포·코드서명(공증) 상세는 [docs/RELEASE.md](docs/RELEASE.md) 참고.
+릴리즈 배포·코드 서명 상세: [docs/RELEASE.md](docs/RELEASE.md)
 
-## 데이터 소스 (read-only)
+---
 
-- **Claude Code**: `~/.claude/projects/<인코딩된 프로젝트 경로>/<session-uuid>.jsonl`
-  - 메시지 단위 `usage` 필드에서 토큰 추출 (input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens)
-  - FSEvents (`notify` crate) 구독 + offset 캐시로 새 줄만 tail
-- **Codex**: `~/.codex/state_5.sqlite` → `threads` 테이블
-  - read-only WAL connection, 2초 폴링
-  - `tokens_used`는 세션별 **누적값** → watcher가 delta 추출
+## 알려진 한계
 
-## 로그
-
-- 위치: `~/Library/Logs/AIMonitor/app.log.*` (일 단위 회전)
-- 트레이 우클릭 → "Open Log Folder" 로 바로 열기
-
-## UI
-
-- **Menubar 아이콘 (좌클릭)**: 340px popover. 에이전트별 Big-Number 카드 (속도 + quota bar + 모델·프로젝트).
-- **Menubar 아이콘 (우클릭)**: Open Detail Window / Open Log Folder / Quit AI Monitor
-- **Detail 윈도우**: AgentCard 2-column grid + Active sessions 리스트 (프로젝트별, 최근 활동 순)
-
-## 알려진 한계 (v1)
-
-- **Quota 한도값**: Claude API는 공식 quota endpoint가 없어 현재는 한도 미표시 (사용량만). 사용자가 plan limit를 알면 v1.x에서 설정창으로 입력하는 방향 검토.
-- **Codex 토큰 분리 없음**: `state_5.sqlite.threads.tokens_used`는 누적 합계만 있어 input/output/cache 구분 불가. UI에서는 `tokens_in`에 합쳐 표시.
-- **Antigravity 미지원** (v2 후보).
-- **Anchor Trigger 미구현** (v1.1 ─ 아래 로드맵 참고).
-- **알림 없음** (조용한 관찰용).
-- **자체 데이터베이스 없음**: 메모리 ring buffer + 5h rotating bucket. 앱 재시작 시 jsonl/sqlite 다시 읽어 5h 복원.
-
-## v1.1 로드맵 — Anchor Trigger
-
-5h quota window의 reset 타이밍이 사용자의 생활 패턴(점심·퇴근)과 어긋날 때, 특정 시각에 자동으로 가벼운 prompt를 발사해서 window 시작점을 이동시키는 기능.
-
-예: 9-14-19 reset이 자연스럽지 않다면 08:00에 ping 한 번 → 13-18로 anchor가 이동.
-
-구현 예정:
-- `scheduler` 모듈 (`tokio_cron_scheduler` 또는 `cron` crate)
-- 룰 CRUD (agent / cron 시각 / working_dir / prompt template)
-- Claude/Codex CLI 자동 호출 — 트리거 결과 토큰은 기존 watcher가 자동 캡처
-- Detail window에 "Triggers" 탭 추가
-
-스펙 자리: `docs/superpowers/specs/2026-05-28-ai-agent-monitor-design.md` §10
-데이터 모델 자리: `AgentState.triggered_by: Option<String>`은 v1부터 이미 비워둠
-
-## 24h 스모크 체크리스트 (v1 출시 전)
-
-배포 전 본인이 직접 24h 실사용해서 다음을 확인:
-
-- [ ] menubar 아이콘이 표시되고, 좌클릭 popover toggle이 정상
-- [ ] popover에 두 agent 카드가 표시되고 tok/s 값이 사용에 따라 변동
-- [ ] Detail 창 "More details →" 진입, 세션 리스트가 최근 활동 순으로 정렬
-- [ ] 모델·프로젝트 명이 정확히 표시
-- [ ] 활성 → idle → dormant 상태 전이 (60s, 5min 경계 확인)
-- [ ] Claude 새 세션 시작 시 자동 detection (jsonl 새 파일 생성)
-- [ ] Codex 새 사용 시 2초 이내 delta 반영
-- [ ] 앱 비정상 종료 후 재시작 — 5h 데이터 복원
-- [ ] 24h 동안 메모리 사용량 안정 (목표 50MB 이하)
-- [ ] 우클릭 메뉴: Open Log Folder, Open Detail Window, Quit 정상
-- [ ] 로그 파일에 watcher start / poll error 정도만 보이고 panic 없음
-
-## 아키텍처 요약
-
-```
-DATA SOURCES (read-only)     RUST BACKEND (Tauri)                 FRONTEND (Svelte 5)
-Claude jsonl  ──FSEvents──▶  claude_watcher                       Menubar popover
-                              │
-Codex sqlite  ──2s poll───▶  codex_watcher                        
-                              │
-                              ▼
-                             aggregator (5분 ring + 5h rotating)   Detail window
-                              │
-                              ▼
-                             emit_gate (500ms throttle + hash)
-                              │
-                              ▼
-                             Tauri "snapshot" event ─────────────▶ store (Svelte 5 $state)
-```
-
-자세한 디자인: `docs/superpowers/specs/2026-05-28-ai-agent-monitor-design.md`
-구현 계획: `docs/superpowers/plans/2026-05-28-ai-agent-monitor.md`
+- Claude quota 한도: Anthropic 공식 API 미제공 → 요금제 선택 또는 직접 입력 필요
+- Codex: `tokens_used` 누적값만 제공 → in/out 분리 불가
+- OTEL 미설정 시: jsonl 파싱 기반 근사치 사용
+- 앱 미실행 중 Trigger 동작 안 함 (LaunchAgent 미지원)
