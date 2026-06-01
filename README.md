@@ -10,11 +10,11 @@
 
 ## 스크린샷
 
-| Detail 창 — 세션 목록 | Detail 창 — 사용량 |
+| 상단바 팝업 | 세부 대시보드 |
 |---|---|
-| ![Detail Sessions](docs/screenshots/detail-sessions.png) | ![Detail Usage](docs/screenshots/detail-usage.png) |
+| ![Floating](docs/screenshots/floating.png) | ![Detail](docs/screenshots/detail.png) |
 
-> 📸 *스크린샷은 실제 사용 화면입니다. OTEL 연결 시 정확한 실시간 수치를 표시합니다.*
+> 📸 *실제 사용 화면. OTEL 연결 시 정확한 실시간 수치를 표시합니다.*
 
 ---
 
