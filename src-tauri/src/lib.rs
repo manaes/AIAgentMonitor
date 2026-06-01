@@ -247,6 +247,13 @@ pub fn run() {
 
     let aggregator = Arc::new(Mutex::new(Aggregator::new()));
 
+    // 앱 시작 시 즉시 한 번 핑 (persisted 캐시가 낡았을 수 있으므로)
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await; // startup replay 완료 대기
+        tracing::info!("시작 시 quota 초기 핑");
+        spawn_quota_ping();
+    });
+
     // 주기적 자동 동기화: 최근(15분 내) 활동이 있으면 10분마다 프록시 핑으로 사용량을 보정.
     // 핑만 프록시를 거치므로 일반 세션엔 영향 없고, 유휴 시엔 quota 낭비를 막기 위해 생략한다.
     {
