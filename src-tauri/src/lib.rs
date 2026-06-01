@@ -329,6 +329,16 @@ pub fn run() {
 
                 tray::install(app.handle())?;
 
+                // Windows: 시작 시 Detail 창 한 번 표시 (트레이 앱임을 인지할 수 있도록)
+                #[cfg(target_os = "windows")]
+                {
+                    use tauri::Manager;
+                    if let Some(w) = app.get_webview_window("detail") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+
                 let app_handle = app.handle().clone();
                 let agg_for_ingest = aggregator.clone();
                 tauri::async_runtime::spawn(async move {
