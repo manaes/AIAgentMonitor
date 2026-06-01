@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            artifact: dmg
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            artifact: dmg
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: msi
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install frontend deps
+        run: pnpm install
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'AI Agent Monitor ${{ github.ref_name }}'
+          releaseBody: |
+            ## AI Agent Monitor ${{ github.ref_name }}
+
+            Claude Code와 Codex의 토큰 사용량을 macOS/Windows 상단 바에서 실시간으로 모니터링합니다.
+
+            ### 설치 방법
+            - **macOS (Apple Silicon)**: `AI Agent Monitor_*_aarch64.dmg` 다운로드
+            - **macOS (Intel)**: `AI Agent Monitor_*_x64.dmg` 다운로드
+            - **Windows**: `AI Agent Monitor_*_x64_en-US.msi` 다운로드
+
+            ### OTEL 설정 (선택)
+            Claude Code의 정확한 토큰 수신을 위해 `~/.claude/settings.json`에 추가:
+            ```json
+            {
+              "env": {
+                "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+                "OTEL_METRICS_EXPORTER": "otlp",
+                "OTEL_LOGS_EXPORTER": "otlp",
+                "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+                "OTEL_METRIC_EXPORT_INTERVAL": "10000"
+              }
+            }
+            ```
+          releaseDraft: false
+          prerelease: false
+          args: --target ${{ matrix.target }}
