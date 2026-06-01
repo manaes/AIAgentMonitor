@@ -34,9 +34,20 @@ fn find_binary(name: &str, candidates: &[PathBuf]) -> String {
     name.to_string()
 }
 
+fn log_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return home().join("Library/Logs/AIMonitor");
+    #[cfg(target_os = "windows")]
+    return dirs_next::data_local_dir()
+        .unwrap_or_else(|| home().join("AppData\\Local"))
+        .join("AIMonitor\\logs");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    return home().join(".local/share/aimonitor/logs");
+}
+
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
-    let log_dir = home().join("Library/Logs/AIMonitor");
+    let log_dir = log_dir();
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         eprintln!("[tracing] 로그 디렉토리 생성 실패, 파일 로깅 건너뜀: {e}");
         return;
@@ -130,15 +141,33 @@ async fn fire_trigger_now(
 // ANTHROPIC_BASE_URL은 이 자식 프로세스에만 설정되므로 사용자의 일반 Claude Code 세션은
 // 프록시를 거치지 않는다(상시 경유 footgun 회피). GUI 앱 PATH 대비 절대경로 우선.
 fn spawn_quota_ping() {
-    let bin = find_binary("claude", &[home().join(".local/bin/claude")]);
-    let r = tokio::process::Command::new(bin)
-        .args(["-p", "ping"])
+    // Windows: claude는 .cmd 래퍼이므로 cmd /C 경유 필요
+    // macOS/Linux: 절대경로 우선, 없으면 PATH에서 검색
+    #[cfg(target_os = "windows")]
+    let r = tokio::process::Command::new("cmd")
+        .args(["/C", "claude", "-p", "ping"])
         .current_dir(home())
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:4319")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+    #[cfg(not(target_os = "windows"))]
+    let r = {
+        let bin = find_binary("claude", &[
+            home().join(".local/bin/claude"),
+            PathBuf::from("/opt/homebrew/bin/claude"),
+            PathBuf::from("/usr/local/bin/claude"),
+        ]);
+        tokio::process::Command::new(bin)
+            .args(["-p", "ping"])
+            .current_dir(home())
+            .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:4319")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    };
     if let Err(e) = r {
         tracing::warn!(%e, "quota 동기화 핑 실행 실패 (claude 미발견?)");
     }
@@ -219,6 +248,7 @@ pub fn run() {
     let codex_quota_ping_running = Arc::new(AtomicBool::new(false));
 
     // Watchers (Claude + Codex). 둘 다 실패해도 앱은 띄움.
+    // Claude Code는 macOS/Windows 모두 ~/.claude/projects 사용 (home()이 OS별 홈 경로 반환)
     let claude_root = home().join(".claude/projects");
     let _ = watchers::claude::ClaudeWatcher::spawn(claude_root, tx.clone());
     let codex_db = home().join(".codex/state_5.sqlite");
