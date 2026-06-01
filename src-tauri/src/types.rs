@@ -33,6 +33,7 @@ impl TokenCounts {
 pub struct TokenEvent {
     pub agent: AgentKind,
     pub project_path: PathBuf,
+    #[allow(dead_code)]
     pub session_id: String,
     pub model: String,
     pub ts: SystemTime,

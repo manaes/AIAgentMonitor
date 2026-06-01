@@ -23,8 +23,10 @@ impl EventRing {
         self.prune(now);
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize { self.events.len() }
 
+    #[allow(dead_code)]
     pub fn events(&self) -> impl Iterator<Item = &TokenEvent> { self.events.iter() }
 
     pub fn rate_tok_per_sec<C: Clock>(&mut self, clock: &C) -> f32 {
