@@ -91,16 +91,83 @@ xattr -cr "/Applications/AI Agent Monitor.app"
 
 ---
 
-## 아키텍처
+## 동작 원리 (아키텍처)
+
+**Tech Stack**: Tauri 2 · Rust (tokio, notify, rusqlite, axum, tokio-cron-scheduler) · Svelte 5 · TypeScript
+
+### 시스템 토폴로지
+
+하나의 Tauri 2 프로세스 안에서 **Rust 백엔드(데이터 수집·집계)** 와 **Svelte 5 프론트엔드(렌더)** 가 IPC 로 연결된다. 창은 `popover`(상태 바 팝업)·`detail`(대시보드) 둘이며, 같은 `snapshot` 이벤트를 함께 구독한다.
 
 ```
-DATA SOURCES (read-only)
-Claude jsonl ──FSEvents──┐
-Claude proxy ──포트 4319──┤──▶ aggregator ──▶ emit_gate ──▶ Tauri "snapshot" ──▶ UI
-Codex rollout ──2s poll──┘    (ring + 5h)    (500ms)
+┌───────────────────────── Tauri 2 프로세스 ─────────────────────────┐
+│                                                                    │
+│  Rust 백엔드 (src-tauri/src)            Svelte 프론트 (src)         │
+│  ┌──────────────────────────┐          ┌────────────────────────┐ │
+│  │ 수집 계층                │          │ App.svelte (라우터)    │ │
+│  │  watchers/claude.rs      │          │  ├ Popover / Detail    │ │
+│  │  watchers/codex.rs       │          │  ├ AgentCard·QuotaBar  │ │
+│  │  quota_proxy.rs (:4319)  │          │  ├ SessionList         │ │
+│  ├──────────────────────────┤  IPC     │  └ TriggerList·AddForm │ │
+│  │ 집계 계층 aggregator/    │ ───────▶ │ lib/store.svelte.ts    │ │
+│  │  ring(EMA) + rotating(5h)│ snapshot │  └ lib/tauri.ts (invoke│ │
+│  ├──────────────────────────┤ (250ms)  │     /listen)           │ │
+│  │ emitter.rs (500ms gate)  │ ◀─────── │ lib/format.ts          │ │
+│  ├──────────────────────────┤ commands └────────────────────────┘ │
+│  │ scheduler/ (cron 트리거) │                                      │
+│  │ tray.rs · clock.rs       │                                      │
+│  └──────────────────────────┘                                      │
+└────────────────────────────────────────────────────────────────────┘
+
+데이터 소스 (read-only)
+  Claude:  ~/.claude/projects/*/*.jsonl       (FSEvents tail-follow)
+  Claude:  Anthropic 응답 헤더                (로컬 프록시 :4319 가로채기)
+  Codex:   ~/.codex/state_5.sqlite + rollout  (2초 폴링)
 ```
 
-**Tech Stack**: Tauri 2 · Rust (tokio, notify, rusqlite, axum, reqwest) · Svelte 5 · TypeScript
+### 데이터 흐름 (단방향)
+
+```
+[수집]                          [집계]              [송출]         [렌더]
+Claude jsonl ─FSEvents─┐
+                       │  TokenEvent
+Codex rollout ─2s poll─┼──(mpsc)──▶ Aggregator ──250ms tick──▶ EmitGate ──emit──▶ store.snap ──▶ UI
+                       │            ring(10s EMA)              (500ms·해시      "snapshot"      재렌더
+Claude 응답 헤더 ──────┘            rotating(60×5분=5h)         변경시만)
+   (proxy :4319 → QuotaState 주입)
+```
+
+1. **수집** — `ClaudeWatcher` 는 FSEvents 로 jsonl 을 tail-follow 하며 `assistant` 메시지의 usage·model·timestamp 를 `TokenEvent` 로, `CodexWatcher` 는 2초마다 `state_5.sqlite`(read-only WAL)에서 활성 스레드를 찾아 rollout JSONL 의 `token_count`·`rate_limits` 를 읽어 같은 채널로 보낸다. `QuotaProxy` 는 `127.0.0.1:4319` 에서 Claude 요청을 그대로 Anthropic 으로 포워딩하면서 `anthropic-ratelimit-unified-5h/7d-*` 헤더만 관찰해 `QuotaState` 로 적재한다.
+2. **집계** — `Aggregator` 가 `TokenEvent` 를 `EventRing`(10초 EMA로 tok/s)과 `RotatingBucket`(60×5분 = 5h 합산)에 누적하고, 프로젝트별 활동 상태(Active<60s / Idle<300s / Dormant)를 갱신한다.
+3. **송출** — 250ms 틱마다 `snapshot()` 으로 `Snapshot{ emitted_at, agents[] }` 를 만들고 실측 quota 를 주입한 뒤, `EmitGate` 가 **내용 해시가 바뀌었고 직전 송출에서 500ms 이상 지났을 때만** `app.emit("snapshot")` 한다(불필요한 재렌더 차단).
+4. **렌더** — 프론트는 `store.init()` 에서 `listen("snapshot")` 으로 구독하고, 수신 시 `store.snap` 갱신 → Svelte 5 룬 반응성으로 AgentCard/QuotaBar/SessionList 가 재렌더된다. 별도 1초 타이머로 카운트다운·stale 표시를 갱신한다.
+
+### IPC 경계 (의존 방향)
+
+프론트는 `lib/tauri.ts` 한 곳으로만 백엔드에 의존한다. 백엔드→프론트는 **이벤트(`snapshot`) 단방향 push**, 프론트→백엔드는 **command invoke** 뿐이다.
+
+| 방향 | 종류 | 시그니처 |
+|---|---|---|
+| 백→프 | event | `snapshot` (250ms 생성·500ms 게이트) |
+| 프→백 | command | `open_detail_window` · `sync_quota` |
+| 프→백 | command | `list_trigger_rules` · `add_trigger_rule` · `remove_trigger_rule` · `toggle_trigger_rule` · `fire_trigger_now` |
+
+### Anchor Trigger 실행 경로
+
+`scheduler/mod.rs` 가 `tokio_cron_scheduler` 로 `"0 MM HH * * *"`(매일 HH:MM) 잡을 등록하고 규칙을 `~/.config/ai-agent-monitor/triggers.json` 에 영속화한다. 발화 시 `scheduler/runner.rs` 가 작업 디렉토리에서 에이전트 바이너리를 spawn 후 detach 한다.
+
+- Claude → `claude -p <prompt>` (요청이 프록시 :4319 를 거치며 quota 헤더가 갱신됨)
+- Codex → `codex exec --skip-git-repo-check -C <wd> <prompt>`
+
+### 영속화 / 로그
+
+| 대상 | 위치 | 시점 |
+|---|---|---|
+| Claude quota 캐시 | `~/.config/ai-agent-monitor/claude-quota.json` | quota 헤더 관찰 시 |
+| 트리거 규칙 | `~/.config/ai-agent-monitor/triggers.json` | 규칙 추가/삭제/토글 시 |
+| 로그 | `~/Library/Logs/AIMonitor/app.log` (macOS) | 상시(tracing) |
+
+> Aggregator 의 ring/rotating 과 Codex quota 는 인메모리라 앱 재시작 시 초기화된다(Claude quota 는 위 캐시에서 콜드스타트 복원).
 
 ---
 
