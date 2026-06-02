@@ -119,14 +119,14 @@ graph TD
         end
     end
 
-    CJ -->|FSEvents tail| Watch
-    CH -->|프록시 :4319| Watch
-    CX -->|2초 폴링| Watch
-    Watch -->|TokenEvent (mpsc)| Agg
-    Agg -->|250ms tick| Emit
-    Emit -->|emit "snapshot"| Lib
+    CJ -->|"FSEvents tail"| Watch
+    CH -->|"프록시 :4319"| Watch
+    CX -->|"2초 폴링"| Watch
+    Watch -->|"TokenEvent (mpsc)"| Agg
+    Agg -->|"250ms tick"| Emit
+    Emit -->|"emit snapshot"| Lib
     Lib --> App
-    App -->|command invoke| Sched
+    App -->|"command invoke"| Sched
 ```
 
 ### 2. 데이터 흐름 (단방향)
@@ -146,14 +146,14 @@ flowchart LR
     Store["store.snap<br/>(Svelte 5 룬)"]
     UI["AgentCard · QuotaBar<br/>SessionList 재렌더"]
 
-    CW -->|TokenEvent| Ring
-    XW -->|TokenEvent| Ring
+    CW -->|"TokenEvent"| Ring
+    XW -->|"TokenEvent"| Ring
     CW --> Rot
     XW --> Rot
-    QP -.실측 quota 주입.-> Gate
-    Ring -->|250ms snapshot| Gate
+    QP -.->|"실측 quota 주입"| Gate
+    Ring -->|"250ms snapshot"| Gate
     Rot --> Gate
-    Gate -->|emit "snapshot"| Store
+    Gate -->|"emit snapshot"| Store
     Store --> UI
 ```
 
@@ -192,9 +192,9 @@ sequenceDiagram
     Note over Cron: 매일 HH:MM 발화
     Cron->>Run: run_trigger(agent, prompt, wd)
     alt Claude
-        Run->>Agent: claude -p <prompt> (프록시 :4319 경유 → quota 헤더 갱신)
+        Run->>Agent: claude -p [prompt] (프록시 :4319 경유 → quota 헤더 갱신)
     else Codex
-        Run->>Agent: codex exec --skip-git-repo-check -C <wd> <prompt>
+        Run->>Agent: codex exec --skip-git-repo-check -C [wd] [prompt]
     end
     Note over Run,Agent: spawn 후 detach (결과 수집 안 함)
 ```
