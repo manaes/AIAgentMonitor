@@ -234,3 +234,13 @@ pnpm tauri build
 
 - 앱이 실행 중일 때만 동기화 및 Trigger가 동작합니다.
 - Codex: rollout JSONL이 기록되는 활성 세션에서만 사용률이 갱신됩니다.
+
+---
+
+## 부록 (Appendix)
+
+### Codex SQLite 스키마
+
+`CodexWatcher`(`src-tauri/src/watchers/codex.rs`)는 공식 문서가 없는 `~/.codex/state_5.sqlite` 의 `threads` 테이블을 **read-only** 로 직접 쿼리해 활성 세션의 `rollout_path` 를 찾는다. 이 스키마는 Codex 내부 구현이라 **버전에 따라 바뀔 수 있는 외부 의존성**이므로, 탐색 시점의 테이블/컬럼 구조를 [`docs/codex-schema.md`](docs/codex-schema.md) 에 기록해 둔다.
+
+> 스키마가 깨지면(컬럼명 변경 등) Codex 사용률이 갱신되지 않으므로, codex.rs 의 쿼리(`SELECT id, model, cwd, rollout_path FROM threads WHERE …`)를 손볼 때 이 문서를 함께 갱신한다.
