@@ -110,6 +110,10 @@ fn parse_f64(h: &HeaderMap, name: &str) -> Option<f64> {
     header_str(h, name)?.parse().ok()
 }
 
+fn ratio_to_pct(u: f64) -> f32 {
+    (u * 100.0) as f32
+}
+
 /// 응답 헤더에서 5h 사용률/리셋을 추출. 헤더명 후보를 방어적으로 시도하고 전체를 로깅한다.
 fn observe(headers: &HeaderMap, quota: &Arc<QuotaState>) {
     let mut saw_any = false;
@@ -121,12 +125,12 @@ fn observe(headers: &HeaderMap, quota: &Arc<QuotaState>) {
         }
     }
 
-    // utilization: 0..1 또는 0..100 — 후보 헤더명 순차 시도
+    // utilization은 비율(예: 0.98=98%, 1.01=101%)로 온다. 1.0을 넘는 순간도
+    // 100% 초과 사용량이므로 반드시 100을 곱해서 퍼센트로 변환한다.
     let util = parse_f64(headers, "anthropic-ratelimit-unified-5h-utilization")
-        .or_else(|| parse_f64(headers, "anthropic-ratelimit-unified-utilization"))
-        .or_else(|| parse_f64(headers, "anthropic-ratelimit-unified-5h-used"));
+        .or_else(|| parse_f64(headers, "anthropic-ratelimit-unified-utilization"));
     if let Some(u) = util {
-        let pct = if u <= 1.0 { (u * 100.0) as f32 } else { u as f32 };
+        let pct = ratio_to_pct(u);
         *quota.used_pct.lock().unwrap() = Some(pct.clamp(0.0, 100.0));
         tracing::info!(pct, "quota_proxy 사용률 캡처");
     }
@@ -142,7 +146,7 @@ fn observe(headers: &HeaderMap, quota: &Arc<QuotaState>) {
 
     // 주간(7d) 창
     if let Some(u) = parse_f64(headers, "anthropic-ratelimit-unified-7d-utilization") {
-        let pct = if u <= 1.0 { (u * 100.0) as f32 } else { u as f32 };
+        let pct = ratio_to_pct(u);
         *quota.used_pct_weekly.lock().unwrap() = Some(pct.clamp(0.0, 100.0));
     }
     if let Some(r) = parse_f64(headers, "anthropic-ratelimit-unified-7d-reset") {
@@ -242,5 +246,39 @@ impl QuotaProxy {
                 Err(format!("{e}"))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn utilization_over_one_is_treated_as_ratio() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "anthropic-ratelimit-unified-5h-utilization",
+            HeaderValue::from_static("1.01"),
+        );
+
+        let quota = Arc::new(QuotaState::default());
+        observe(&headers, &quota);
+
+        assert_eq!(*quota.used_pct.lock().unwrap(), Some(100.0));
+    }
+
+    #[test]
+    fn utilization_under_one_is_converted_to_percent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "anthropic-ratelimit-unified-5h-utilization",
+            HeaderValue::from_static("0.98"),
+        );
+
+        let quota = Arc::new(QuotaState::default());
+        observe(&headers, &quota);
+
+        assert_eq!(*quota.used_pct.lock().unwrap(), Some(98.0));
     }
 }
