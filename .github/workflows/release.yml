@@ -47,6 +47,21 @@ jobs:
       - name: Install frontend deps
         run: pnpm install
 
+      - name: Prepare release notes
+        id: release_notes
+        shell: bash
+        run: |
+          NOTES_FILE="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [[ ! -f "$NOTES_FILE" ]]; then
+            NOTES_FILE="docs/release-notes/default.md"
+          fi
+
+          {
+            echo 'body<<EOF'
+            cat "$NOTES_FILE"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -54,22 +69,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'AI Agent Monitor ${{ github.ref_name }}'
-          releaseBody: |
-            ## AI Agent Monitor ${{ github.ref_name }}
-
-            Claude Code와 Codex의 토큰 사용량을 상태 바에서 실시간 모니터링합니다.
-
-            ### 설치
-            | 플랫폼 | 파일 |
-            |---|---|
-            | macOS Apple Silicon | `*_aarch64.dmg` |
-            | macOS Intel | `*_x64.dmg` |
-            | Windows | `*_x64_en-US.msi` |
-
-            **macOS 첫 실행 시** Gatekeeper 경고가 뜨면:
-            ```bash
-            xattr -cr "/Applications/AI Agent Monitor.app"
-            ```
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
