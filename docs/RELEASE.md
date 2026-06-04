@@ -49,8 +49,23 @@ pnpm tauri build
 **산출물** (`src-tauri/target/release/bundle/`):
 - `macos/AI Agent Monitor.app` — 앱 번들
 - `dmg/AI Agent Monitor_0.1.0_aarch64.dmg` — 설치 dmg (Apple Silicon)
+- `macos/AI Agent Monitor.app.tar.gz` / `.sig` — 자동 업데이트용 macOS 번들
+- Windows installer `.sig` — 자동 업데이트용 Windows 서명 파일
 
 릴리즈 번들은 프론트엔드를 **임베드**하므로 dev 서버/`tauri dev` 없이 standalone 실행된다.
+
+### 자동 업데이트
+
+앱은 시작 후 백그라운드에서 GitHub Releases의 `latest.json`을 확인한다. 최신 서명 릴리즈가 있으면 자동으로 다운로드·검증·설치 후 재시작한다.
+
+릴리즈 빌드 전 GitHub Secrets에 다음 값을 설정해야 한다.
+
+| Secret | 값 |
+|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | `/Users/wannypark/.tauri/ai-agent-monitor.key` 파일 내용 |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 비워둠(현재 키는 password 없음) |
+
+private key를 잃어버리면 기존 설치 앱이 새 업데이트를 신뢰할 수 없으므로 반드시 안전하게 보관한다.
 
 ---
 

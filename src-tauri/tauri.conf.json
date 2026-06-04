@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AI Agent Monitor",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "identifier": "com.dgitx.aiagentmonitor",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -39,6 +39,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -47,5 +48,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI2NTQ1MjBBNjc4NTc3OTUKUldTVmQ0Vm5DbEpVdHZlMkx3MVdUUFdrSDdYSFp5Um9sUGxnVXpTSVdTNnBWQzNzUU9QWUJaM1gK",
+      "endpoints": [
+        "https://github.com/manaes/AIAgentMonitor/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

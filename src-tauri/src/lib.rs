@@ -18,6 +18,7 @@ use std::sync::{
 };
 use std::time::Duration;
 use tauri::Emitter;
+use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::{mpsc, Mutex};
 use types::{AgentKind, TokenEvent};
 
@@ -235,6 +236,55 @@ async fn sync_quota() -> Result<(), String> {
     Ok(())
 }
 
+async fn check_update_on_startup(app: tauri::AppHandle) {
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let updater = match app.updater() {
+        Ok(updater) => updater,
+        Err(e) => {
+            tracing::warn!(%e, "updater 초기화 실패");
+            return;
+        }
+    };
+
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            tracing::info!("사용 가능한 업데이트 없음");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(%e, "업데이트 확인 실패");
+            return;
+        }
+    };
+
+    tracing::info!(
+        version = %update.version,
+        current = env!("CARGO_PKG_VERSION"),
+        "업데이트 발견"
+    );
+
+    let mut downloaded = 0;
+    let install_result = update
+        .download_and_install(
+            |chunk_length, content_length| {
+                downloaded += chunk_length;
+                tracing::info!(downloaded, ?content_length, "업데이트 다운로드 진행");
+            },
+            || tracing::info!("업데이트 다운로드 완료"),
+        )
+        .await;
+
+    match install_result {
+        Ok(_) => {
+            tracing::info!("업데이트 설치 완료, 앱 재시작");
+            app.restart();
+        }
+        Err(e) => tracing::warn!(%e, "업데이트 설치 실패"),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
@@ -337,6 +387,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // 중복 실행 방지: 두 번째 실행 시 기존 창을 앞으로 가져오고 종료
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             use tauri::Manager;
@@ -367,6 +418,13 @@ pub fn run() {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
                 tray::install(app.handle())?;
+
+                {
+                    let app_handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        check_update_on_startup(app_handle).await;
+                    });
+                }
 
                 // 창 X 버튼 클릭 → 숨김(hide). 트레이 → Quit로만 완전 종료.
                 // Windows에서 X 누르면 프로세스가 죽는 기본 동작을 방지한다.
