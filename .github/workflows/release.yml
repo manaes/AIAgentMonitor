@@ -12,7 +12,57 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # 1) 릴리즈(드래프트) 1회만 생성 — matrix 잡들의 "release already exists" 레이스 제거
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read release notes
+        id: notes
+        shell: bash
+        run: |
+          NOTES_FILE="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [[ ! -f "$NOTES_FILE" ]]; then
+            NOTES_FILE="docs/release-notes/default.md"
+          fi
+          {
+            echo 'body<<EOF'
+            if [[ -f "$NOTES_FILE" ]]; then cat "$NOTES_FILE"; else echo "AI Agent Monitor ${GITHUB_REF_NAME}"; fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or find draft release
+        id: create
+        uses: actions/github-script@v7
+        env:
+          BODY: ${{ steps.notes.outputs.body }}
+        with:
+          script: |
+            const tag = process.env.GITHUB_REF_NAME;
+            const { owner, repo } = context.repo;
+            let id;
+            try {
+              const r = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              id = r.data.id;
+            } catch (e) {
+              const r = await github.rest.repos.createRelease({
+                owner, repo,
+                tag_name: tag,
+                name: `AI Agent Monitor ${tag}`,
+                body: process.env.BODY,
+                draft: true,
+                prerelease: false,
+              });
+              id = r.data.id;
+            }
+            return id;
+
+  # 2) 플랫폼별 빌드 → 위 릴리즈에 업로드(생성하지 않음)
   build:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -47,31 +97,37 @@ jobs:
       - name: Install frontend deps
         run: pnpm install
 
-      - name: Prepare release notes
-        id: release_notes
-        shell: bash
-        run: |
-          NOTES_FILE="docs/release-notes/${GITHUB_REF_NAME}.md"
-          if [[ ! -f "$NOTES_FILE" ]]; then
-            NOTES_FILE="docs/release-notes/default.md"
-          fi
-
-          {
-            echo 'body<<EOF'
-            cat "$NOTES_FILE"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS 코드서명 + 공증. 시크릿 미설정 시 빈 값 → tauri가 서명 스킵(미서명).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'AI Agent Monitor ${{ github.ref_name }}'
-          releaseBody: ${{ steps.release_notes.outputs.body }}
-          releaseDraft: false
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }}
+
+  # 3) 모든 빌드 성공 후 드래프트 해제(공개)
+  publish-release:
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release
+        uses: actions/github-script@v7
+        env:
+          release_id: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            await github.rest.repos.updateRelease({
+              owner, repo,
+              release_id: Number(process.env.release_id),
+              draft: false,
+            });
