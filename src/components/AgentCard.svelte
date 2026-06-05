@@ -22,6 +22,9 @@
   // 리셋 시각(epoch secs) — 백엔드가 프록시 실측 또는 첫-메시지 앵커 추정으로 제공
   let resetEpochSecs = $derived(agent.quota_reset_at?.secs_since_epoch ?? null);
 
+  // 5h 윈도우 리셋 여부 — 리셋됨이면 백엔드 갱신 전까지 5h 사용률을 0%로 표시
+  let isReset5h = $derived(resetEpochSecs !== null && resetEpochSecs - nowSecs <= 0);
+
   let countdown = $derived.by((): string | null => {
     const r = resetEpochSecs;
     if (r === null) return null;
@@ -64,7 +67,7 @@
     {/if}
   </div>
 
-  <QuotaBar tokens_5h={agent.tokens_5h} auto_pct={agent.quota_used_pct} weekly_pct={agent.quota_used_pct_weekly} />
+  <QuotaBar tokens_5h={agent.tokens_5h} auto_pct={agent.quota_used_pct} weekly_pct={agent.quota_used_pct_weekly} reset_5h={isReset5h} />
 
   {#if agent.kind === "claude"}
     <div class="sync-row">

@@ -3,14 +3,18 @@
   import type { TokenCounts } from "../lib/tauri";
 
   // auto_pct: 실제 5h 사용률(%), weekly_pct: 주간(7d) 사용률(%). 둘 다 동기화 전이면 null.
-  let { tokens_5h, auto_pct = null, weekly_pct = null }: {
+  // reset_5h: 5h 윈도우가 리셋된 직후면 true → 백엔드 갱신 전까지 5h 사용률을 0%로 표시.
+  let { tokens_5h, auto_pct = null, weekly_pct = null, reset_5h = false }: {
     tokens_5h: TokenCounts;
     auto_pct?: number | null;
     weekly_pct?: number | null;
+    reset_5h?: boolean;
   } = $props();
 
   let localUsed = $derived(tokens_5h.tokens_in + tokens_5h.tokens_out);
-  let pct = $derived(auto_pct !== null ? Math.min(100, auto_pct) : null);
+  let pct = $derived(
+    reset_5h ? 0 : auto_pct !== null ? Math.min(100, auto_pct) : null
+  );
   let wpct = $derived(weekly_pct !== null ? Math.min(100, weekly_pct) : null);
 
   function color(p: number): string {
