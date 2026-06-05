@@ -48,11 +48,7 @@
 | macOS Intel | `AI.Agent.Monitor_*_x64.dmg` |
 | Windows | `AI.Agent.Monitor_*_x64_en-US.msi` |
 
-**macOS 첫 실행 시** Gatekeeper 경고가 뜨면:
-```bash
-xattr -cr "/Applications/AI Agent Monitor.app"
-```
-또는 시스템 설정 → 개인 정보 보호 및 보안 → 앱 허용
+> macOS 빌드는 Apple Developer ID로 **서명·공증(notarized)** 되어 있어 별도 Gatekeeper 우회 없이 바로 실행됩니다.
 
 ---
 

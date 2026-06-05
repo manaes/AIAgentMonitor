@@ -9,8 +9,4 @@ Claude Code and Codex token usage monitoring for your menu bar.
 | macOS Intel | `*_x64.dmg` |
 | Windows | `*_x64_en-US.msi` |
 
-On macOS, if Gatekeeper blocks the first launch:
-
-```bash
-xattr -cr "/Applications/AI Agent Monitor.app"
-```
+macOS builds are signed and notarized with a Developer ID — no Gatekeeper workaround needed.
