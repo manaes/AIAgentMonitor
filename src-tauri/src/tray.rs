@@ -43,7 +43,8 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             } = event
             {
                 let app = tray.app_handle();
-                if let Some(w) = app.get_webview_window("detail") {
+                // 좌클릭: popover(플로팅)를 트레이 아이콘 아래에 띄운다. 다시 누르면 숨김.
+                if let Some(w) = app.get_webview_window("popover") {
                     if w.is_visible().unwrap_or(false) {
                         let _ = w.hide();
                     } else {

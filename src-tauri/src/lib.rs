@@ -237,24 +237,45 @@ async fn check_update_on_startup(app: tauri::AppHandle) {
         "업데이트 발견"
     );
 
-    let mut downloaded = 0;
-    let install_result = update
-        .download_and_install(
-            |chunk_length, content_length| {
-                downloaded += chunk_length;
-                tracing::info!(downloaded, ?content_length, "업데이트 다운로드 진행");
-            },
-            || tracing::info!("업데이트 다운로드 완료"),
-        )
-        .await;
-
-    match install_result {
-        Ok(_) => {
-            tracing::info!("업데이트 설치 완료, 앱 재시작");
-            app.restart();
-        }
-        Err(e) => tracing::warn!(%e, "업데이트 설치 실패"),
-    }
+    // 자동 설치 대신 사용자에게 먼저 확인받는다.
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let version = update.version.clone();
+    let app_for_install = app.clone();
+    app.dialog()
+        .message(format!(
+            "새 버전 {version}이(가) 있습니다.\n지금 업데이트하면 앱이 종료되고 설치 후 재시작됩니다."
+        ))
+        .title("업데이트 가능")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "지금 업데이트".to_string(),
+            "나중에".to_string(),
+        ))
+        .show(move |confirmed| {
+            if !confirmed {
+                tracing::info!("사용자가 업데이트를 미룸");
+                return;
+            }
+            // 동의 시에만 다운로드/설치/재시작
+            tauri::async_runtime::spawn(async move {
+                let mut downloaded = 0;
+                let install_result = update
+                    .download_and_install(
+                        |chunk_length, content_length| {
+                            downloaded += chunk_length;
+                            tracing::info!(downloaded, ?content_length, "업데이트 다운로드 진행");
+                        },
+                        || tracing::info!("업데이트 다운로드 완료"),
+                    )
+                    .await;
+                match install_result {
+                    Ok(_) => {
+                        tracing::info!("업데이트 설치 완료, 앱 재시작");
+                        app_for_install.restart();
+                    }
+                    Err(e) => tracing::warn!(%e, "업데이트 설치 실패"),
+                }
+            });
+        });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
