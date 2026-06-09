@@ -1,15 +1,26 @@
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, PhysicalPosition, Runtime,
 };
+use tauri_plugin_autostart::ManagerExt;
 
 pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let detail = MenuItem::with_id(app, "detail", "Open Detail Window…", true, None::<&str>)?;
     let logs   = MenuItem::with_id(app, "logs",   "Open Log Folder",     true, None::<&str>)?;
     let sep    = PredefinedMenuItem::separator(app)?;
+    // 로그인 시 자동 실행 토글 — 현재 등록 상태를 체크 표시에 반영
+    let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
+    let autostart = CheckMenuItem::with_id(
+        app,
+        "autostart",
+        "로그인 시 자동 실행",
+        true,
+        autostart_on,
+        None::<&str>,
+    )?;
     let quit   = MenuItem::with_id(app, "quit",   "Quit AI Monitor",     true, None::<&str>)?;
-    let menu   = Menu::with_items(app, &[&detail, &logs, &sep, &quit])?;
+    let menu   = Menu::with_items(app, &[&detail, &logs, &autostart, &sep, &quit])?;
 
     // 플랫폼별 아이콘 선택:
     //   macOS → PNG + iconAsTemplate(true)  : 다크/라이트 메뉴바 자동 대응
@@ -61,7 +72,26 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 }
             }
         })
-        .on_menu_event(|app, event| match event.id().as_ref() {
+        .on_menu_event({
+            let autostart = autostart.clone();
+            move |app, event| match event.id().as_ref() {
+            "autostart" => {
+                let mgr = app.autolaunch();
+                // 현재 등록 상태를 뒤집고, 결과를 체크 표시에 반영
+                let now_on = mgr.is_enabled().unwrap_or(false);
+                let result = if now_on { mgr.disable() } else { mgr.enable() };
+                match result {
+                    Ok(()) => {
+                        let _ = autostart.set_checked(!now_on);
+                        tracing::info!("로그인 시 자동 실행 {}", if now_on { "해제" } else { "설정" });
+                    }
+                    Err(e) => {
+                        // 실패 시 실제 상태로 체크 표시를 되돌림
+                        let _ = autostart.set_checked(mgr.is_enabled().unwrap_or(false));
+                        tracing::warn!("자동 실행 토글 실패: {e}");
+                    }
+                }
+            }
             "detail" => {
                 if let Some(w) = app.get_webview_window("detail") {
                     let _ = w.show();
@@ -82,6 +112,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
             "quit" => app.exit(0),
             _ => {}
+            }
         })
         .build(app)?;
 

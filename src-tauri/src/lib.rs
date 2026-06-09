@@ -388,6 +388,11 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // 로그인 시 자동 실행: macOS는 LaunchAgent 방식 사용
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         // 중복 실행 방지: 두 번째 실행 시 기존 창을 앞으로 가져오고 종료
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             use tauri::Manager;
