@@ -1,6 +1,6 @@
 {
   "name": "ai-agent-monitor",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "AI Agent Monitor — Tauri 2 + Svelte 5 + Rust",
   "type": "module",
   "scripts": {

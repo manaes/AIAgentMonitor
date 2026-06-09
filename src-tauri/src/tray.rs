@@ -43,8 +43,13 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             } = event
             {
                 let app = tray.app_handle();
-                // 좌클릭: popover(플로팅)를 트레이 아이콘 아래에 띄운다. 다시 누르면 숨김.
-                if let Some(w) = app.get_webview_window("popover") {
+                // 좌클릭: macOS는 popover(플로팅)를 아이콘 아래에 띄우고,
+                //         Windows/Linux는 Detail 창을 바로 보여준다. 다시 누르면 숨김.
+                #[cfg(target_os = "macos")]
+                let label = "popover";
+                #[cfg(not(target_os = "macos"))]
+                let label = "detail";
+                if let Some(w) = app.get_webview_window(label) {
                     if w.is_visible().unwrap_or(false) {
                         let _ = w.hide();
                     } else {
