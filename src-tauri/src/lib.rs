@@ -35,34 +35,6 @@ fn find_binary(name: &str, candidates: &[PathBuf]) -> String {
     name.to_string()
 }
 
-fn log_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    return home().join("Library/Logs/AIMonitor");
-    #[cfg(target_os = "windows")]
-    return dirs_next::data_local_dir()
-        .unwrap_or_else(|| home().join("AppData\\Local"))
-        .join("AIMonitor\\logs");
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    return home().join(".local/share/aimonitor/logs");
-}
-
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
-    let log_dir = log_dir();
-    if let Err(e) = std::fs::create_dir_all(&log_dir) {
-        eprintln!("[tracing] 로그 디렉토리 생성 실패, 파일 로깅 건너뜀: {e}");
-        return;
-    }
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "app.log");
-    let env = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    // init() 대신 try_init() — 이미 설정됐으면 무시 (panic 방지)
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(env)
-        .with_writer(file_appender)
-        .try_init();
-    tracing::info!(?log_dir, "tracing initialized");
-}
-
 #[tauri::command]
 async fn open_detail_window(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Manager;
@@ -287,8 +259,6 @@ async fn check_update_on_startup(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    init_tracing();
-
     let (tx, mut rx) = mpsc::unbounded_channel::<TokenEvent>();
 
     // quota 상태 — Claude: anthropic-ratelimit 헤더(프록시), Codex: rollout rate_limits

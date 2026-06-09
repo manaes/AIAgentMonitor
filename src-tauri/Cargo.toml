@@ -1,6 +1,6 @@
 [package]
 name = "ai-agent-monitor"
-version = "1.2.0"
+version = "1.2.1"
 description = "AI Agent Monitor"
 authors = ["you"]
 edition = "2021"
@@ -27,8 +27,6 @@ notify = "7"
 notify-debouncer-full = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 anyhow = "1"
 thiserror = "2"
 dirs-next = "2"

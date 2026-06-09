@@ -7,7 +7,6 @@ use tauri_plugin_autostart::ManagerExt;
 
 pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let detail = MenuItem::with_id(app, "detail", "Open Detail Window…", true, None::<&str>)?;
-    let logs   = MenuItem::with_id(app, "logs",   "Open Log Folder",     true, None::<&str>)?;
     let sep    = PredefinedMenuItem::separator(app)?;
     // 로그인 시 자동 실행 토글 — 현재 등록 상태를 체크 표시에 반영
     let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
@@ -20,7 +19,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quit   = MenuItem::with_id(app, "quit",   "Quit AI Monitor",     true, None::<&str>)?;
-    let menu   = Menu::with_items(app, &[&detail, &logs, &autostart, &sep, &quit])?;
+    let menu   = Menu::with_items(app, &[&detail, &autostart, &sep, &quit])?;
 
     // 플랫폼별 아이콘 선택:
     //   macOS → PNG + iconAsTemplate(true)  : 다크/라이트 메뉴바 자동 대응
@@ -96,18 +95,6 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 if let Some(w) = app.get_webview_window("detail") {
                     let _ = w.show();
                     let _ = w.set_focus();
-                }
-            }
-            "logs" => {
-                #[cfg(target_os = "macos")]
-                if let Some(dir) = dirs_next::home_dir() {
-                    let log_dir = dir.join("Library/Logs/AIMonitor");
-                    let _ = std::process::Command::new("open").arg(log_dir).spawn();
-                }
-                #[cfg(target_os = "windows")]
-                if let Some(dir) = dirs_next::home_dir() {
-                    let log_dir = dir.join("AppData\\Local\\AIMonitor\\logs");
-                    let _ = std::process::Command::new("explorer").arg(log_dir).spawn();
                 }
             }
             "quit" => app.exit(0),
