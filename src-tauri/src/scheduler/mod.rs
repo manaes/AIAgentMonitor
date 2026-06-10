@@ -121,9 +121,9 @@ impl Scheduler {
     ) -> anyhow::Result<ScheduleRule> {
         // ~ 로 시작하는 경로를 홈 디렉토리 절대경로로 전개
         let working_dir = expand_tilde(&working_dir);
-        // working_dir 경로 존재 확인
-        if !std::path::Path::new(&working_dir).exists() {
-            anyhow::bail!("working_dir 경로가 존재하지 않습니다: {working_dir}");
+        // working_dir 경로가 실제 디렉토리인지 확인 (파일/미존재 경로 차단)
+        if !std::path::Path::new(&working_dir).is_dir() {
+            anyhow::bail!("working_dir 경로가 디렉토리가 아니거나 존재하지 않습니다: {working_dir}");
         }
         let rule = ScheduleRule::new(agent, cron, working_dir, prompt);
         self.rules.push(rule.clone());

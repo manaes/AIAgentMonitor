@@ -8,7 +8,6 @@
     "core:window:default",
     "core:window:allow-set-size",
     "core:tray:default",
-    "shell:default",
     "dialog:default",
     "autostart:default"
   ]

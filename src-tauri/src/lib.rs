@@ -67,6 +67,16 @@ async fn add_trigger_rule(
     working_dir: String,
     prompt: String,
 ) -> Result<ScheduleRule, String> {
+    // 잘못된 값이 cron으로 굳어 저장되면 job 등록이 조용히 실패하므로 여기서 거른다
+    if !matches!(agent.as_str(), "claude" | "codex") {
+        return Err(format!("지원하지 않는 agent: {agent}"));
+    }
+    if hour > 23 || minute > 59 {
+        return Err(format!("시각이 올바르지 않습니다: {hour:02}:{minute:02}"));
+    }
+    if prompt.trim().is_empty() {
+        return Err("프롬프트가 비어 있습니다".to_string());
+    }
     let cron = format!("0 {minute} {hour} * * *");
     let mut s = state.lock().await;
     s.add_rule(agent, cron, working_dir, prompt)
@@ -376,7 +386,6 @@ pub fn run() {
     })));
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // 로그인 시 자동 실행: macOS는 LaunchAgent 방식 사용

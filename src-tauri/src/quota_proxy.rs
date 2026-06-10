@@ -23,6 +23,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const UPSTREAM: &str = "https://api.anthropic.com";
 
+/// 요청 바디 버퍼링 상한. localhost 전용이지만 무제한 버퍼링으로 인한
+/// 메모리 고갈을 막는다 (메시지 요청 JSON은 이보다 훨씬 작다).
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
 /// 프록시가 캡처한 실제 quota 상태. lib.rs 틱 루프가 읽어 스냅샷에 주입한다.
 #[derive(Default)]
 pub struct QuotaState {
@@ -172,9 +176,9 @@ async fn proxy(State(st): State<ProxyState>, req: Request) -> Result<Response, S
     let url = format!("{UPSTREAM}{pq}");
 
     // 요청 바디 버퍼링 (메시지 요청은 단일 JSON이라 스트리밍 불필요)
-    let body_bytes = axum::body::to_bytes(body, usize::MAX)
+    let body_bytes = axum::body::to_bytes(body, MAX_BODY_BYTES)
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
 
     let mut rb = st.client.request(parts.method.clone(), &url).body(body_bytes.to_vec());
     for (name, value) in parts.headers.iter() {
