@@ -19,8 +19,22 @@ use std::sync::{
 use std::time::Duration;
 use tauri::Emitter;
 use tauri_plugin_updater::UpdaterExt;
+use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
 use types::{AgentKind, TokenEvent};
+
+#[cfg(target_os = "windows")]
+fn hide_console_window(cmd: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_console_window(cmd: &mut Command) -> &mut Command {
+    cmd
+}
 
 fn home() -> PathBuf {
     dirs_next::home_dir().expect("home dir")
@@ -127,29 +141,34 @@ fn spawn_quota_ping() {
     // Windows: claude는 .cmd 래퍼이므로 cmd /C 경유 필요
     // macOS/Linux: 절대경로 우선, 없으면 PATH에서 검색
     #[cfg(target_os = "windows")]
-    let r = tokio::process::Command::new("cmd")
-        .args(["/C", "claude", "-p", "ping"])
-        .current_dir(home())
-        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:4319")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-    #[cfg(not(target_os = "windows"))]
     let r = {
-        let bin = find_binary("claude", &[
-            home().join(".local/bin/claude"),
-            PathBuf::from("/opt/homebrew/bin/claude"),
-            PathBuf::from("/usr/local/bin/claude"),
-        ]);
-        tokio::process::Command::new(bin)
-            .args(["-p", "ping"])
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "claude", "-p", "ping"])
             .current_dir(home())
             .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:4319")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
+            .stderr(std::process::Stdio::null());
+        hide_console_window(&mut cmd).spawn()
+    };
+    #[cfg(not(target_os = "windows"))]
+    let r = {
+        let bin = find_binary(
+            "claude",
+            &[
+                home().join(".local/bin/claude"),
+                PathBuf::from("/opt/homebrew/bin/claude"),
+                PathBuf::from("/usr/local/bin/claude"),
+            ],
+        );
+        let mut cmd = Command::new(bin);
+        cmd.args(["-p", "ping"])
+            .current_dir(home())
+            .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:4319")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        hide_console_window(&mut cmd).spawn()
     };
     if let Err(e) = r {
         tracing::warn!(%e, "quota 동기화 핑 실행 실패 (claude 미발견?)");
@@ -176,21 +195,21 @@ fn spawn_codex_quota_ping(running: Arc<AtomicBool>) {
         let home_dir = home();
         let home_arg = home_dir.to_string_lossy().into_owned();
 
-        let mut child = match tokio::process::Command::new(bin)
-            .args([
-                "exec",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "-C",
-                home_arg.as_str(),
-                "Reply exactly with the word ok and do not run commands.",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
+        let mut cmd = Command::new(bin);
+        cmd.args([
+            "exec",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "-C",
+            home_arg.as_str(),
+            "Reply exactly with the word ok and do not run commands.",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+        let mut child = match hide_console_window(&mut cmd).spawn() {
             Ok(child) => child,
             Err(e) => {
                 tracing::warn!(%e, "codex quota 동기화 실행 실패 (codex 미발견?)");
