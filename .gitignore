@@ -25,3 +25,7 @@ agentdb.rvf.lock
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Added by code-review-graph
+.code-review-graph/
+.code-review-graphignore
