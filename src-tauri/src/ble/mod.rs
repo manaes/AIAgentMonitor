@@ -6,7 +6,7 @@ pub mod wire;
 
 use crate::emitter::EmitGate;
 use crate::types::Snapshot;
-use peripheral::{BlePeripheral, CentralId, CharId, FakePeripheral, Subscriber};
+use peripheral::{BlePeripheral, CharId};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use wire::MirrorSnapshot;
@@ -68,6 +68,9 @@ impl BleBridge {
             Ok(j) => j,
             Err(e) => {
                 tracing::error!("스냅샷 직렬화 실패: {e}");
+                // 게이트가 이미 "송출함"으로 커밋했으므로, 실패했다면 되돌려서
+                // 다음 틱에 동일한 내용이라도 다시 시도되게 한다.
+                self.gate.reset();
                 return;
             }
         };
@@ -76,7 +79,10 @@ impl BleBridge {
 
         match framing::chunk(frame_id, &json, max_chunk) {
             Ok(chunks) => self.peripheral.offer_frame(CharId::Snapshot, chunks),
-            Err(e) => tracing::error!("청킹 실패: {e:?}"),
+            Err(e) => {
+                tracing::error!("청킹 실패: {e:?}");
+                self.gate.reset();
+            }
         }
     }
 }
@@ -85,6 +91,7 @@ impl BleBridge {
 mod tests {
     use super::*;
     use crate::types::{AgentKind, AgentState, Snapshot, TokenCounts};
+    use peripheral::{CentralId, FakePeripheral, Subscriber};
     use std::time::{Duration, UNIX_EPOCH};
 
     fn snap(rate: f32, at: u64) -> Snapshot {
@@ -102,6 +109,27 @@ mod tests {
                 projects: vec![],
                 triggered_by: None,
             }],
+        }
+    }
+
+    /// 청킹이 255 청크를 넘어 반드시 실패하도록 에이전트를 여럿 담은 큰 스냅샷.
+    fn big_snap(rate: f32, at: u64) -> Snapshot {
+        Snapshot {
+            emitted_at: UNIX_EPOCH + Duration::from_secs(at),
+            agents: (0..10)
+                .map(|_| AgentState {
+                    kind: AgentKind::Claude,
+                    rate_tok_per_sec: rate,
+                    tokens_5h: TokenCounts::default(),
+                    quota_limit: None,
+                    quota_reset_at: None,
+                    quota_used_pct: None,
+                    quota_reset_at_weekly: None,
+                    quota_used_pct_weekly: None,
+                    projects: vec![],
+                    triggered_by: None,
+                })
+                .collect(),
         }
     }
 
@@ -198,5 +226,35 @@ mod tests {
         assert!(fake.is_started());
         b.set_enabled(false);
         assert!(!fake.is_started());
+    }
+
+    #[test]
+    fn gate_retries_after_failed_frame() {
+        let (mut b, fake) = bridge();
+        b.set_enabled(true);
+        // max_notify_len 4 → 본문 1바이트. big_snap 은 255바이트를 훌쩍 넘으므로
+        // framing::chunk 이 반드시 TooLarge 로 실패한다.
+        fake.set_subscribers(vec![Subscriber {
+            id: CentralId("A".into()),
+            max_notify_len: 4,
+        }]);
+        let t0 = UNIX_EPOCH + Duration::from_secs(1000);
+        let content = big_snap(1.0, 1000);
+
+        b.on_snapshot(&content, t0);
+        assert!(fake.taken_frames().is_empty(), "청킹 실패로 프레임이 나가지 않는다");
+
+        // 청킹이 성공할 수 있는 크기로 구독자를 바꾼 뒤, 스로틀 시간이 지난 시점에
+        // 동일한 내용으로 다시 호출한다. 게이트가 리셋되지 않았다면 해시가 그대로라
+        // "unchanged"로 영구 억제되어 이번에도 프레임이 비어 있을 것이다.
+        fake.set_subscribers(vec![Subscriber {
+            id: CentralId("A".into()),
+            max_notify_len: 100,
+        }]);
+        b.on_snapshot(&content, t0 + Duration::from_millis(1100));
+        assert!(
+            !fake.taken_frames().is_empty(),
+            "실패한 프레임이 게이트를 영구 억제해선 안 된다 — 다음 틱에 재시도되어야 한다"
+        );
     }
 }

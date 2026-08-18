@@ -25,6 +25,13 @@ impl EmitGate {
         self.last_emit_at = Some(now);
         true
     }
+
+    /// 송출이 실패했을 때 게이트를 되돌린다.
+    /// 내용 해시가 같으면 unchanged 로 영구 억제되므로, 실제로 나가지 못한 프레임은
+    /// 반드시 이걸 호출해 다음 틱에서 다시 시도되게 해야 한다.
+    pub fn reset(&mut self) {
+        self.last_hash = None;
+    }
 }
 
 fn hash_snapshot(s: &Snapshot) -> u64 {
@@ -99,6 +106,20 @@ mod tests {
         let snap1 = Snapshot { emitted_at: now, agents: vec![agent(1.0)] };
         assert!(e.should_emit(&snap1, now));
         let snap2 = Snapshot { emitted_at: now + Duration::from_millis(600), agents: vec![agent(2.0)] };
+        assert!(e.should_emit(&snap2, now + Duration::from_millis(600)));
+    }
+
+    #[test]
+    fn reset_allows_identical_snapshot_to_emit_again() {
+        let mut e = EmitGate::new(Duration::from_millis(500));
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let snap = Snapshot { emitted_at: now, agents: vec![agent(1.0)] };
+        assert!(e.should_emit(&snap, now));
+
+        e.reset();
+
+        // 내용은 동일하지만 리셋했으므로, 스로틀 시간만 지나면 다시 나가야 한다.
+        let snap2 = Snapshot { emitted_at: now + Duration::from_millis(600), agents: vec![agent(1.0)] };
         assert!(e.should_emit(&snap2, now + Duration::from_millis(600)));
     }
 }
