@@ -148,10 +148,10 @@ public final class SessionRowView: UIView {
         modelLabel.text = project.model
 
         // 오른쪽 칸은 상태에 따라 텍스트·색뿐 아니라 **폰트도** 갈린다.
-        //   active  → SessionList.svelte:57 `.rate { font-weight: 600; tabular-nums }`
+        //   active  → SessionList.svelte:55 `.rate { font-weight: 600; tabular-nums }`
         //             = Typography.rate (11pt semibold, monospacedDigit)
         //   그 외    → SessionList.svelte:35 `<span class="subtle">{row.status}</span>`
-        //             .subtle 은 색만 지정하고(:59), 크기는 app.css:22 의 11px,
+        //             .subtle 은 색만 지정하고(:56), 크기는 app.css:22 의 11px,
         //             굵기는 상속된 normal 이다 = Typography.body (11pt regular)
         // 폰트를 init 에서 한 번만 정하면 idle/dormant/unknown 이 맥에는 없는
         // semibold·tabular 로 그려진다 — 그래서 여기 switch 안에서 색과 함께 정한다.

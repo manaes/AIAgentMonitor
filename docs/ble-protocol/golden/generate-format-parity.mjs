@@ -9,8 +9,12 @@
 // **주의 — MirrorFormatTests 는 이 드리프트를 잡지 못한다.** 그 테스트는 Swift 를
 // *체크인된* format-parity.json 과 대조하므로, format.ts 가 바뀌고 이 생성기를 다시
 // 돌리지 않으면 표가 낡은 채로 남고 테스트는 그대로 통과한다. 진짜 안전장치는
-// 옆의 `check-parity-drift.sh` 뿐이다 — format.ts 나 아래 복제본을 고쳤으면
-// **반드시** 그 스크립트를 돌려 표를 함께 갱신·커밋할 것.
+// 옆의 `check-parity-drift.sh` 뿐이다 — 그 스크립트는 format.ts 를 **직접 읽어**
+// 아래 복제본과 대조한 뒤 표까지 다시 만들어 본다. format.ts 나 아래 복제본을
+// 고쳤으면 **반드시** 그 스크립트를 돌려 표를 함께 갱신·커밋할 것.
+//
+// 아래 두 함수의 이름·본문은 그 스크립트가 파싱 대상으로 삼는다. 이름을 바꾸거나
+// 다른 함수를 추가로 복제하려면 check-parity-drift.sh 의 [1] 목록도 같이 고쳐야 한다.
 //
 // 실행: node generate-format-parity.mjs > format-parity.json
 // 확인: ./check-parity-drift.sh

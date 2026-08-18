@@ -38,7 +38,7 @@ final class SessionRowViewTests: XCTestCase {
     }
 
     /// 원본은 오른쪽 칸의 **폰트도** 상태에 따라 갈린다.
-    ///   active → `.rate { font-weight: 600; tabular-nums }` (SessionList.svelte:57)
+    ///   active → `.rate { font-weight: 600; tabular-nums }` (SessionList.svelte:55)
     ///   그 외   → `<span class="subtle">` (SessionList.svelte:35) — 색만 지정되고
     ///            굵기는 상속된 normal, 크기는 app.css:22 의 11px.
     /// 폰트가 init 에 있으면 idle/dormant/unknown 이 맥에 없는 semibold 로 그려지므로
