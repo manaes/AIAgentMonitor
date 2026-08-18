@@ -178,6 +178,31 @@ extension BLEClient: @preconcurrency CBCentralManagerDelegate {
 }
 
 extension BLEClient: @preconcurrency CBPeripheralDelegate {
+    /// Mac 이 stop() 에서 removeAllServices() 를 부르더라도 LE 링크는 끊기지 않는다 —
+    /// CBPeripheralManager 에는 central 연결을 끊는 API 가 없기 때문이다. 대신 GATT
+    /// Service Changed 표시가 도착해 CoreBluetooth 가 서비스를 무효화한다.
+    /// 이 콜백이 없으면 앱은 무효가 된 CBCharacteristic 을 쥔 채 .streaming 에 머물고,
+    /// Mac 이 공유를 다시 켜 서비스를 올려도 재검색·재구독을 하지 않는다. Mac 쪽 구독자
+    /// 목록이 영원히 비어 데이터가 흐르지 않는데 화면만 "연결됨" 인 거짓말이 된다.
+    public func peripheral(_ peripheral: CBPeripheral, didModifyServices invalidated: [CBService]) {
+        guard invalidated.contains(where: { $0.uuid == MirrorUUIDs.service }) else { return }
+        // 이미 놓아준 주변기기의 늦은 콜백이 현재 연결을 건드리지 않게 한다.
+        guard self.peripheral === peripheral else { return }
+
+        // 무효화 시점에 절반만 도착해 있던 프레임의 잔여 청크가, 재구독 뒤 새 프레임의
+        // 첫 청크와 이어붙지 않도록 여기서 버린다. didUpdateValueFor 에 이르는 모든
+        // 경로는 그 앞에서 재조립기를 초기화한다는 규약을 이 새 경로도 지킨다.
+        reassembler = FrameReassembler()
+
+        // 재검색 → 특성 검색 → 재구독 체인을 처음부터 다시 타야 하므로 아직 스트리밍이
+        // 아니다. .connecting 으로 내려두면 라벨이 정직해질 뿐 아니라, 체인이 영영
+        // 끝나지 않는 경우(사용자가 Mac 공유를 계속 꺼둔 경우)를 connectTimeout 이 잡아
+        // 연결을 정리하고 재스캔으로 돌려보낸다.
+        stateSubject.send(.connecting)
+        scheduleConnectTimeout(for: peripheral)
+        peripheral.discoverServices([MirrorUUIDs.service])
+    }
+
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let error {
             stateSubject.send(.disconnected(reason: "서비스 검색 실패 · \(error.localizedDescription)"))

@@ -100,7 +100,12 @@ class SnapshotStore {
     this.#bleUnlisten = await listenBleStatus(async () => {
       const seq = ++this.#bleReqSeq;
       const status = await bleStatus();
-      if (seq === this.#bleReqSeq) this.ble = status;
+      if (seq !== this.#bleReqSeq) return;
+      this.ble = status;
+      // 백엔드가 새 상태를 말한 순간부터는 그쪽이 최신 진실이다. 여기서 지우지 않으면
+      // 실패한 켜기가 남긴 bleActionError 가 (DevicePanel 이 그것을 우선 표시하므로)
+      // 이후 도착하는 백엔드 오류를 계속 가린다.
+      this.bleActionError = null;
     });
   }
 

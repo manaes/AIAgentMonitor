@@ -16,6 +16,7 @@ use objc2_core_bluetooth::*;
 use objc2_foundation::{NSArray, NSData, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::AppHandle;
 use tokio::sync::mpsc::UnboundedSender;
@@ -32,6 +33,13 @@ static DELEGATE: OnceLock<Mutex<Option<usize>>> = OnceLock::new();
 fn delegate_slot() -> &'static Mutex<Option<usize>> {
     DELEGATE.get_or_init(|| Mutex::new(None))
 }
+
+/// 사용자가 공유를 켜두었는지. `start()`/`stop()` 만 값을 쓰고 델리게이트 콜백은 읽기만 한다.
+/// 델리게이트는 `BleBridge.enabled` 를 볼 수 없으므로, 이 플래그가 없으면 제어 센터에서
+/// 블루투스를 껐다 켜는 것만으로 didUpdateState(PoweredOn) 이 publish() → advertise() 를
+/// 태워 사용자가 끈 공유를 되살린다. 스냅샷은 새어 나가지 않지만(on_snapshot 이 !enabled 에서
+/// 즉시 반환) 기기 이름이 다시 전파되므로, 꺼짐이라고 적힌 토글은 꺼짐이어야 한다.
+static SHARING_WANTED: AtomicBool = AtomicBool::new(false);
 
 /// 슬롯에 델리게이트가 있으면 `f`, 없으면 `absent` 를 메인 스레드에서 실행한다.
 /// 원시 포인터를 `&Delegate` 로 되돌리는 유일한 지점 — 이 함수 밖에서는 절대 역참조하지 않는다.
@@ -134,7 +142,9 @@ define_class!(
                 _ => {}
             }
             drop(st);
-            if powered {
+            // 사용자가 공유를 끈 상태라면 전원이 다시 들어와도 서비스를 올리지 않는다.
+            // publish() 를 건너뛰면 didAddService 가 오지 않으므로 advertise() 도 함께 막힌다.
+            if powered && SHARING_WANTED.load(Ordering::SeqCst) {
                 self.publish(mgr);
             }
         }
@@ -289,6 +299,10 @@ impl BlePeripheral for MacPeripheral {
         // Delegate+CBPeripheralManager+CBMutableService 를 만들면 이전 것들이 해제되지
         // 않고 계속 쌓이고, 동일한 SERVICE_UUID 가 GATT DB 에 중복 등록된다.
         // 재사용/생성 판정은 with_delegate_or 가 메인 스레드 안에서 한다(중복 생성 방지).
+        //
+        // 공유 의사 플래그는 클로저를 올리기 전에 세운다. start()/stop() 은 BleBridge 가
+        // 직렬화해 부르므로 플래그 쓰기 순서 = 클로저 게시 순서 = 메인 스레드 실행 순서다.
+        SHARING_WANTED.store(true, Ordering::SeqCst);
         let events = self.events.clone();
         with_delegate_or(
             &self.app,
@@ -332,6 +346,8 @@ impl BlePeripheral for MacPeripheral {
     }
 
     fn stop(&self) {
+        // 여기서부터 블루투스 전원 재순환이 일어나도 델리게이트가 서비스를 되살리지 않는다.
+        SHARING_WANTED.store(false, Ordering::SeqCst);
         self.subs_mirror.lock().unwrap().clear();
         with_delegate(&self.app, |d| {
             let mgr = d.ivars().borrow().manager.clone();
@@ -345,7 +361,13 @@ impl BlePeripheral for MacPeripheral {
             unsafe { mgr.removeAllServices() };
             // 서비스를 내리면 구독 상태도 함께 무효다. subs 를 남겨두면 재개 후에도
             // didSubscribe 가 다시 오지 않아 subs_mirror 가 영원히 비어 미러가 멈춘다.
-            d.ivars().borrow_mut().subs.clear();
+            let mut st = d.ivars().borrow_mut();
+            st.subs.clear();
+            // 큐도 같은 이유로 비운다. stop() 에 잘린 프레임이 current 에 started=true 로
+            // 남으면 재개 후 낡은 꼬리 청크가 먼저 나가 한 프레임을 버리게 되고,
+            // paused 가 true 로 남았다면 다음 isReadyToUpdateSubscribers 가 올 때까지
+            // 큐 전체가 멈춘다.
+            st.queues.values_mut().for_each(|q| *q = SendQueue::new());
         });
     }
 
