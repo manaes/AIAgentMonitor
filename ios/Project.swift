@@ -40,6 +40,13 @@ let project = Project(
         unitTests("BLETransportTests", for: "BLETransport"),
         framework("DesignSystem", deps: [.target(name: "MirrorFormat"), .external(name: "SnapKit")]),
         unitTests("DesignSystemTests", for: "DesignSystem"),
+        framework("MirrorFeature", deps: [
+            .target(name: "BLETransport"),
+            .target(name: "DesignSystem"),
+            .target(name: "MirrorFormat"),
+            .external(name: "SnapKit"),
+        ]),
+        unitTests("MirrorFeatureTests", for: "MirrorFeature"),
         .target(
             name: "App",
             destinations: .iOS,
@@ -90,6 +97,11 @@ let project = Project(
             name: "DesignSystemTests",
             buildAction: .buildAction(targets: [.target("DesignSystemTests")]),
             testAction: .targets([.testableTarget(target: .target("DesignSystemTests"))])
+        ),
+        .scheme(
+            name: "MirrorFeatureTests",
+            buildAction: .buildAction(targets: [.target("MirrorFeatureTests")]),
+            testAction: .targets([.testableTarget(target: .target("MirrorFeatureTests"))])
         ),
     ]
 )
