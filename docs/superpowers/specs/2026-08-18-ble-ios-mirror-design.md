@@ -33,7 +33,6 @@ graph LR
         Agg["Aggregator<br/>(기존)"]
         Gate1["EmitGate 500ms<br/>(기존)"]
         FE["Svelte Detail<br/>(기존)"]
-        Watch["watch 채널<br/>(신규 · latest-wins)"]
         Bridge["BleBridge<br/>EmitGate 1000ms"]
         Periph["BlePeripheral<br/>CoreBluetooth"]
     end
@@ -45,13 +44,21 @@ graph LR
     end
 
     Agg --> Gate1 --> FE
-    Agg --> Watch --> Bridge --> Periph
+    Agg -->|"틱 루프에서 직접 호출<br/>(논블로킹)"| Bridge --> Periph
     Periph -.->|"GATT notify"| Client --> Reasm --> Store --> UI
 ```
 
-기존 코드에 대한 **유일한 침습 지점은 `lib.rs` 스냅샷 틱 루프에 watch 송신 한 줄**이다.
-`tokio::sync::watch`는 최신값만 유지하고 수신자가 느려도 송신을 막지 않으므로, BLE 태스크가
-지연되거나 죽어도 Aggregator와 기존 UI 경로는 영향을 받지 않는다.
+기존 코드에 대한 **유일한 침습 지점은 `lib.rs` 스냅샷 틱 루프에 `BleBridge::on_snapshot` 호출 한 줄**이며,
+기존 `emit("snapshot")` **뒤에** 놓아 BLE가 실패해도 기존 경로가 먼저 끝나도록 한다.
+
+BLE가 기존 동작에 전이되지 않는 근거는 `on_snapshot`이 **어느 경로로도 블로킹하지 않는다**는 것이다.
+꺼져 있거나 구독자가 없으면 즉시 반환하고, 전송은 `offer_frame`이 메인 스레드로 던지는
+fire-and-forget이며, 직렬화·청킹은 1KB 수준이라 마이크로초 단위다. 실제 전송과 백프레셔는
+메인 스레드가 소유한 송신 큐(4.5)가 책임진다.
+
+> 1단계 계획 수립 중 이 부분을 단순화했다. 당초 `tokio::sync::watch`(latest-wins)로 분기하려 했으나,
+> 위 근거로 분리 태스크와 채널이 순수한 추가 비용이라 직접 호출로 대체했다(YAGNI).
+> BLE 처리가 무거워지면 3단계에서 도입한다.
 
 ## 3. macOS 주변장치 구현 — 스파이크로 결정됨
 
@@ -103,21 +110,33 @@ graph LR
 `BleBridge`를 테스트하기 위해서다**(실기기 의존을 줄이는 것이 이 프로젝트의 주요 개발 비용 절감 수단이다).
 
 ```rust
-trait BlePeripheral: Send {
-    fn start(&mut self, cfg: ServiceConfig) -> anyhow::Result<()>;
-    fn stop(&mut self);
-    fn notify(&self, char_id: CharId, chunk: &[u8]) -> anyhow::Result<()>;
-    fn max_notify_len(&self) -> usize;
-    fn events(&mut self) -> mpsc::Receiver<PeripheralEvent>;
+trait BlePeripheral: Send + Sync {
+    fn start(&self) -> anyhow::Result<()>;
+    fn stop(&self);
+    /// 프레임을 넘긴다. 실제 전송과 백프레셔(4.5)는 구현체가 책임진다(fire-and-forget).
+    fn offer_frame(&self, ch: CharId, chunks: Vec<Vec<u8>>);
+    fn subscribers(&self) -> Vec<Subscriber>;
+    /// 모든 구독자가 받을 수 있는 최대 청크 크기. 구독자가 없으면 None.
+    fn min_notify_len(&self) -> Option<usize> {
+        self.subscribers().iter().map(|s| s.max_notify_len).min()
+    }
 }
 
+struct Subscriber { id: CentralId, max_notify_len: usize }
+
 enum PeripheralEvent {
-    Subscribed { central: CentralId },
-    Unsubscribed { central: CentralId },
-    Write { central: CentralId, char_id: CharId, data: Vec<u8> },
-    ReadRequest { central: CentralId, char_id: CharId },
+    PoweredOn,
+    PoweredOff,
+    AdvertisingStarted,
+    Subscribed(Subscriber),
+    Unsubscribed(CentralId),
+    Error(String),
 }
 ```
+
+`offer_frame`이 청크 단위가 아니라 **프레임 단위**인 것이 핵심이다. 송신 큐와 백프레셔를 구현체
+안(메인 스레드)에 가둬야 `updateValue`의 `bool` 반환을 스레드 왕복 없이 처리할 수 있다.
+3단계 페어링에서 쓰기 요청(`Write`)과 읽기 요청 이벤트를 이 enum에 추가한다.
 
 **Windows**: `#[cfg(target_os = "macos")]`로 게이트하고 비-macOS는 no-op 스텁. 기존 MSI 릴리즈가 깨지지 않는다.
 
@@ -181,7 +200,7 @@ GATT notify는 연결 내 순서가 보장되지만, 구독 시점이 프레임 
 
 | 키 | 원본 | 비고 |
 |---|---|---|
-| `t` | `emitted_at` | epoch 초(u32) |
+| `t` | `emitted_at` | epoch 초(u64). 모든 시각 필드가 u64로 통일된다 |
 | `k` | `AgentState.kind` | 0=claude, 1=codex |
 | `r` | `rate_tok_per_sec` | |
 | `t5` | `tokens_5h` | **`tokens_in + tokens_out` 합만** 보낸다. QuotaBar가 "동기화 전" 표시에만 쓰므로 세부 4필드가 불필요 |
@@ -271,7 +290,7 @@ on_ready():  paused = false; pump()
 
 ```
 src-tauri/src/ble/
-  mod.rs         BleBridge — 태스크 소유, watch 수신, 게이트, 인가 관리
+  mod.rs         BleBridge — 게이트, 직렬화, 청킹, 인가 관리
   peripheral.rs  trait BlePeripheral + macOS 구현 (A안, 실패 시 B안)
   wire.rs        DTO + From<&Snapshot>
   framing.rs     청커
@@ -380,7 +399,7 @@ BLE는 시뮬레이터에서 동작하지 않는다. 페어링·재연결·범�
 | 단계 | 산출물 | 완료 판정 |
 |---|---|---|
 | **0. 스파이크** ✅ **완료 2026-08-18** | objc2로 GATT 서비스 등록 + 광고 성공 확인 | **A안 탈락, B안 채택** (3장). 코드는 버렸다 |
-| **1. 전송 계층** | `wire.rs`·`framing.rs`·`BleBridge`·watch 연결·골든 벡터. Tuist 스캐폴딩 + `Wire`·`BLETransport`. iOS는 raw JSON 덤프 화면. Mac에 `Devices` 탭 + 공유 토글(기본 off) | 실기기에서 스냅샷 JSON이 1Hz로 흐른다 |
+| **1. 전송 계층** | `wire.rs`·`framing.rs`·`send_queue.rs`·`BleBridge`·골든 벡터. Tuist 스캐폴딩 + `Wire`·`BLETransport`. iOS는 raw JSON 덤프 화면. Mac에 `Devices` 탭 + 공유 토글(기본 off) | 실기기에서 스냅샷 JSON이 1Hz로 흐른다 |
 | **2. iOS UI** | `DesignSystem`·`MirrorFeature`. Detail 화면 미러링 완성 | Detail 창과 나란히 놓고 시각적으로 일치 |
 | **3. 페어링** | `pairing.rs`·`Devices` 탭·iOS 페어링 화면·Keychain | 페어링 안 한 기기가 스냅샷을 못 받는다 |
 
@@ -397,4 +416,4 @@ BLE는 시뮬레이터에서 동작하지 않는다. 페어링·재연결·범�
 | macOS Bluetooth 권한 누락 | 공증 빌드가 첫 호출에서 종료 | `Info.plist` 추가를 1단계 필수 항목으로 고정 |
 | 언어 간 프레이밍 불일치 | 실기기에서만 드러나는 난해한 버그 | 골든 벡터 교차 테스트 |
 | BLE 실기기 의존으로 개발 루프 느림 | 반복 속도 저하 | `Wire`·`FrameReassembler`·`framing.rs`를 순수 유닛으로 분리해 대부분을 실기기 없이 검증 |
-| BLE 태스크 지연이 본 앱에 전이 | 기존 기능 회귀 | `watch` 채널(latest-wins)로 백프레셔 차단 |
+| BLE 처리 지연이 본 앱에 전이 | 기존 기능 회귀 | `on_snapshot`이 논블로킹(2장). 전송은 메인 스레드 송신 큐가 fire-and-forget 으로 처리 |
