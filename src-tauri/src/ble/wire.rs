@@ -145,6 +145,15 @@ mod tests {
         }
     }
 
+    /// 주간 쿼터가 채워진 스냅샷. `pw`/`rw` 는 값이 있을 때만 직렬화되므로,
+    /// 값이 실린 골든 벡터가 없으면 키 이름 변경·삭제를 아무도 잡지 못한다.
+    fn sample_snapshot_with_weekly() -> Snapshot {
+        let mut s = sample_snapshot();
+        s.agents[0].quota_used_pct_weekly = Some(41.5);
+        s.agents[0].quota_reset_at_weekly = Some(UNIX_EPOCH + Duration::from_secs(1_755_900_000));
+        s
+    }
+
     #[test]
     fn fnv1a_matches_known_vector() {
         // FNV-1a 32bit 표준 테스트 벡터
@@ -223,5 +232,31 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(actual, expected);
+    }
+
+    /// 주간 쿼터가 실린 두 번째 골든 벡터. Swift 쪽은 값이 없는 벡터만으로는
+    /// `pw`/`rw` 의 이름 변경을 nil 과 구분할 수 없으므로 이 벡터가 필요하다.
+    /// 갱신: UPDATE_GOLDEN=1 cargo test --manifest-path src-tauri/Cargo.toml ble::wire::tests::golden
+    #[test]
+    fn golden_snapshot_with_weekly_matches() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/ble-protocol/golden/snapshot-weekly-sample.json");
+        let dto = MirrorSnapshot::from(&sample_snapshot_with_weekly());
+        assert_eq!(dto.a[0].pw, Some(41.5));
+        assert_eq!(dto.a[0].rw, Some(1_755_900_000));
+        let actual = serde_json::to_value(&dto).unwrap();
+
+        if std::env::var("UPDATE_GOLDEN").is_ok() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, serde_json::to_string_pretty(&actual).unwrap() + "\n").unwrap();
+            return;
+        }
+        let expected: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect(
+                "골든 벡터가 없다. UPDATE_GOLDEN=1 로 생성하고 커밋하라",
+            ))
+            .unwrap();
+        assert_eq!(actual, expected, "주간 쿼터 필드가 골든 벡터와 어긋났다");
     }
 }

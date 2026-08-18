@@ -34,8 +34,17 @@ pub struct BlePeer {
     pub mtu: usize,
 }
 
+/// 이 빌드에 실제 BLE 주변장치 구현이 있는지. macOS 외 플랫폼은 FakePeripheral 이라
+/// 토글이 성공을 보고해도 아무 일도 일어나지 않으므로, 프론트가 UI 자체를 숨길 수 있게
+/// 백엔드가 사실을 알려준다(프론트에서 OS 를 추측하지 않는다).
+#[cfg(target_os = "macos")]
+const BLE_SUPPORTED: bool = true;
+#[cfg(not(target_os = "macos"))]
+const BLE_SUPPORTED: bool = false;
+
 #[derive(Clone, serde::Serialize)]
 pub struct BleStatus {
+    pub supported: bool,
     pub enabled: bool,
     pub advertising: bool,
     pub peers: Vec<BlePeer>,
@@ -65,6 +74,7 @@ async fn ble_status(state: tauri::State<'_, Arc<BleHandle>>) -> Result<BleStatus
     #[cfg(not(target_os = "macos"))]
     let peers = Vec::new();
     Ok(BleStatus {
+        supported: BLE_SUPPORTED,
         enabled: bridge.is_enabled(),
         advertising: state.advertising.load(Ordering::Relaxed),
         peers,
@@ -77,10 +87,17 @@ async fn ble_set_enabled(
     enabled: bool,
     state: tauri::State<'_, Arc<BleHandle>>,
 ) -> Result<(), String> {
-    state.bridge.lock().await.set_enabled(enabled);
+    let result = state.bridge.lock().await.set_enabled(enabled);
     if !enabled {
         state.advertising.store(false, Ordering::Relaxed);
         *state.last_error.lock().unwrap() = None;
+    }
+    // 시작 실패는 last_error(패널 표시)와 Err(프론트의 try/catch) 양쪽으로 알린다.
+    if let Err(e) = result {
+        let msg = format!("BLE 시작 실패: {e}");
+        state.advertising.store(false, Ordering::Relaxed);
+        *state.last_error.lock().unwrap() = Some(msg.clone());
+        return Err(msg);
     }
     Ok(())
 }

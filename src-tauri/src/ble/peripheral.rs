@@ -67,6 +67,8 @@ pub struct FakePeripheral {
     frames: Mutex<Vec<(CharId, Vec<Vec<u8>>)>>,
     subs: Mutex<Vec<Subscriber>>,
     started: Mutex<bool>,
+    /// Some 이면 start() 가 이 메시지로 실패한다(오류 전파 테스트용).
+    start_error: Mutex<Option<String>>,
 }
 
 impl FakePeripheral {
@@ -83,10 +85,16 @@ impl FakePeripheral {
     pub fn is_started(&self) -> bool {
         *self.started.lock().unwrap()
     }
+    pub fn set_start_error(&self, msg: Option<String>) {
+        *self.start_error.lock().unwrap() = msg;
+    }
 }
 
 impl BlePeripheral for FakePeripheral {
     fn start(&self) -> anyhow::Result<()> {
+        if let Some(msg) = self.start_error.lock().unwrap().clone() {
+            return Err(anyhow::anyhow!(msg));
+        }
         *self.started.lock().unwrap() = true;
         Ok(())
     }

@@ -11,7 +11,14 @@
 
   onMount(() => {
     store.loadTriggers();
+    // Devices 탭 노출 여부가 ble.supported 에 달려 있으므로 패널을 열기 전에 상태를 받아둔다.
+    // initBle 은 멱등하므로 DevicePanel 의 onMount 와 중복 호출되어도 안전하다.
+    store.initBle();
   });
+
+  // macOS 외 빌드에는 실제 BLE 구현이 없다(FakePeripheral). 토글이 성공을 보고하면서
+  // 아무 일도 일어나지 않는 상태를 보여주지 않도록 탭 자체를 감춘다.
+  let bleSupported = $derived(store.ble?.supported ?? false);
 </script>
 
 <div class="window-root">
@@ -33,12 +40,22 @@
     <button class="tab" class:active={activeTab === "triggers"} onclick={() => (activeTab = "triggers")}>
       Triggers
     </button>
-    <button class="tab" class:active={activeTab === "devices"} onclick={() => (activeTab = "devices")}>
-      Devices
-    </button>
+    {#if bleSupported}
+      <button class="tab" class:active={activeTab === "devices"} onclick={() => (activeTab = "devices")}>
+        Devices
+      </button>
+    {/if}
   </div>
 
-  {#if activeTab === "sessions"}
+  {#if activeTab === "triggers"}
+    <div class="triggers">
+      <TriggerList />
+      <AddTriggerForm />
+    </div>
+  {:else if activeTab === "devices" && bleSupported}
+    <DevicePanel />
+  {:else}
+    <!-- 탭이 감춰진 뒤에도 devices 가 남아 있을 수 있으므로 sessions 를 폴백으로 둔다 -->
     {#if store.snap}
       <div class="sessions">
         <SessionList snap={store.snap} />
@@ -46,13 +63,6 @@
     {:else}
       <p class="subtle">Waiting for snapshot…</p>
     {/if}
-  {:else if activeTab === "triggers"}
-    <div class="triggers">
-      <TriggerList />
-      <AddTriggerForm />
-    </div>
-  {:else}
-    <DevicePanel />
   {/if}
 </div>
 

@@ -22,12 +22,16 @@ public enum ActivityStatusCode: Equatable, Sendable {
     case active
     case idle
     case dormant
+    /// Rust 가 새 상태 코드를 추가했을 때 dormant 로 조용히 뭉뚱그리지 않기 위한 값.
+    /// AgentKindCode 와 같은 규칙을 쓴다 — 모르는 코드는 모른다고 표시한다.
+    case unknown
 
     init(code: UInt8) {
         switch code {
         case 0: self = .active
         case 1: self = .idle
-        default: self = .dormant
+        case 2: self = .dormant
+        default: self = .unknown
         }
     }
 }

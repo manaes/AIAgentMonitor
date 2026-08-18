@@ -144,6 +144,27 @@ mod tests {
         assert!(matches!(chunk(0, &payload, 20), Err(FramingError::TooLarge)));
     }
 
+    /// 정확한 경계값 고정. `count > MAX_CHUNKS` 가 `>=` 로 미끄러지거나 캐스팅이 어긋나면
+    /// `count as u8` 이 0 이 되어(256 → 0) 수신 측이 모든 패킷을 버리고 미러가 조용히 영구 정지한다.
+    #[test]
+    fn accepts_exactly_255_chunks() {
+        // max_chunk 20 → 본문 17바이트. 255*17 이 정확히 255 청크.
+        let payload = vec![0u8; 255 * 17];
+        let f = chunk(0, &payload, 20).expect("255 청크는 허용된다");
+        assert_eq!(f.len(), 255);
+        assert_eq!(f[0][2], 255, "헤더의 chunk_count 가 255 여야 한다");
+        assert_eq!(f[254][1], 254, "마지막 chunk_idx 는 254");
+    }
+
+    #[test]
+    fn rejects_exactly_256_chunks() {
+        let payload = vec![0u8; 255 * 17 + 1];
+        assert!(
+            matches!(chunk(0, &payload, 20), Err(FramingError::TooLarge)),
+            "256 청크는 u8 에 담기지 않으므로 반드시 거부한다"
+        );
+    }
+
     #[test]
     fn round_trips_through_reassembler() {
         let payload: Vec<u8> = (0..500u32).map(|i| (i % 251) as u8).collect();

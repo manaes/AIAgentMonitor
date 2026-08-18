@@ -85,11 +85,14 @@ export async function fireTriggerNow(id: string): Promise<void> {
 
 export type BlePeer = { id: string; mtu: number };
 export type BleStatus = {
+  // 이 빌드에 실제 BLE 구현이 있는지(macOS 만 true). Windows 는 아무 일도 일어나지 않으므로
+  // 이 값이 false 면 Devices 탭 자체를 노출하지 않는다.
+  supported: boolean;
   enabled: boolean;
   advertising: boolean;
   peers: BlePeer[];
-  /// 마지막 BLE 오류. 이 앱에는 tracing subscriber 가 없어 tracing::error! 출력이 전부 유실되므로,
-  /// 블루투스 권한 거부 같은 실패는 이 필드로만 사용자에게 도달한다.
+  // 마지막 BLE 오류. 이 앱에는 tracing subscriber 가 없어 tracing::error! 출력이 전부 유실되므로,
+  // 블루투스 권한 거부 같은 실패는 이 필드로만 사용자에게 도달한다.
   last_error: string | null;
 };
 

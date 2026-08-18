@@ -37,19 +37,25 @@ impl BleBridge {
         self.enabled
     }
 
-    pub fn set_enabled(&mut self, on: bool) {
+    /// 실패를 호출자(Tauri 커맨드)에게 그대로 넘긴다. 이 크레이트에는 tracing subscriber 가
+    /// 없어 로그가 아무 데도 남지 않으므로, 오류가 UI 까지 도달하는 유일한 경로다.
+    pub fn set_enabled(&mut self, on: bool) -> anyhow::Result<()> {
         if on == self.enabled {
-            return;
+            return Ok(());
         }
         self.enabled = on;
         if on {
+            // 게이트는 내용 해시만 보고 억제하므로(emitted_at 은 해시에 없다), 껐다 켠 뒤
+            // 내용이 그대로면 첫 프레임이 영구히 억제된다. 재개 시엔 반드시 한 번 내보낸다.
+            self.gate.reset();
             if let Err(e) = self.peripheral.start() {
-                tracing::error!("BLE 시작 실패: {e}");
                 self.enabled = false;
+                return Err(e);
             }
         } else {
             self.peripheral.stop();
         }
+        Ok(())
     }
 
     /// 스냅샷 틱마다 호출한다. 게이트·구독자·직렬화·청킹을 모두 여기서 판단한다.
@@ -154,7 +160,7 @@ mod tests {
     #[test]
     fn does_nothing_without_subscribers() {
         let (mut b, fake) = bridge();
-        b.set_enabled(true);
+        b.set_enabled(true).unwrap();
         b.on_snapshot(&snap(1.0, 1000), UNIX_EPOCH + Duration::from_secs(1000));
         assert!(fake.taken_frames().is_empty(), "구독자가 없으면 직렬화도 하지 않는다");
     }
@@ -162,7 +168,7 @@ mod tests {
     #[test]
     fn emits_chunked_snapshot_frame() {
         let (mut b, fake) = bridge();
-        b.set_enabled(true);
+        b.set_enabled(true).unwrap();
         fake.set_subscribers(vec![Subscriber {
             id: CentralId("A".into()),
             max_notify_len: 185,
@@ -188,7 +194,7 @@ mod tests {
     #[test]
     fn throttles_to_one_hz() {
         let (mut b, fake) = bridge();
-        b.set_enabled(true);
+        b.set_enabled(true).unwrap();
         fake.set_subscribers(vec![Subscriber {
             id: CentralId("A".into()),
             max_notify_len: 185,
@@ -208,7 +214,7 @@ mod tests {
     #[test]
     fn frame_id_increments_per_frame() {
         let (mut b, fake) = bridge();
-        b.set_enabled(true);
+        b.set_enabled(true).unwrap();
         fake.set_subscribers(vec![Subscriber {
             id: CentralId("A".into()),
             max_notify_len: 185,
@@ -224,16 +230,54 @@ mod tests {
     #[test]
     fn disabling_stops_the_peripheral() {
         let (mut b, fake) = bridge();
-        b.set_enabled(true);
+        b.set_enabled(true).unwrap();
         assert!(fake.is_started());
-        b.set_enabled(false);
+        b.set_enabled(false).unwrap();
         assert!(!fake.is_started());
+    }
+
+    #[test]
+    fn re_enabling_sends_a_frame_even_if_content_is_unchanged() {
+        let (mut b, fake) = bridge();
+        b.set_enabled(true).unwrap();
+        fake.set_subscribers(vec![Subscriber {
+            id: CentralId("A".into()),
+            max_notify_len: 185,
+        }]);
+        let t0 = UNIX_EPOCH + Duration::from_secs(1000);
+        let content = snap(1.0, 1000);
+        b.on_snapshot(&content, t0);
+        assert_eq!(fake.taken_frames().len(), 1);
+
+        // 껐다 켜면 내용이 그대로여도 다시 보내야 한다 — iOS 는 재구독 직후 화면이 비어 있다.
+        b.set_enabled(false).unwrap();
+        b.set_enabled(true).unwrap();
+        b.on_snapshot(&content, t0 + Duration::from_millis(1100));
+        assert_eq!(
+            fake.taken_frames().len(),
+            1,
+            "재개 후 첫 프레임이 unchanged 로 억제되면 미러가 빈 화면으로 남는다"
+        );
+    }
+
+    #[test]
+    fn failed_start_reports_error_and_rolls_back() {
+        let (mut b, fake) = bridge();
+        fake.set_start_error(Some("권한 거부".to_string()));
+        let err = b.set_enabled(true).expect_err("start() 실패는 호출자에게 전달되어야 한다");
+        assert!(err.to_string().contains("권한 거부"), "실제 오류: {err}");
+        assert!(!b.is_enabled(), "실패했으면 enabled 를 되돌려야 한다");
+
+        // 되돌아갔으므로 다시 켜기를 시도할 수 있어야 한다(같은 값이라 무시되면 안 된다).
+        fake.set_start_error(None);
+        b.set_enabled(true).unwrap();
+        assert!(b.is_enabled());
     }
 
     #[test]
     fn gate_retries_after_failed_frame() {
         let (mut b, fake) = bridge();
-        b.set_enabled(true);
+        b.set_enabled(true).unwrap();
         // max_notify_len 4 → 본문 1바이트. big_snap 은 255바이트를 훌쩍 넘으므로
         // framing::chunk 이 반드시 TooLarge 로 실패한다.
         fake.set_subscribers(vec![Subscriber {

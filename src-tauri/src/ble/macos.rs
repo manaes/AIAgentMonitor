@@ -33,16 +33,30 @@ fn delegate_slot() -> &'static Mutex<Option<usize>> {
     DELEGATE.get_or_init(|| Mutex::new(None))
 }
 
-/// 슬롯에 델리게이트가 있으면 메인 스레드에서 `f` 를 실행한다. 원시 포인터를
-/// `&Delegate` 로 되돌리는 유일한 지점 — 이 함수 밖에서는 절대 역참조하지 않는다.
-fn with_delegate(app: &AppHandle, f: impl FnOnce(&Delegate) + Send + 'static) {
-    let _ = app.run_on_main_thread(move || {
+/// 슬롯에 델리게이트가 있으면 `f`, 없으면 `absent` 를 메인 스레드에서 실행한다.
+/// 원시 포인터를 `&Delegate` 로 되돌리는 유일한 지점 — 이 함수 밖에서는 절대 역참조하지 않는다.
+///
+/// "있으면/없으면" 판정을 이 클로저 **안**에서 하는 것이 핵심이다. 슬롯에 값을 쓰는 것도
+/// 메인 스레드뿐이므로, 판정과 기록이 같은 메인 스레드 턴에서 직렬화된다. 호출 스레드에서
+/// 미리 검사하면 start() 두 번이 겹칠 때 둘 다 "없음"으로 보고 델리게이트를 둘 만든다.
+fn with_delegate_or(
+    app: &AppHandle,
+    f: impl FnOnce(&Delegate) + Send + 'static,
+    absent: impl FnOnce() + Send + 'static,
+) -> tauri::Result<()> {
+    app.run_on_main_thread(move || {
         let Some(raw) = *delegate_slot().lock().unwrap() else {
+            absent();
             return;
         };
         // 메인 스레드에서만 실행되는 클로저 안이므로 역참조가 안전하다.
         f(unsafe { &*(raw as *const Delegate) });
-    });
+    })
+}
+
+/// 델리게이트가 없으면 아무것도 하지 않는 `with_delegate_or`.
+fn with_delegate(app: &AppHandle, f: impl FnOnce(&Delegate) + Send + 'static) {
+    let _ = with_delegate_or(app, f, || {});
 }
 
 /// 메인 스레드에서만 접근하는 상태.
@@ -204,6 +218,10 @@ impl Delegate {
             .borrow_mut()
             .chars
             .insert(CharId::Snapshot.uuid(), snapshot_ch);
+        // 전원 재순환(제어 센터 블루투스 off→on)이나 재개 때 동일 SERVICE_UUID 가 GATT DB 에
+        // 중복 등록되면 iOS 가 낡은 서비스에 바인딩해 영구히 데이터가 흐르지 않는다.
+        // 비어 있어도 무해하므로 무조건 먼저 비운다.
+        unsafe { mgr.removeAllServices() };
         unsafe { mgr.addService(&svc) };
     }
 
@@ -269,53 +287,65 @@ impl BlePeripheral for MacPeripheral {
     fn start(&self) -> anyhow::Result<()> {
         // 이미 만들어진 델리게이트가 있으면 재사용한다. 매 on/off 사이클마다 새
         // Delegate+CBPeripheralManager+CBMutableService 를 만들면 이전 것들이 해제되지
-        // 않고 계속 쌓이고, 동일한 SERVICE_UUID 가 GATT DB 에 중복 등록된다. stop() 은
-        // 광고만 멈췄을 뿐이므로, 재개할 때도 광고만 다시 시작하면 된다.
-        if delegate_slot().lock().unwrap().is_some() {
-            with_delegate(&self.app, |d| {
-                let Some(mgr) = d.ivars().borrow().manager.clone() else {
+        // 않고 계속 쌓이고, 동일한 SERVICE_UUID 가 GATT DB 에 중복 등록된다.
+        // 재사용/생성 판정은 with_delegate_or 가 메인 스레드 안에서 한다(중복 생성 방지).
+        let events = self.events.clone();
+        with_delegate_or(
+            &self.app,
+            // 재사용 경로. stop() 이 서비스를 내렸으므로 서비스부터 다시 올린다.
+            // 광고는 didAddService 콜백이 이어서 시작하므로 여기서 부르지 않는다 — 생성 경로와 동일하다.
+            |d| {
+                let mgr = d.ivars().borrow().manager.clone();
+                let Some(mgr) = mgr else {
                     return;
                 };
                 // PoweredOn 이 아니면 didUpdateState 콜백이 다시 켜졌을 때 publish()가 처리한다.
                 if unsafe { mgr.state() } == CBManagerState::PoweredOn {
-                    d.advertise(&mgr);
+                    d.publish(&mgr);
                 }
-            });
-            return Ok(());
-        }
-
-        let events = self.events.clone();
-        self.app.run_on_main_thread(move || {
-            let state = MainState {
-                manager: None,
-                chars: HashMap::new(),
-                subs: HashMap::new(),
-                queues: HashMap::from([(CharId::Snapshot.uuid(), SendQueue::new())]),
-                events,
-            };
-            let d = Delegate::alloc().set_ivars(RefCell::new(state));
-            let d: Retained<Delegate> = unsafe { msg_send![super(d), init] };
-            let proto = ProtocolObject::from_ref(&*d);
-            let mgr: Retained<CBPeripheralManager> = unsafe {
-                CBPeripheralManager::initWithDelegate_queue(
-                    CBPeripheralManager::alloc(),
-                    Some(proto),
-                    None,
-                )
-            };
-            d.ivars().borrow_mut().manager = Some(mgr);
-            let raw = Retained::into_raw(d) as usize; // 메인 스레드에서만 역참조한다
-            *delegate_slot().lock().unwrap() = Some(raw);
-        })?;
+            },
+            // 생성 경로.
+            move || {
+                let state = MainState {
+                    manager: None,
+                    chars: HashMap::new(),
+                    subs: HashMap::new(),
+                    queues: HashMap::from([(CharId::Snapshot.uuid(), SendQueue::new())]),
+                    events,
+                };
+                let d = Delegate::alloc().set_ivars(RefCell::new(state));
+                let d: Retained<Delegate> = unsafe { msg_send![super(d), init] };
+                let proto = ProtocolObject::from_ref(&*d);
+                let mgr: Retained<CBPeripheralManager> = unsafe {
+                    CBPeripheralManager::initWithDelegate_queue(
+                        CBPeripheralManager::alloc(),
+                        Some(proto),
+                        None,
+                    )
+                };
+                d.ivars().borrow_mut().manager = Some(mgr);
+                let raw = Retained::into_raw(d) as usize; // 메인 스레드에서만 역참조한다
+                *delegate_slot().lock().unwrap() = Some(raw);
+            },
+        )?;
         Ok(())
     }
 
     fn stop(&self) {
         self.subs_mirror.lock().unwrap().clear();
         with_delegate(&self.app, |d| {
-            if let Some(mgr) = d.ivars().borrow().manager.clone() {
-                unsafe { mgr.stopAdvertising() };
-            }
+            let mgr = d.ivars().borrow().manager.clone();
+            let Some(mgr) = mgr else {
+                return;
+            };
+            unsafe { mgr.stopAdvertising() };
+            // CBPeripheralManager 에는 central 연결을 직접 끊는 API 가 없다. 서비스를 내리는 것이
+            // 연결된 central 에게 "이 주변장치는 더 이상 없다"고 알리는 유일한 수단이고,
+            // 그래야 실제 Unsubscribed 가 발생해 재개 시 재구독이 이뤄진다.
+            unsafe { mgr.removeAllServices() };
+            // 서비스를 내리면 구독 상태도 함께 무효다. subs 를 남겨두면 재개 후에도
+            // didSubscribe 가 다시 오지 않아 subs_mirror 가 영원히 비어 미러가 멈춘다.
+            d.ivars().borrow_mut().subs.clear();
         });
     }
 
