@@ -1,0 +1,41 @@
+import UIKit
+import XCTest
+@testable import DesignSystem
+
+final class QuotaBarViewTests: XCTestCase {
+
+    func testShowsBarsWhenSynced() {
+        let v = QuotaBarView()
+        v.configure(tokens5h: 48210, autoPct: 62.4, weeklyPct: 31.5, isReset5h: false)
+        XCTAssertEqual(v.fivePercentText, "62%", "원본은 toFixed(0)")
+        XCTAssertEqual(v.weeklyPercentText, "32%", "31.5 는 반올림되어 32")
+        XCTAssertNil(v.fallbackText, "동기화됐으면 폴백 문구는 없다")
+    }
+
+    func testShowsFallbackBeforeSync() {
+        let v = QuotaBarView()
+        v.configure(tokens5h: 48210, autoPct: nil, weeklyPct: nil, isReset5h: false)
+        XCTAssertNil(v.fivePercentText)
+        XCTAssertEqual(v.fallbackText, "5h 토큰: 48.2k · 동기화 전")
+    }
+
+    func testWeeklyRowHiddenWhenWeeklyMissing() {
+        let v = QuotaBarView()
+        v.configure(tokens5h: 0, autoPct: 50, weeklyPct: nil, isReset5h: false)
+        XCTAssertEqual(v.fivePercentText, "50%")
+        XCTAssertNil(v.weeklyPercentText, "주간 값이 없으면 주간 줄 자체가 없다")
+    }
+
+    func testResetShowsZeroPercentNotFallback() {
+        let v = QuotaBarView()
+        v.configure(tokens5h: 100, autoPct: 62, weeklyPct: nil, isReset5h: true)
+        XCTAssertEqual(v.fivePercentText, "0%")
+        XCTAssertNil(v.fallbackText)
+    }
+
+    func testResetWithoutPriorSyncStillShowsZero() {
+        let v = QuotaBarView()
+        v.configure(tokens5h: 100, autoPct: nil, weeklyPct: nil, isReset5h: true)
+        XCTAssertEqual(v.fivePercentText, "0%", "원본은 reset_5h 를 먼저 평가한다")
+    }
+}
