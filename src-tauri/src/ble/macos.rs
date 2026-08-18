@@ -16,12 +16,21 @@ use objc2_core_bluetooth::*;
 use objc2_foundation::{NSArray, NSData, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use tauri::AppHandle;
 use tokio::sync::mpsc::UnboundedSender;
 
 fn uuid(s: &str) -> Retained<CBUUID> {
     unsafe { CBUUID::UUIDWithString(&NSString::from_str(s)) }
+}
+
+/// 델리게이트의 원시 포인터(usize)를 메인 스레드 밖으로도 옮길 수 있게 보관한다.
+/// `usize` 는 Send 이므로 이 슬롯 자체는 스레드 간 이동이 안전하다.
+/// 역참조는 `run_on_main_thread` 클로저 안에서만 이뤄지므로 안전성이 유지된다.
+static DELEGATE: OnceLock<Mutex<Option<usize>>> = OnceLock::new();
+
+fn delegate_slot() -> &'static Mutex<Option<usize>> {
+    DELEGATE.get_or_init(|| Mutex::new(None))
 }
 
 /// 메인 스레드에서만 접근하는 상태.
@@ -266,20 +275,41 @@ impl BlePeripheral for MacPeripheral {
                 )
             };
             d.ivars().borrow_mut().manager = Some(mgr);
-            // 델리게이트를 살려두기 위해 누출시킨다. stop() 은 광고만 멈춘다.
-            std::mem::forget(d);
+            let raw = Retained::into_raw(d) as usize; // 메인 스레드에서만 역참조한다
+            *delegate_slot().lock().unwrap() = Some(raw);
         })?;
         Ok(())
     }
 
     fn stop(&self) {
-        let _ = self.app.run_on_main_thread(|| {});
         self.subs_mirror.lock().unwrap().clear();
+        let _ = self.app.run_on_main_thread(|| {
+            let Some(raw) = *delegate_slot().lock().unwrap() else {
+                return;
+            };
+            let d: &Delegate = unsafe { &*(raw as *const Delegate) };
+            if let Some(mgr) = d.ivars().borrow().manager.clone() {
+                unsafe { mgr.stopAdvertising() };
+            }
+        });
     }
 
     fn offer_frame(&self, ch: CharId, chunks: Vec<Vec<u8>>) {
-        let _ = (ch, chunks);
-        // Task 7 에서 델리게이트 핸들을 통해 메인 스레드로 전달한다.
+        let uuid = ch.uuid();
+        let _ = self.app.run_on_main_thread(move || {
+            let Some(raw) = *delegate_slot().lock().unwrap() else {
+                return;
+            };
+            // 메인 스레드에서만 실행되므로 역참조가 안전하다.
+            let d: &Delegate = unsafe { &*(raw as *const Delegate) };
+            {
+                let mut st = d.ivars().borrow_mut();
+                if let Some(q) = st.queues.get_mut(uuid) {
+                    q.offer(chunks);
+                }
+            }
+            d.ivars().borrow_mut().pump(uuid);
+        });
     }
 
     fn subscribers(&self) -> Vec<Subscriber> {

@@ -24,6 +24,60 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
 use types::{AgentKind, TokenEvent};
 
+use ble::peripheral::BlePeripheral;
+use ble::BleBridge;
+
+#[derive(Clone, serde::Serialize)]
+pub struct BlePeer {
+    pub id: String,
+    pub mtu: usize,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct BleStatus {
+    pub enabled: bool,
+    pub advertising: bool,
+    pub peers: Vec<BlePeer>,
+}
+
+pub struct BleHandle {
+    pub bridge: Mutex<BleBridge>,
+    #[cfg(target_os = "macos")]
+    pub peripheral: std::sync::Arc<ble::macos::MacPeripheral>,
+    pub advertising: AtomicBool,
+}
+
+#[tauri::command]
+async fn ble_status(state: tauri::State<'_, Arc<BleHandle>>) -> Result<BleStatus, String> {
+    let bridge = state.bridge.lock().await;
+    #[cfg(target_os = "macos")]
+    let peers = state
+        .peripheral
+        .subscribers()
+        .into_iter()
+        .map(|s| BlePeer { id: s.id.0, mtu: s.max_notify_len })
+        .collect();
+    #[cfg(not(target_os = "macos"))]
+    let peers = Vec::new();
+    Ok(BleStatus {
+        enabled: bridge.is_enabled(),
+        advertising: state.advertising.load(Ordering::Relaxed),
+        peers,
+    })
+}
+
+#[tauri::command]
+async fn ble_set_enabled(
+    enabled: bool,
+    state: tauri::State<'_, Arc<BleHandle>>,
+) -> Result<(), String> {
+    state.bridge.lock().await.set_enabled(enabled);
+    if !enabled {
+        state.advertising.store(false, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 fn hide_console_window(cmd: &mut Command) -> &mut Command {
     use std::os::windows::process::CommandExt;
@@ -431,6 +485,8 @@ pub fn run() {
             toggle_trigger_rule,
             fire_trigger_now,
             sync_quota,
+            ble_status,
+            ble_set_enabled,
         ])
         .setup({
             let aggregator = aggregator.clone();
@@ -478,6 +534,53 @@ pub fn run() {
                     }
                 }
 
+                let (ble_tx, mut ble_rx) = mpsc::unbounded_channel::<ble::peripheral::PeripheralEvent>();
+                #[cfg(target_os = "macos")]
+                let ble_handle = {
+                    let periph = std::sync::Arc::new(ble::macos::MacPeripheral::new(
+                        app.handle().clone(),
+                        ble_tx,
+                    ));
+                    Arc::new(BleHandle {
+                        bridge: Mutex::new(BleBridge::new(periph.clone())),
+                        peripheral: periph,
+                        advertising: AtomicBool::new(false),
+                    })
+                };
+                #[cfg(not(target_os = "macos"))]
+                let ble_handle = {
+                    drop(ble_tx);
+                    Arc::new(BleHandle {
+                        bridge: Mutex::new(BleBridge::new(std::sync::Arc::new(
+                            ble::peripheral::FakePeripheral::new(),
+                        ))),
+                        advertising: AtomicBool::new(false),
+                    })
+                };
+                {
+                    use tauri::Manager;
+                    app.manage(ble_handle.clone());
+                }
+
+                // BLE 이벤트 → 구독자 사본 갱신 + 프론트로 상태 push
+                {
+                    let h = ble_handle.clone();
+                    let app_for_ble = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        while let Some(ev) = ble_rx.recv().await {
+                            #[cfg(target_os = "macos")]
+                            h.peripheral.apply_event(&ev);
+                            if let ble::peripheral::PeripheralEvent::AdvertisingStarted = ev {
+                                h.advertising.store(true, Ordering::Relaxed);
+                            }
+                            if let ble::peripheral::PeripheralEvent::Error(ref e) = ev {
+                                tracing::error!("BLE 오류: {e}");
+                            }
+                            let _ = app_for_ble.emit("ble_status", ());
+                        }
+                    });
+                }
+
                 let app_handle = app.handle().clone();
                 let agg_for_ingest = aggregator.clone();
                 tauri::async_runtime::spawn(async move {
@@ -491,6 +594,7 @@ pub fn run() {
                 let gate_for_tick = gate.clone();
                 let quota_for_tick = quota_state.clone();
                 let codex_for_tick = codex_quota.clone();
+                let ble_for_tick = ble_handle.clone();
                 tauri::async_runtime::spawn(async move {
                     let clock = SystemClock;
                     let mut ticker = tokio::time::interval(Duration::from_millis(250));
@@ -531,10 +635,14 @@ pub fn run() {
                                 c.quota_reset_at_weekly = Some(r);
                             }
                         }
+                        let now = std::time::SystemTime::now();
                         let mut g = gate_for_tick.lock().await;
-                        if g.should_emit(&snap, std::time::SystemTime::now()) {
+                        if g.should_emit(&snap, now) {
                             let _ = app_handle.emit("snapshot", &snap);
                         }
+                        drop(g);
+                        // BLE 미러는 자체 게이트(1Hz)를 가지며, 꺼져 있거나 구독자가 없으면 즉시 반환한다.
+                        ble_for_tick.bridge.lock().await.on_snapshot(&snap, now);
                     }
                 });
 
