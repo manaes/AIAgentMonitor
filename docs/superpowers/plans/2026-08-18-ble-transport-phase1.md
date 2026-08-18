@@ -112,6 +112,7 @@ mod tests {
                     last_event_at: UNIX_EPOCH + Duration::from_secs(1_755_499_987),
                     status: ActivityStatus::Active,
                 }],
+                triggered_by: None,
             }],
         }
     }
@@ -1021,7 +1022,7 @@ git commit -m "feat(ble): 주변장치 트레이트와 테스트용 Fake 추가"
 - Consumes: `wire::MirrorSnapshot`, `framing::chunk`, `peripheral::{BlePeripheral, CharId, FakePeripheral}`, `crate::emitter::EmitGate`, `crate::types::Snapshot`
 - Produces: `BleBridge::new(peripheral: Arc<dyn BlePeripheral>) -> Self`, `BleBridge::on_snapshot(&mut self, snap: &Snapshot, now: SystemTime)`, `BleBridge::set_enabled(&mut self, bool)`, `BleBridge::is_enabled(&self) -> bool`
 
-`EmitGate` 를 `mod.rs` 밖에서 쓰려면 `src-tauri/src/lib.rs:3` 의 `mod emitter;` 를 `pub(crate) mod emitter;` 로 바꾸고, `emitter.rs` 의 `pub struct EmitGate` 는 이미 pub 이므로 그대로 둔다.
+`EmitGate` 는 `crate::emitter::EmitGate` 로 그대로 쓸 수 있다. Rust 에서 크레이트 루트의 비공개 모듈은 후손 모듈에서 접근 가능하므로 `lib.rs` 의 `mod emitter;` 는 **건드리지 않는다**.
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -1163,9 +1164,6 @@ pub mod peripheral;
 pub mod send_queue;
 pub mod wire;
 
-#[cfg(target_os = "macos")]
-pub mod macos;
-
 use crate::emitter::EmitGate;
 use crate::types::Snapshot;
 use peripheral::{BlePeripheral, CentralId, CharId, FakePeripheral, Subscriber};
@@ -1252,7 +1250,7 @@ Expected: PASS — Task 1~5 전체 통과
 - [ ] **Step 5: 커밋한다**
 
 ```bash
-git add src-tauri/src/ble/mod.rs src-tauri/src/lib.rs
+git add src-tauri/src/ble/mod.rs
 git commit -m "feat(ble): BleBridge 조립 및 게이트·청킹 연결"
 ```
 
@@ -1270,9 +1268,17 @@ git commit -m "feat(ble): BleBridge 조립 및 게이트·청킹 연결"
 
 **Interfaces:**
 - Consumes: `peripheral::{BlePeripheral, CharId, CentralId, Subscriber, PeripheralEvent, SERVICE_UUID, …}`, `send_queue::SendQueue`
-- Produces: `MacPeripheral::new(events: mpsc::UnboundedSender<PeripheralEvent>) -> Arc<MacPeripheral>`
+- Produces: `MacPeripheral::new(app: tauri::AppHandle, events: tokio::sync::mpsc::UnboundedSender<PeripheralEvent>) -> Self`, `MacPeripheral::apply_event(&self, &PeripheralEvent)`
 
-- [ ] **Step 1: 의존성을 macOS 전용으로 추가한다**
+- [ ] **Step 1: 모듈을 macOS 전용으로 선언한다**
+
+`src-tauri/src/ble/mod.rs` 의 `pub mod wire;` 아래에 추가한다. **이 선언은 Task 6 소관이다** — 더 앞 태스크에서 선언하면 `macos.rs` 가 없어 컴파일이 깨진다:
+```rust
+#[cfg(target_os = "macos")]
+pub mod macos;
+```
+
+- [ ] **Step 2: 의존성을 macOS 전용으로 추가한다**
 
 `src-tauri/Cargo.toml` 의 `[dev-dependencies]` **위에** 추가한다. 타깃별 의존성이라 Windows 빌드에는 아예 들어가지 않는다:
 ```toml
@@ -1282,7 +1288,7 @@ objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSData
 objc2-core-bluetooth = { version = "0.3", features = ["CBPeripheralManager", "CBPeripheralManagerConstants", "CBAdvertisementData", "CBCentral", "CBService", "CBCharacteristic", "CBDescriptor", "CBUUID", "CBAttribute", "CBATTRequest", "CBError", "CBManager", "CBPeer", "CBDefines"] }
 ```
 
-- [ ] **Step 2: Bluetooth 사용 설명을 추가한다**
+- [ ] **Step 3: Bluetooth 사용 설명을 추가한다**
 
 이 문자열이 없으면 **공증된 빌드가 첫 CoreBluetooth 호출에서 즉시 종료된다**(스펙 5.3).
 
@@ -1300,7 +1306,7 @@ objc2-core-bluetooth = { version = "0.3", features = ["CBPeripheralManager", "CB
 
 Tauri 2 는 `src-tauri/Info.plist` 를 자동 병합한다. 별도 설정은 필요 없다.
 
-- [ ] **Step 3: 구현을 쓴다**
+- [ ] **Step 4: 구현을 쓴다**
 
 `src-tauri/src/ble/macos.rs`:
 ```rust
@@ -1588,17 +1594,17 @@ impl BlePeripheral for MacPeripheral {
 
 > **주의**: 위 `offer_frame` 과 `stop` 은 Task 7 에서 델리게이트 핸들 공유를 붙이며 완성한다. 이 태스크의 완료 기준은 **컴파일 성공**이다.
 
-- [ ] **Step 4: macOS 빌드가 통과하는지 확인한다**
+- [ ] **Step 5: macOS 빌드가 통과하는지 확인한다**
 
 Run: `cargo build --manifest-path src-tauri/Cargo.toml`
 Expected: 컴파일 성공 (경고는 허용)
 
-- [ ] **Step 5: Windows 게이트가 유지되는지 확인한다**
+- [ ] **Step 6: Windows 게이트가 유지되는지 확인한다**
 
 Run: `cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc 2>&1 | tail -5`
 Expected: 타깃이 설치되어 있지 않으면 `target may not be installed` 로 끝난다 — 이 경우 `src-tauri/src/ble/mod.rs` 에서 `#[cfg(target_os = "macos")] pub mod macos;` 게이트가 있는지 눈으로 확인하는 것으로 대체한다.
 
-- [ ] **Step 6: 커밋한다**
+- [ ] **Step 7: 커밋한다**
 
 ```bash
 git add src-tauri/src/ble/macos.rs src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/Info.plist
