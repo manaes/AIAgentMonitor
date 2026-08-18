@@ -36,7 +36,9 @@
 - `>= 70` → `#30d158` → `#ff9f0a`
 - 그 외 → `#30d158` → `#34c759`
 
-치수: 카드 라운드 10, 목록 라운드 8, 바 높이 6·라운드 3, 에이전트 점 8pt, 세션 점 6pt, tok/s 22pt bold, 사용률 13pt bold, 본문 11pt, 라벨 10pt, 목록 제목 9pt.
+치수: 카드 라운드 10, 목록 라운드 8, 바 높이 6·라운드 3, 에이전트 점 8pt, 세션 점 6pt, tok/s 22pt bold, 사용률 13pt bold, **에이전트 이름 12pt semibold(크기 미지정 → body 상속)**, 본문 11pt, 라벨 10pt, 목록 제목 9pt.
+
+> 원본에 실재하는 font-size 는 9·10·11·12·22px 뿐이고 13px 는 `QuotaBar` 의 `.pct` 하나다. 이 목록에 없는 크기를 쓰면 두 화면이 어긋난다.
 
 ---
 
@@ -534,7 +536,9 @@ public enum Typography {
     public static let countdown = monospacedDigit(ofSize: 11, weight: .semibold)
     public static let label = UIFont.systemFont(ofSize: 10)
     public static let sectionLabel = UIFont.systemFont(ofSize: 9)
-    public static let name = UIFont.systemFont(ofSize: 13, weight: .semibold)
+    /// AgentCard.svelte:88 의 `.name` 은 font-weight: 600 만 지정하고 크기는
+    /// app.css:8 의 body 12px 를 상속한다. 13pt 가 아니다.
+    public static let name = UIFont.systemFont(ofSize: 12, weight: .semibold)
 
     private static func monospacedDigit(ofSize size: CGFloat, weight: UIFont.Weight) -> UIFont {
         UIFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
