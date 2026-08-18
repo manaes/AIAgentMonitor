@@ -73,6 +73,23 @@ public final class SessionRowView: UIView {
         // 10px 만큼 떨어진다 — 균일 6px 이 아니라 이 두 번째 간격만 넓힌다.
         leftStack.setCustomSpacing(10, after: projLabel)
 
+        // 모델이 가장 먼저 잘리는 것과, 0 폭까지 사라지는 것은 다르다 — 후자는
+        // 잘림이 아니라 정보 삭제다. iPhone 실기기 폭(약 215pt 가용)에서도 최소한
+        // 말줄임표를 포함한 몇 글자는 남도록 바닥을 둔다.
+        //
+        // 우선순위는 project(700)보다 높은 800 으로 뒀다 — 처음엔 project(700)와
+        // model 자체 compression resistance(500) 사이(600)를 시도했는데, 215pt 처럼
+        // 이름+프로젝트 전체 폭만으로 이미 여유가 없는 실측 폭에서는 solver 가
+        // "project 를 온전히 지키기(700) > model 바닥을 지키기(600)" 순으로 풀어
+        // model 이 오히려 0 까지 무너졌다(레이아웃 후 실측 확인). 바닥이 project 의
+        // 저항보다 먼저 지켜져야 "모델이 가장 먼저 줄어들되 바닥 아래로는 안 간다"가
+        // 성립하므로, 바닥 우선순위를 project 보다 위(800, name 의 1000 보다는 아래)로
+        // 올렸다 — 여유가 있을 때는 여전히 model(500) 이 project(700) 보다 먼저
+        // 줄어들고, 여유가 다 떨어지면 그 다음엔 project 가 이 바닥을 위해 양보한다.
+        modelLabel.snp.makeConstraints { make in
+            make.width.greaterThanOrEqualTo(30).priority(800)
+        }
+
         [dot, leftStack, rightLabel, relativeLabel].forEach(addSubview)
 
         dot.snp.makeConstraints { make in

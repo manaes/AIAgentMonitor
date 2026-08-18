@@ -75,7 +75,9 @@ final class SessionRowViewTests: XCTestCase {
                                       m: "claude-opus-5-extended-thinking",
                                       r: 10, t: 999_999, s: 0),
                     kind: .claude, now: now)
-        v.frame = CGRect(x: 0, y: 0, width: 300, height: 24)
+        // 320pt: model 이 바닥(30pt)에 닿지 않고도 자연스럽게 그보다 넓게 수렴하는
+        // "여유 있는" 폭 — project 가 바닥을 위해 양보할 필요가 없는 경우를 본다.
+        v.frame = CGRect(x: 0, y: 0, width: 320, height: 24)
         v.setNeedsLayout()
         v.layoutIfNeeded()
 
@@ -92,6 +94,35 @@ final class SessionRowViewTests: XCTestCase {
         XCTAssertLessThan(
             v.modelLabelWidth, v.modelLabelIntrinsicWidth - 0.5,
             "모델 이름은 폭이 부족하면 가장 먼저, 가장 많이 잘려야 한다"
+        )
+    }
+
+    /// iPhone 16 실기기에서 카드 패딩·오른쪽 영역을 뺀 실제 가용폭은 약 215pt다
+    /// (300pt 케이스는 여유 있는 경우일 뿐, 이쪽이 일반적인 경우). 이 좁은 영역에서는
+    /// 모델 라벨이 0 폭까지 사라지지 않고 최소 폭(바닥)을 지키면서도 여전히 잘려
+    /// 있어야 한다.
+    func testTruncationAtRealisticDeviceWidthKeepsModelAboveFloor() {
+        let v = SessionRowView()
+        v.configure(project: project(n: "4AIAgentMonitor",
+                                      m: "claude-opus-5-extended-thinking",
+                                      r: 10, t: 999_999, s: 0),
+                    kind: .claude, now: now)
+        v.frame = CGRect(x: 0, y: 0, width: 215, height: 24)
+        v.setNeedsLayout()
+        v.layoutIfNeeded()
+
+        XCTAssertEqual(
+            v.nameLabelWidth, v.nameLabelIntrinsicWidth,
+            accuracy: 0.5,
+            "215pt 처럼 좁은 폭에서도 에이전트 이름은 그대로 유지되어야 한다"
+        )
+        XCTAssertGreaterThanOrEqual(
+            v.modelLabelWidth, 30 - 0.5,
+            "모델 라벨은 0 으로 사라지지 않고 최소 폭(말줄임표가 보일 정도)을 지켜야 한다"
+        )
+        XCTAssertLessThan(
+            v.modelLabelWidth, v.modelLabelIntrinsicWidth - 0.5,
+            "바닥을 지키는 것과 별개로, 모델은 여전히 실제로 잘려 있어야 한다"
         )
     }
 }
