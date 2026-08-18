@@ -37,11 +37,20 @@ final class PaletteTests: XCTestCase {
         XCTAssertTrue(rgb(Palette.idleDot) == rgb(UIColor(hex: 0xff9f0a)))
     }
 
-    func testDotViewIsCircularAfterLayout() {
+    func testDotViewRendersAsCircleForItsIntrinsicSize() {
         let dot = DotView(diameter: 8)
-        dot.frame = CGRect(x: 0, y: 0, width: 8, height: 8)
-        dot.layoutIfNeeded()
-        XCTAssertEqual(dot.layer.cornerRadius, 4, accuracy: 0.01, "지름의 절반이어야 원이 된다")
+        dot.sizeToFit()
+        XCTAssertEqual(dot.intrinsicContentSize, CGSize(width: 8, height: 8))
+        XCTAssertEqual(dot.layer.cornerRadius * 2, dot.intrinsicContentSize.width, accuracy: 0.01,
+                       "지름의 절반이어야 원으로 보인다")
+        XCTAssertEqual(dot.intrinsicContentSize.width, dot.intrinsicContentSize.height,
+                       "가로세로가 같아야 원이다")
+    }
+
+    /// AgentCard.svelte:88 의 `.name` 은 크기를 지정하지 않아 app.css:8 의
+    /// body 12px 를 상속한다. 값이 다시 흔들리지 않도록 고정한다.
+    func testNameFontMatchesInheritedBodySize() {
+        XCTAssertEqual(Typography.name.pointSize, 12)
     }
 
     func testDotViewColorIsApplied() {
