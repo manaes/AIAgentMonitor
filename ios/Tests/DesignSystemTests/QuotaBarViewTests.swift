@@ -38,4 +38,36 @@ final class QuotaBarViewTests: XCTestCase {
         v.configure(tokens5h: 100, autoPct: nil, weeklyPct: nil, isReset5h: true)
         XCTAssertEqual(v.fivePercentText, "0%", "원본은 reset_5h 를 먼저 평가한다")
     }
+
+    func testPercentUsesAwayFromZeroRoundingLikeSource() {
+        let v = QuotaBarView()
+        // 짝수 반올림이면 "30%", JS toFixed 와 맞추면 "31%" 다.
+        v.configure(tokens5h: 0, autoPct: 30.5, weeklyPct: nil, isReset5h: false)
+        XCTAssertEqual(v.fivePercentText, "31%")
+    }
+
+    func testFillWidthEncodesPercentAfterLayout() {
+        let v = QuotaBarView()
+        v.configure(tokens5h: 0, autoPct: 50, weeklyPct: nil, isReset5h: false)
+        v.frame = CGRect(x: 0, y: 0, width: 200, height: 60)
+        v.layoutIfNeeded()
+        // 채움 막대가 트랙의 절반이어야 한다.
+        XCTAssertEqual(v.fiveFillRatio ?? -1, 0.5, accuracy: 0.02)
+    }
+
+    func testFillWidthIsZeroAtZeroPercent() {
+        let v = QuotaBarView()
+        v.configure(tokens5h: 0, autoPct: 0, weeklyPct: nil, isReset5h: false)
+        v.frame = CGRect(x: 0, y: 0, width: 200, height: 60)
+        v.layoutIfNeeded()
+        XCTAssertEqual(v.fiveFillRatio ?? -1, 0, accuracy: 0.02)
+    }
+
+    func testFillWidthIsFullAtHundredPercent() {
+        let v = QuotaBarView()
+        v.configure(tokens5h: 0, autoPct: 100, weeklyPct: nil, isReset5h: false)
+        v.frame = CGRect(x: 0, y: 0, width: 200, height: 60)
+        v.layoutIfNeeded()
+        XCTAssertEqual(v.fiveFillRatio ?? -1, 1.0, accuracy: 0.02)
+    }
 }

@@ -17,6 +17,8 @@ public final class QuotaBarView: UIView {
     public var fivePercentText: String? { fiveRow.isHidden ? nil : fiveRow.percentText }
     public var weeklyPercentText: String? { weeklyRow.isHidden ? nil : weeklyRow.percentText }
     public var fallbackText: String? { fallbackLabel.isHidden ? nil : fallbackLabel.text }
+    /// 5h 채움 막대의 실제 폭 비율(레이아웃 이후). 트랙 대비 채움 폭을 검증하기 위한 창구.
+    public var fiveFillRatio: CGFloat? { fiveRow.isHidden ? nil : fiveRow.fillRatio }
 
     public init() {
         super.init(frame: .zero)
@@ -29,6 +31,14 @@ public final class QuotaBarView: UIView {
         fallbackLabel.textColor = Palette.subtle
 
         [fiveRow, weeklyRow, fallbackLabel].forEach(stack.addArrangedSubview)
+
+        // configure() 가 처음 호출되기 전까지는 원본에 없는 "4번째 상태"(셋 다 동시에
+        // 보임)가 되지 않도록 전부 숨겨서 시작한다. tokens5h 값이 아직 없어
+        // 폴백 문구("N · 동기화 전")를 의미 있게 채울 수도 없으므로, 폴백을 먼저
+        // 보여주는 대신 숨김 상태를 기본값으로 택했다.
+        fiveRow.isHidden = true
+        weeklyRow.isHidden = true
+        fallbackLabel.isHidden = true
     }
 
     @available(*, unavailable)
@@ -68,6 +78,12 @@ private final class PercentRow: UIView {
     private var ratio: CGFloat = 0
 
     var percentText: String? { percentLabel.text }
+    /// 트랙 대비 채움 막대의 실제 폭 비율(레이아웃 후에만 유의미).
+    var fillRatio: CGFloat? {
+        let trackWidth = track.bounds.width
+        guard trackWidth > 0 else { return nil }
+        return fill.bounds.width / trackWidth
+    }
 
     init(title: String) {
         super.init(frame: .zero)
@@ -114,7 +130,10 @@ private final class PercentRow: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) 는 쓰지 않는다") }
 
     func apply(percent: Float) {
-        percentLabel.text = String(format: "%.0f%%", percent)
+        // %.0f 는 C 의 짝수 반올림이라 정확히 .5 인 값에서 JS 의 toFixed(0)(항상 0에서
+        // 먼 쪽으로 반올림)와 어긋난다. MirrorFormat.toFixed 가 그 규칙을 이미 golden
+        // table 로 맞춰뒀으므로 자체 포맷 대신 그대로 재사용한다.
+        percentLabel.text = MirrorFormat.toFixed(Double(percent), 0) + "%"
         ratio = CGFloat(max(0, min(100, percent)) / 100)
         let g = QuotaDisplay.gradient(forPercent: percent)
         gradient.colors = [UIColor(hex: g.startHex).cgColor, UIColor(hex: g.endHex).cgColor]

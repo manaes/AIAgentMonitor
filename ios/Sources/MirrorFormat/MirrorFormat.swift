@@ -59,7 +59,11 @@ public enum MirrorFormat {
         return "\(newInt).\(newFrac)"
     }
 
-    private static func toFixed(_ v: Double, _ places: Int) -> String {
+    /// JS 의 `toFixed`와 동일한 반올림(half away-from-zero)을 적용한 고정 소수점 문자열.
+    /// `tokensPerSec`/`tokensTotal`뿐 아니라 다른 모듈(예: 퍼센트 표시)도 이 규칙을
+    /// 그대로 따라야 Mac 쪽과 어긋나지 않으므로 공개한다. 로직은 바꾸지 않는다 —
+    /// 14,540개 골든 케이스로 고정되어 있다.
+    public static func toFixed(_ v: Double, _ places: Int) -> String {
         if let tie = awayFromZeroTieString(v, places: places) { return tie }
         return String(format: "%.\(places)f", v)
     }
