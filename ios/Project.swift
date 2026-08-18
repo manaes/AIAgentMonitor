@@ -70,6 +70,7 @@ let project = Project(
             sources: ["Sources/App/**"],
             dependencies: [
                 .target(name: "BLETransport"),
+                .target(name: "MirrorFeature"),
                 .external(name: "SnapKit"),
             ]
         ),

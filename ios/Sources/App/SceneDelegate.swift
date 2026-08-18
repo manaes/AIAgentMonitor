@@ -1,3 +1,5 @@
+import BLETransport
+import MirrorFeature
 import UIKit
 
 final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
@@ -10,7 +12,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     ) {
         guard let windowScene = scene as? UIWindowScene else { return }
         let w = UIWindow(windowScene: windowScene)
-        w.rootViewController = UINavigationController(rootViewController: RawDumpViewController())
+        let root = MirrorViewController(client: BLEClient())
+        w.rootViewController = UINavigationController(rootViewController: root)
         w.makeKeyAndVisible()
         window = w
     }
