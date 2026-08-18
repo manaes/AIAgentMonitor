@@ -5,13 +5,60 @@ import Foundation
 /// 반올림 방식과 경계값을 원본과 정확히 맞춘다.
 public enum MirrorFormat {
 
-    /// JS 의 toFixed 는 away-from-zero 로 반올림하는데 Swift 의 String(format:) 은
-    /// C 라이브러리의 짝수 반올림을 쓴다. 두 화면에 같은 숫자가 보여야 하므로
-    /// 포맷 전에 명시적으로 away-from-zero 로 맞춘다.
+    /// v 가 places 자리에서 "진짜" 동점(예: 1.25 를 소수 1자리로— 다음 자리가 정확히
+    /// 5 이고 그 뒤로 전부 0)인지 확인하고, 동점이면 away-from-zero 로 반올림한 문자열을
+    /// 반환한다. 동점이 아니면 nil — 이 경우 %.*f 의 결과가 이미 JS 와 일치한다.
+    ///
+    /// 왜 필요한가: JS 의 toFixed 와 C 의 %.*f 는 둘 다 이진값을 정확히 반올림하지만,
+    /// 동점에서만 규칙이 다르다 — C 는 짝수 쪽으로, JS 는 항상 0 에서 먼 쪽으로.
+    /// (v * 10^places 를 미리 반올림하는 방식은 시도하지 않는다: 그 곱셈 자체가
+    /// 원래 값에는 없던 동점을 만들어낸다. 예를 들어 1150/1000 은 정확히는
+    /// 1.14999999999999991118... 인데 10 을 곱하면 반올림 오차로 정확히 11.5 가 되어
+    /// 버리고, 그러면 실제로는 동점이 아닌 값을 동점으로 잘못 판단해 JS 와 어긋난다.)
+    private static func awayFromZeroTieString(_ v: Double, places: Int) -> String? {
+        // 이 앱의 도메인(토큰 수/속도)에는 음수가 없다.
+        precondition(v >= 0, "MirrorFormat 은 음수 입력을 다루지 않는다")
+
+        // places 이후로 한참 더 전개해서 "진짜 5000...0" 인지, 아니면 "4999..." 나
+        // "5000...01" 처럼 실제로는 동점이 아닌지 구분한다. 이 앱이 다루는 값들은
+        // 배정밀도로도 십여 자리 안에서 끝나므로 30 자리 여유면 충분하다.
+        let extraDigits = 30
+        let deep = String(format: "%.\(places + extraDigits)f", v)
+        guard let dotIndex = deep.firstIndex(of: ".") else { return nil }
+        let intPart = deep[deep.startIndex..<dotIndex]
+        let frac = deep[deep.index(after: dotIndex)...]
+        let keepEnd = frac.index(frac.startIndex, offsetBy: places)
+        let kept = frac[frac.startIndex..<keepEnd]
+        let tail = frac[keepEnd...]
+        guard tail.first == "5", tail.dropFirst().allSatisfy({ $0 == "0" }) else {
+            return nil
+        }
+
+        // 동점이 맞다: 자른 자릿수(intPart+kept)를 1 만큼 올림(away-from-zero)한다.
+        var digits = Array(intPart + kept)
+        var i = digits.count - 1
+        while i >= 0 {
+            if digits[i] == "9" {
+                digits[i] = "0"
+                i -= 1
+            } else {
+                digits[i] = Character(String(digits[i].wholeNumberValue! + 1))
+                break
+            }
+        }
+        if i < 0 { digits.insert("1", at: 0) }
+
+        let keptCount = kept.count
+        let newIntLen = digits.count - keptCount
+        let newInt = String(digits[0..<newIntLen])
+        guard places > 0 else { return newInt }
+        let newFrac = String(digits[newIntLen...])
+        return "\(newInt).\(newFrac)"
+    }
+
     private static func toFixed(_ v: Double, _ places: Int) -> String {
-        let f = pow(10.0, Double(places))
-        let rounded = (v * f).rounded(.toNearestOrAwayFromZero) / f
-        return String(format: "%.\(places)f", rounded)
+        if let tie = awayFromZeroTieString(v, places: places) { return tie }
+        return String(format: "%.\(places)f", v)
     }
 
     /// formatTokensPerSec: 1 미만은 "0", 1000 미만은 정수, 그 이상은 "N.Nk"

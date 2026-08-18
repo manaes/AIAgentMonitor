@@ -92,4 +92,42 @@ final class MirrorFormatTests: XCTestCase {
         XCTAssertEqual(MirrorFormat.countdown(resetAt: 1_000_000, now: now), "리셋됨")
         XCTAssertEqual(MirrorFormat.countdown(resetAt: 999_000, now: now), "리셋됨")
     }
+
+    // MARK: 골든 벡터 — Node 로 실제 실행한 format.ts 결과와 대량 대조
+    //
+    // 손으로 쓴 위 테스트들은 의도를 문서화하는 것이고, 진짜 반올림 일치를 증명하는
+    // 것은 이 테이블이다. `docs/ble-protocol/golden/generate-format-parity.mjs` 를
+    // Node 로 실행해 만든 JSON 을 그대로 읽어 대조한다 — 기대값을 Swift 쪽에서
+    // 다시 계산하지 않는다(그러면 같은 실수를 두 번 할 수 있다).
+
+    private struct ParityTable: Decodable {
+        struct TotalCase: Decodable { let n: UInt32; let expected: String }
+        struct RateCase: Decodable { let v: Double; let expected: String }
+        let tokensTotal: [TotalCase]
+        let tokensPerSec: [RateCase]
+    }
+
+    private func loadParityTable() throws -> ParityTable {
+        let url = try XCTUnwrap(
+            Bundle(for: Self.self).url(forResource: "format-parity", withExtension: "json"),
+            "골든 벡터가 테스트 번들에 없다"
+        )
+        return try JSONDecoder().decode(ParityTable.self, from: Data(contentsOf: url))
+    }
+
+    func testTokensTotalMatchesGoldenVectors() throws {
+        let table = try loadParityTable()
+        XCTAssertGreaterThan(table.tokensTotal.count, 1000, "골든 벡터가 예상보다 너무 적다")
+        for c in table.tokensTotal {
+            XCTAssertEqual(MirrorFormat.tokensTotal(c.n), c.expected, "n=\(c.n)")
+        }
+    }
+
+    func testTokensPerSecMatchesGoldenVectors() throws {
+        let table = try loadParityTable()
+        XCTAssertGreaterThan(table.tokensPerSec.count, 1000, "골든 벡터가 예상보다 너무 적다")
+        for c in table.tokensPerSec {
+            XCTAssertEqual(MirrorFormat.tokensPerSec(Float(c.v)), c.expected, "v=\(c.v)")
+        }
+    }
 }
