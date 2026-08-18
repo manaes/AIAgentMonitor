@@ -14,21 +14,34 @@ public final class SessionListView: UIView {
         let container = UIView()
         let separator = UIView()
         let row = SessionRowView()
+        private var separatorHeight: Constraint?
 
         init() {
             separator.backgroundColor = Palette.separator
             [separator, row].forEach(container.addSubview)
 
             // SessionList.svelte:49 `.row + .row { border-top: 1px solid #3a3a3c }`.
-            // 1 / scale 로 실제 기기에서 정확히 1 물리 픽셀인 헤어라인을 그린다.
+            // CSS px 는 기기 독립 단위다 — Mac 의 Retina 디스플레이에서도 1px 는
+            // 사용자 눈에 1pt 로 보인다. 이 포트의 다른 모든 값(패딩·간격·점 크기)이
+            // CSS 1px 를 1pt 로 옮겼으므로 여기만 물리 픽셀(1/scale)로 예외를 두지
+            // 않는다 — 3배 기기에서는 0.33pt 로 Mac 보다 눈에 띄게 얇아진다.
             separator.snp.makeConstraints { make in
                 make.leading.trailing.top.equalToSuperview()
-                make.height.equalTo(1 / UIScreen.main.scale)
+                separatorHeight = make.height.equalTo(1).constraint
             }
             row.snp.makeConstraints { make in
                 make.leading.trailing.bottom.equalToSuperview()
                 make.top.equalTo(separator.snp.bottom)
             }
+        }
+
+        /// 첫 번째로 보이는 행 위에는 구분선이 없어야 한다. `isHidden` 만으로는
+        /// 부족하다 — row.top 이 separator.bottom 에 고정돼 있어서, 숨겨도 제약
+        /// 자체는 그대로 남아 row 가 1pt 만큼 밀려난다(유령 여백). 높이 제약의
+        /// 상수 자체를 0 으로 낮춰야 실제로 공간이 사라진다.
+        func setSeparatorVisible(_ visible: Bool) {
+            separator.isHidden = !visible
+            separatorHeight?.update(offset: visible ? 1 : 0)
         }
     }
 
@@ -44,6 +57,15 @@ public final class SessionListView: UIView {
         guard index < visible.count else { return nil }
         return visible[index].row.leftText
     }
+    /// 테스트 전용 창구: 보이는 행들 중 index 번째 위 구분선이 레이아웃에서 실제로
+    /// 차지하는 높이. 0 이면 구분선이 없는 것이다(첫 행이어야 한다).
+    public func separatorHeight(at index: Int) -> CGFloat? {
+        let visible = slots.filter { !$0.container.isHidden }
+        guard index < visible.count else { return nil }
+        return visible[index].separator.bounds.height
+    }
+    /// 테스트 전용 창구: 재사용 풀에 만들어진 슬롯의 총 개수(보이는 것 + 숨은 것).
+    public var pooledSlotCount: Int { slots.count }
 
     public init() {
         super.init(frame: .zero)
@@ -111,7 +133,7 @@ public final class SessionListView: UIView {
                 // 매번 새로 계산한다: 첫 번째로 보이는 행 위에는 구분선이 없어야 하고,
                 // 재사용 때문에 이전 프레임에 "두 번째"였던 슬롯이 이번엔 "첫 번째"가
                 // 될 수도 있다.
-                slot.separator.isHidden = (i == 0)
+                slot.setSeparatorVisible(i != 0)
                 slot.row.configure(project: entries[i].project, kind: entries[i].kind, now: now)
             } else {
                 // 컨테이너 전체가 숨으므로 안의 구분선도 함께 사라진다 — 남는 슬롯이

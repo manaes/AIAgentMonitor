@@ -42,8 +42,11 @@ public final class MirrorViewController: UIViewController {
         statusLabel.textColor = Palette.subtle
         statusLabel.text = ConnectionState.idle.label
 
+        // Detail.svelte:70 `.window-root { gap: 12px }` — 에이전트 블록과 세션 목록
+        // 사이 간격. 카드끼리의 간격(agentsStack)은 Detail.svelte:71 `.agents { gap: 8px }`
+        // 로 서로 다른 값이다 — 하나로 합치면 둘 중 하나가 원본과 어긋난다.
         contentStack.axis = .vertical
-        contentStack.spacing = 8
+        contentStack.spacing = 12
 
         agentsStack.axis = .vertical
         agentsStack.spacing = 8
