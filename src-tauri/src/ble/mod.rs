@@ -1,5 +1,7 @@
 //! BLE 미러 전송 계층. 조립 지점은 `BleBridge`.
 pub mod framing;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod peripheral;
 pub mod send_queue;
 pub mod wire;
