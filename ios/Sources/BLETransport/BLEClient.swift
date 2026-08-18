@@ -33,6 +33,10 @@ public final class BLEClient: NSObject {
     }
 
     public func start() {
+        // 이미 실행 중이면 아무것도 하지 않는다. 그렇지 않으면 streaming 중에도
+        // beginScan() 이 재조립기를 초기화하고 스캔을 다시 시작해, 데이터는 계속
+        // 오는데 화면은 "Mac 찾는 중…" 에 멈춰 거짓말을 하게 된다.
+        guard !wantsRunning else { return }
         wantsRunning = true
         if central == nil {
             central = CBCentralManager(delegate: self, queue: .main)
@@ -70,6 +74,12 @@ public final class BLEClient: NSObject {
 
     /// 연결 요청 후 일정 시간 내에 성공/실패 콜백이 오지 않으면 강제로 취소해
     /// "연결 중…" 에서 영영 못 빠져나오는 경우를 막는다.
+    ///
+    /// `cancelPeripheralConnection` 이 (아직 didConnect 가 온 적 없는) 대기 중인 연결에
+    /// 대해 didDisconnectPeripheral/didFailToConnect 중 무엇을 부르는지는 문서화되어
+    /// 있지 않다. 그 콜백에 의존하지 않도록 이 타이머 자체가 상태 정리와 재스캔까지
+    /// 전부 끝맺는다 — 이후 콜백이 실제로 오더라도 beginScan() 이 한 번 더 불릴 뿐
+    /// 무해하다.
     private func scheduleConnectTimeout(for peripheral: CBPeripheral) {
         cancelConnectTimeout()
         connectTimeout = Task { @MainActor [weak self] in
@@ -77,6 +87,9 @@ public final class BLEClient: NSObject {
             guard !Task.isCancelled else { return }
             guard let self, self.peripheral === peripheral, self.stateSubject.value == .connecting else { return }
             self.central?.cancelPeripheralConnection(peripheral)
+            self.peripheral = nil
+            self.stateSubject.send(.disconnected(reason: "연결 시간 초과"))
+            self.beginScan()
         }
     }
 }
@@ -84,10 +97,24 @@ public final class BLEClient: NSObject {
 extension BLEClient: @preconcurrency CBCentralManagerDelegate {
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
-        case .poweredOn: if wantsRunning { beginScan() }
-        case .poweredOff: stateSubject.send(.bluetoothOff)
-        case .unauthorized: stateSubject.send(.disconnected(reason: "블루투스 권한 거부됨"))
-        default: stateSubject.send(.disconnected(reason: "블루투스 사용 불가"))
+        case .poweredOn:
+            if wantsRunning { beginScan() }
+        case .poweredOff:
+            // poweredOff/resetting 전환 시 CoreBluetooth 는 didDisconnectPeripheral 를
+            // 호출하지 않고 연결을 그냥 무효화한다. 여기서 peripheral 을 비우지 않으면
+            // didDiscover 의 "guard self.peripheral == nil" 가 낡은 참조에 막혀 이후
+            // 어떤 기기도 다시 채택하지 못하고 영원히 스캔만 하게 된다.
+            peripheral = nil
+            cancelConnectTimeout()
+            stateSubject.send(.bluetoothOff)
+        case .unauthorized:
+            peripheral = nil
+            cancelConnectTimeout()
+            stateSubject.send(.disconnected(reason: "블루투스 권한 거부됨"))
+        default:
+            peripheral = nil
+            cancelConnectTimeout()
+            stateSubject.send(.disconnected(reason: "블루투스 사용 불가"))
         }
     }
 
@@ -118,6 +145,9 @@ extension BLEClient: @preconcurrency CBCentralManagerDelegate {
         didDisconnectPeripheral peripheral: CBPeripheral,
         error: Error?
     ) {
+        // stop() 직후 곧바로 start() 가 호출되면 이전 주변기기의 늦은 콜백이 방금
+        // 채택한 새 주변기기의 참조를 지워버릴 수 있다. 다른 기기 얘기면 무시한다.
+        if let current = self.peripheral, current !== peripheral { return }
         self.peripheral = nil
         cancelConnectTimeout()
         if wantsRunning {
@@ -135,6 +165,7 @@ extension BLEClient: @preconcurrency CBCentralManagerDelegate {
         didFailToConnect peripheral: CBPeripheral,
         error: Error?
     ) {
+        if let current = self.peripheral, current !== peripheral { return }
         self.peripheral = nil
         cancelConnectTimeout()
         if wantsRunning {
@@ -206,6 +237,9 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         didUpdateValueFor characteristic: CBCharacteristic,
         error: Error?
     ) {
+        // 버전 불일치로 이미 종료를 결정했다면, 정리 중에 큐에 남아 있던 프레임이
+        // 뒤늦게 도착해도 재조립/디코딩을 다시 돌리지 않는다.
+        guard stateSubject.value != .versionMismatch else { return }
         guard characteristic.uuid == MirrorUUIDs.snapshot, let data = characteristic.value else { return }
         guard let message = reassembler.push(data) else { return }
 
@@ -216,10 +250,11 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
             let snap = try JSONDecoder().decode(MirrorSnapshot.self, from: message)
             guard snap.isSupportedVersion else {
                 // 클라이언트가 지원하지 못하는 버전이다. 재시도로는 해결되지 않으므로
-                // 스캔을 재개하지 않고 구독을 내린 뒤 연결을 끊는다.
+                // 스캔을 재개하지 않고 연결을 끊는다. setNotifyValue(false) 는 일부러
+                // 부르지 않는다 — cancelPeripheralConnection 이 어차피 구독을
+                // 정리하는데, 먼저 부르면 그 완료 콜백이 이 상태를 덮어쓸 수 있다.
                 wantsRunning = false
                 stateSubject.send(.versionMismatch)
-                peripheral.setNotifyValue(false, for: characteristic)
                 central?.cancelPeripheralConnection(peripheral)
                 return
             }
