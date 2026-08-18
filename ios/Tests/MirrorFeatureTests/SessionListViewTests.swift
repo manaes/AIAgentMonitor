@@ -12,8 +12,26 @@ final class SessionListViewTests: XCTestCase {
     }
 
     func testEmptyMessageWhenNoSessions() {
+        // 빈 상태 자체가 아니라 "행이 있다가 없어지는 전환" 을 검증한다. configure 호출
+        // 없이 갓 만든 뷰는 두 단정 모두 우연히 통과하므로 그것만으로는 아무것도 증명하지
+        // 못한다.
         let v = SessionListView()
+        let withRows = #"{"v":1,"t":0,"a":[{"k":0,"r":0,"t5":0,"pj":[{"id":1,"n":"a","m":"m","r":0,"t":1,"s":0}]}]}"#
+        v.configure(snapshot: snapshot(withRows), now: now)
+        XCTAssertEqual(v.rowCount, 1)
+        XCTAssertFalse(v.isEmptyMessageVisible)
+
         v.configure(snapshot: snapshot(#"{"v":1,"t":0,"a":[]}"#), now: now)
+        XCTAssertEqual(v.rowCount, 0)
+        XCTAssertTrue(v.isEmptyMessageVisible)
+    }
+
+    func testEmptyMessageWhenAgentsPresentButNoProjects() {
+        // "에이전트 자체가 없음" 과는 다른 입력이다 — 에이전트는 있지만 프로젝트가
+        // 하나도 없는 경우도 같은 빈 상태를 보여야 한다.
+        let json = #"{"v":1,"t":0,"a":[{"k":0,"r":0,"t5":0,"pj":[]},{"k":1,"r":0,"t5":0,"pj":[]}]}"#
+        let v = SessionListView()
+        v.configure(snapshot: snapshot(json), now: now)
         XCTAssertEqual(v.rowCount, 0)
         XCTAssertTrue(v.isEmptyMessageVisible)
     }

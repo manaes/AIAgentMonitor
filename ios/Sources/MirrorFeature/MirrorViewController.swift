@@ -18,8 +18,10 @@ public final class MirrorViewController: UIViewController {
     private let statusLabel = UILabel()
     private let scrollView = UIScrollView()
     private let contentStack = UIStackView()
-    private let claudeCard = AgentCardView()
-    private let codexCard = AgentCardView()
+    /// 카드 개수는 스냅샷에 실린 에이전트 수만큼이라 고정이 아니다. 세션 목록과
+    /// 마찬가지로 1Hz 로 계속 들어오므로 매번 새로 만들지 않고 풀에서 재사용한다.
+    private let agentsStack = UIStackView()
+    private var agentCards: [AgentCardView] = []
     private let sessionList = SessionListView()
 
     public init(client: BLEClient) {
@@ -33,7 +35,8 @@ public final class MirrorViewController: UIViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         title = "AI Agent Monitor"
-        view.backgroundColor = .black
+        // app.css:17 `.window-root { background: #1c1c1e }`.
+        view.backgroundColor = Palette.windowBackground
 
         statusLabel.font = Typography.body
         statusLabel.textColor = Palette.subtle
@@ -42,10 +45,13 @@ public final class MirrorViewController: UIViewController {
         contentStack.axis = .vertical
         contentStack.spacing = 8
 
+        agentsStack.axis = .vertical
+        agentsStack.spacing = 8
+
         view.addSubview(statusLabel)
         view.addSubview(scrollView)
         scrollView.addSubview(contentStack)
-        [claudeCard, codexCard, sessionList].forEach(contentStack.addArrangedSubview)
+        [agentsStack, sessionList].forEach(contentStack.addArrangedSubview)
 
         statusLabel.snp.makeConstraints { make in
             make.top.equalTo(view.safeAreaLayoutGuide).offset(12)
@@ -60,10 +66,6 @@ public final class MirrorViewController: UIViewController {
             make.edges.equalToSuperview().inset(UIEdgeInsets(top: 0, left: 16, bottom: 16, right: 16))
             make.width.equalTo(scrollView).offset(-32)
         }
-
-        // 스냅샷이 오기 전에는 카드를 감춰 빈 껍데기를 보여주지 않는다.
-        claudeCard.isHidden = true
-        codexCard.isHidden = true
 
         client.state
             .receive(on: DispatchQueue.main)
@@ -95,20 +97,34 @@ public final class MirrorViewController: UIViewController {
         guard let snap = latest else { return }
         let now = Date()
 
-        if let claude = snap.agents.first(where: { $0.kind == .claude }) {
-            claudeCard.isHidden = false
-            claudeCard.configure(agent: claude, now: now)
-        } else {
-            claudeCard.isHidden = true
+        // Detail.svelte:27-29 는 스냅샷에 실린 에이전트마다 카드를 하나씩 그린다 —
+        // claude/codex 두 종류로 못박지 않는다. 다만 매 프레임 순서가 흔들리면
+        // 카드가 화면에서 자리를 바꾸므로, claude → codex → 그 외(스냅샷 순서)
+        // 순으로 고정한다.
+        let ordered = orderedForDisplay(snap.agents)
+
+        while agentCards.count < ordered.count {
+            let card = AgentCardView()
+            agentCards.append(card)
+            agentsStack.addArrangedSubview(card)
         }
 
-        if let codex = snap.agents.first(where: { $0.kind == .codex }) {
-            codexCard.isHidden = false
-            codexCard.configure(agent: codex, now: now)
-        } else {
-            codexCard.isHidden = true
+        for (i, card) in agentCards.enumerated() {
+            if i < ordered.count {
+                card.isHidden = false
+                card.configure(agent: ordered[i], now: now)
+            } else {
+                card.isHidden = true
+            }
         }
 
         sessionList.configure(snapshot: snap, now: now)
+    }
+
+    private func orderedForDisplay(_ agents: [MirrorAgent]) -> [MirrorAgent] {
+        let claude = agents.filter { $0.kind == .claude }
+        let codex = agents.filter { $0.kind == .codex }
+        let others = agents.filter { $0.kind != .claude && $0.kind != .codex }
+        return claude + codex + others
     }
 }

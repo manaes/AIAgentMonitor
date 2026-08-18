@@ -22,6 +22,10 @@ public enum Palette {
 
     public static let cardBackground = UIColor(hex: 0x2c2c2e)
     public static let barTrack = UIColor(hex: 0x1c1c1e)
+    /// app.css:17 `.window-root { background: #1c1c1e }`. barTrack 과 같은 값이지만
+    /// 역할이 다르므로(창 배경 vs 사용량 바 트랙) 따로 이름 붙인다 — 나중에 둘 중
+    /// 하나만 바뀌어도 서로 끌려가지 않는다.
+    public static let windowBackground = UIColor(hex: 0x1c1c1e)
     public static let separator = UIColor(hex: 0x3a3a3c)
 
     public static let primaryText = UIColor(hex: 0xf2f2f7)

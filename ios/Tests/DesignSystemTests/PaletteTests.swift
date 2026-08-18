@@ -26,6 +26,7 @@ final class PaletteTests: XCTestCase {
         XCTAssertTrue(rgb(Palette.codexDot) == rgb(UIColor(hex: 0xff9f0a)))
         XCTAssertTrue(rgb(Palette.cardBackground) == rgb(UIColor(hex: 0x2c2c2e)))
         XCTAssertTrue(rgb(Palette.barTrack) == rgb(UIColor(hex: 0x1c1c1e)))
+        XCTAssertTrue(rgb(Palette.windowBackground) == rgb(UIColor(hex: 0x1c1c1e)))
         XCTAssertTrue(rgb(Palette.separator) == rgb(UIColor(hex: 0x3a3a3c)))
         XCTAssertTrue(rgb(Palette.subtle) == rgb(UIColor(hex: 0x8e8e93)))
         XCTAssertTrue(rgb(Palette.fainter) == rgb(UIColor(hex: 0x636366)))
