@@ -64,44 +64,62 @@ final class SessionRowViewTests: XCTestCase {
         XCTAssertEqual(v.dotColor, Palette.dormantDot, "unknown 에이전트의 active 점도 회색이어야 한다")
     }
 
-    /// 원본 CSS 에는 잘림 규칙이 없지만 실제 기기 폭에서는 셋 중 하나가 반드시 잘린다.
+    /// 원본 CSS 에는 잘림 규칙이 없지만 실제 기기 폭에서는 셋 중 하나가 잘릴 수 있다.
     /// 우선순위: 에이전트 이름(절대 유지) > 프로젝트 이름 > 모델 이름(가장 먼저 잘림).
-    /// 정확한 pt 값은 폰트 렌더링에 따라 흔들릴 수 있어 절대값 대신 상대적 순서만 고정한다.
-    func testTruncationOrderKeepsAgentNameShrinksModelFirst() {
+    ///
+    /// 폭은 실제 iPhone 16 레이아웃값으로 계산한다: 화면 393pt - 좌우 여백 16pt*2 -
+    /// 카드 좌우 패딩 12pt*2 = 337pt 가 이 행이 실제로 받는 폭이다. 모델명도 이
+    /// 앱에 실제로 존재하는 값(`claude-sonnet-5`, 15자)을 쓴다 — 가상의 31자짜리
+    /// 모델명으로 계산하면 없는 위기가 만들어진다(Fix Round 3→4 경위 참고).
+    /// 이 조합(프로젝트 "4AIAgentMonitor" + 모델 "claude-sonnet-5")의 실측 초과폭은
+    /// 약 10pt 뿐이라, 이름과 프로젝트는 그대로고 모델만 소폭 잘린다.
+    func testTruncationAtRealisticDeviceWidthAndRealModelName() {
         let v = SessionRowView()
-        // 이 리포지토리 실제 경로 이름 정도 길이의 프로젝트명 + 충분히 긴 모델명으로
-        // 리뷰가 실측한 폭 초과 상황(약 209pt vs 약 200pt 가용폭)을 재현한다.
-        v.configure(project: project(n: "4AIAgentMonitor",
-                                      m: "claude-opus-5-extended-thinking",
-                                      r: 10, t: 999_999, s: 0),
+        v.configure(project: project(n: "4AIAgentMonitor", m: "claude-sonnet-5",
+                                      r: 98.25, t: 999_990, s: 0),
                     kind: .claude, now: now)
-        // 320pt: model 이 바닥(30pt)에 닿지 않고도 자연스럽게 그보다 넓게 수렴하는
-        // "여유 있는" 폭 — project 가 바닥을 위해 양보할 필요가 없는 경우를 본다.
-        v.frame = CGRect(x: 0, y: 0, width: 320, height: 24)
+        v.frame = CGRect(x: 0, y: 0, width: 337, height: 24)
         v.setNeedsLayout()
         v.layoutIfNeeded()
 
         XCTAssertEqual(
             v.nameLabelWidth, v.nameLabelIntrinsicWidth,
             accuracy: 0.5,
-            "에이전트 이름은 좁은 폭에서도 잘리지 않아야 한다"
+            "에이전트 이름은 실기기 폭에서도 잘리지 않아야 한다"
         )
         XCTAssertEqual(
             v.projLabelWidth, v.projLabelIntrinsicWidth,
             accuracy: 0.5,
-            "프로젝트 이름도 모델보다는 먼저 지켜져야 한다"
+            "실제 모델명 길이에서는 프로젝트 이름도 잘릴 필요가 없어야 한다"
         )
         XCTAssertLessThan(
             v.modelLabelWidth, v.modelLabelIntrinsicWidth - 0.5,
-            "모델 이름은 폭이 부족하면 가장 먼저, 가장 많이 잘려야 한다"
+            "모델 이름은 폭이 부족하면 셋 중 가장 먼저 잘려야 한다"
+        )
+        XCTAssertGreaterThan(
+            v.modelLabelWidth, v.modelLabelIntrinsicWidth * 0.5,
+            "실측 초과폭은 그리 크지 않으므로 모델도 절반 이상은 그대로 보여야 한다(과도한 잘림이면 다른 회귀)"
         )
     }
 
-    /// iPhone 16 실기기에서 카드 패딩·오른쪽 영역을 뺀 실제 가용폭은 약 215pt다
-    /// (300pt 케이스는 여유 있는 경우일 뿐, 이쪽이 일반적인 경우). 이 좁은 영역에서는
-    /// 모델 라벨이 0 폭까지 사라지지 않고 최소 폭(바닥)을 지키면서도 여전히 잘려
-    /// 있어야 한다.
-    func testTruncationAtRealisticDeviceWidthKeepsModelAboveFloor() {
+    /// 위 테스트가 "정상 범위"라면, 이건 그 범위를 벗어난 병적인 입력에서 실제로
+    /// 어떤 일이 벌어지는지 기록해두는 테스트다 — 실제로 나올 수 없는 31자짜리
+    /// 모델명을 일부러 넣는다. 설계 목표가 아니라 극단값에서의 현재 동작을
+    /// 그대로 고정해두는 용도다.
+    ///
+    /// **알려진 한계 — 이 우선순위(600)에서는 30pt 바닥이 실질적으로 무력하다.**
+    /// 바닥(600)이 project 의 저항(700)보다 낮으므로, 필요한 공간을 만들 때
+    /// solver 는 project 가 한 치도 양보하기 전에 바닥을 0(모델의 물리적 최소값)
+    /// 까지 완전히 희생시킨다 — project 가 이미 자기 목표(98)를 다 채우고도
+    /// 남는 자투리 폭이 30pt 에 못 미치면, 바닥은 그 자투리(예: 6.3pt)에서
+    /// 멈추지 않고 그대로 통과해 0 까지 내려간다(실측: 215pt 에서 model=0).
+    /// project 보다 낮은 우선순위의 바닥은 "0 으로 사라지는 것을 막는다"는
+    /// 목표를 이 폭에서는 달성하지 못한다 — 바닥을 실질적으로 만들려면
+    /// project(700)보다 높은 우선순위가 필요한데, 그러면 이번엔 이 병적인
+    /// 입력에서 project 가 큰 폭으로 양보해야 한다(Fix Round 3 참고). 실사용
+    /// 데이터(위 테스트)는 이 트레이드오프에 전혀 걸리지 않으므로 결정은
+    /// task-5-report.md 의 "Fix Round 4" 에 기록해 팀 리드 판단에 맡긴다.
+    func testPathologicalLongModelNameCurrentlyCanStillReachZero() {
         let v = SessionRowView()
         v.configure(project: project(n: "4AIAgentMonitor",
                                       m: "claude-opus-5-extended-thinking",
@@ -114,15 +132,13 @@ final class SessionRowViewTests: XCTestCase {
         XCTAssertEqual(
             v.nameLabelWidth, v.nameLabelIntrinsicWidth,
             accuracy: 0.5,
-            "215pt 처럼 좁은 폭에서도 에이전트 이름은 그대로 유지되어야 한다"
+            "에이전트 이름은 이런 극단적인 입력에서도 절대 양보하지 않아야 한다"
         )
-        XCTAssertGreaterThanOrEqual(
-            v.modelLabelWidth, 30 - 0.5,
-            "모델 라벨은 0 으로 사라지지 않고 최소 폭(말줄임표가 보일 정도)을 지켜야 한다"
-        )
-        XCTAssertLessThan(
-            v.modelLabelWidth, v.modelLabelIntrinsicWidth - 0.5,
-            "바닥을 지키는 것과 별개로, 모델은 여전히 실제로 잘려 있어야 한다"
+        // 의도한 "바닥"이 아니라 현재의 실제 값을 고정한다 — 우선순위가 바뀌면
+        // 이 값도 바뀌어야 하므로, 실패하면 위 코멘트의 트레이드오프를 다시 검토한다.
+        XCTAssertEqual(
+            v.modelLabelWidth, 0, accuracy: 0.5,
+            "현재 우선순위(600)에서는 바닥이 무력해 모델이 0 까지 내려간다 — 코멘트 참고"
         )
     }
 }

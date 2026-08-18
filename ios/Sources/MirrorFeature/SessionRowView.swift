@@ -74,20 +74,21 @@ public final class SessionRowView: UIView {
         leftStack.setCustomSpacing(10, after: projLabel)
 
         // 모델이 가장 먼저 잘리는 것과, 0 폭까지 사라지는 것은 다르다 — 후자는
-        // 잘림이 아니라 정보 삭제다. iPhone 실기기 폭(약 215pt 가용)에서도 최소한
-        // 말줄임표를 포함한 몇 글자는 남도록 바닥을 둔다.
+        // 잘림이 아니라 정보 삭제다. 실제 존재하는 모델명(claude-sonnet-5 등, 최대
+        // claude-sonnet-4-6 정도 길이)과 흔한 프로젝트 폴더명 조합에서는 모델이
+        // 10pt 안팎만 잘리는 정도라 이 바닥에 닿을 일이 거의 없다. 그래도 아주
+        // 긴 값이 들어오는 병적인 입력에서 모델이 완전히 사라지지 않도록 최소
+        // 30pt 는 지키게 한다.
         //
-        // 우선순위는 project(700)보다 높은 800 으로 뒀다 — 처음엔 project(700)와
-        // model 자체 compression resistance(500) 사이(600)를 시도했는데, 215pt 처럼
-        // 이름+프로젝트 전체 폭만으로 이미 여유가 없는 실측 폭에서는 solver 가
-        // "project 를 온전히 지키기(700) > model 바닥을 지키기(600)" 순으로 풀어
-        // model 이 오히려 0 까지 무너졌다(레이아웃 후 실측 확인). 바닥이 project 의
-        // 저항보다 먼저 지켜져야 "모델이 가장 먼저 줄어들되 바닥 아래로는 안 간다"가
-        // 성립하므로, 바닥 우선순위를 project 보다 위(800, name 의 1000 보다는 아래)로
-        // 올렸다 — 여유가 있을 때는 여전히 model(500) 이 project(700) 보다 먼저
-        // 줄어들고, 여유가 다 떨어지면 그 다음엔 project 가 이 바닥을 위해 양보한다.
+        // 우선순위는 project(700)보다 낮은 600 으로 둔다 — model(500) < 이 바닥(600)
+        // < project(700) < name(required) 순서를 지켜야, 여유가 줄어들 때 항상
+        // "model 이 project 보다 먼저 줄어든다"는 설계가 유지된다. (한때 800 으로
+        // 올린 적이 있었는데, 그건 존재하지 않는 31자짜리 모델명으로 만든 인위적인
+        // 위기 상황에 맞춰 순서를 뒤집은 것이었다 — project 가 model 보다 먼저,
+        // 그것도 크게 희생됐다. 실제 모델명 길이로 다시 재보니 600 으로도 충분했다.
+        // 자세한 경위는 task-5-report.md의 "Fix Round 4" 참고.)
         modelLabel.snp.makeConstraints { make in
-            make.width.greaterThanOrEqualTo(30).priority(800)
+            make.width.greaterThanOrEqualTo(30).priority(600)
         }
 
         [dot, leftStack, rightLabel, relativeLabel].forEach(addSubview)
