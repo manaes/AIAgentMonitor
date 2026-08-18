@@ -2221,7 +2221,7 @@ Expected: `AIAgentMonitorMirror.xcworkspace` 생성
 
 Run:
 ```bash
-cd ios && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme WireTests -destination 'platform=iOS Simulator,name=iPhone 16' 2>&1 | tail -20
+cd ios && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme WireTests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' 2>&1 | tail -20
 ```
 Expected: FAIL — `cannot find type 'MirrorSnapshot' in scope`
 
@@ -2315,7 +2315,7 @@ public struct MirrorSnapshot: Decodable, Equatable, Sendable {
 
 Run:
 ```bash
-cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme WireTests -destination 'platform=iOS Simulator,name=iPhone 16' 2>&1 | tail -20
+cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme WireTests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' 2>&1 | tail -20
 ```
 Expected: `** TEST SUCCEEDED **` — 2 tests
 
@@ -2342,6 +2342,19 @@ Rust `Reassembler` 와 **바이트 단위로 동일**해야 한다. 골든 벡�
 - Produces: `FrameReassembler.headerLength`, `FrameReassembler.push(_ packet: Data) -> Data?`
 
 - [ ] **Step 1: Project.swift 에 타깃을 추가한다**
+
+> **Tuist 4.158.2 실측 사항 (Task 9 에서 확인)**: 이 버전의 기본 스킴 자동생성은 테스트 타깃을 본
+> 타깃의 스킴에 묶어버려 `WireTests` 같은 **독립 스킴이 생기지 않는다**. 따라서 새 테스트 타깃을
+> 추가할 때마다 `Project.swift` 의 `schemes:` 배열에도 항목을 추가해야 `xcodebuild -scheme` 이
+> 그 이름을 찾을 수 있다. Task 9 가 `WireTests` 용으로 넣어둔 블록과 같은 형태로 쓴다:
+>
+> ```swift
+> .scheme(
+>     name: "BLETransportTests",
+>     buildAction: .buildAction(targets: [.target("BLETransportTests")]),
+>     testAction: .targets([.testableTarget(target: .target("BLETransportTests"))])
+> )
+> ```
 
 `ios/Project.swift` 의 `targets:` 배열을 교체:
 ```swift
@@ -2439,7 +2452,7 @@ final class FrameReassemblerTests: XCTestCase {
 
 Run:
 ```bash
-cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme BLETransportTests -destination 'platform=iOS Simulator,name=iPhone 16' 2>&1 | tail -20
+cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme BLETransportTests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' 2>&1 | tail -20
 ```
 Expected: FAIL — `cannot find type 'FrameReassembler' in scope`
 
@@ -2513,7 +2526,7 @@ public struct FrameReassembler {
 
 Run:
 ```bash
-cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme BLETransportTests -destination 'platform=iOS Simulator,name=iPhone 16' 2>&1 | tail -20
+cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme BLETransportTests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' 2>&1 | tail -20
 ```
 Expected: `** TEST SUCCEEDED **` — 7 tests
 
@@ -2577,7 +2590,7 @@ final class ConnectionStateTests: XCTestCase {
 
 Run:
 ```bash
-cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme BLETransportTests -destination 'platform=iOS Simulator,name=iPhone 16' 2>&1 | tail -20
+cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme BLETransportTests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' 2>&1 | tail -20
 ```
 Expected: FAIL — `cannot find 'MirrorUUIDs' in scope`
 
@@ -2779,7 +2792,7 @@ extension BLEClient: CBPeripheralDelegate {
 
 Run:
 ```bash
-cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme BLETransportTests -destination 'platform=iOS Simulator,name=iPhone 16' 2>&1 | tail -20
+cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme BLETransportTests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' 2>&1 | tail -20
 ```
 Expected: `** TEST SUCCEEDED **` — 10 tests
 
