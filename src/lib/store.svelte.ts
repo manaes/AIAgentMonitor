@@ -48,6 +48,7 @@ class SnapshotStore {
     this.#initialized = false;
     this.#bleUnlisten?.();
     this.#bleUnlisten = null;
+    this.#bleInitialized = false;
   }
 
   async loadTriggers() {
@@ -80,19 +81,39 @@ class SnapshotStore {
   }
 
   ble = $state<BleStatus | null>(null);
+  // setBleEnabled 자체 실패(IPC 등)만 담는다 — 권한 거부 같은 백엔드 오류는 ble.last_error 로 들어온다
+  bleActionError = $state<string | null>(null);
+  // initBle 은 멱등해야 한다 — DevicePanel 은 탭 전환마다 remount 되어 onMount 에서 매번 호출된다.
+  // #bleInitialized 를 첫 await 이전에 세워야, 두 번째 호출이 첫 호출의 await 도중에 들어와도
+  // 가드를 통과하지 못한다. #bleUnlisten 은 오직 dispose 용 핸들로만 쓴다.
+  #bleInitialized = false;
   #bleUnlisten: (() => void) | null = null;
+  // ble_status 재조회가 겹쳐 도착할 때 오래된 응답이 최신 응답을 덮어쓰지 않도록 순번을 매긴다
+  #bleReqSeq = 0;
 
   async initBle() {
-    if (this.#bleUnlisten) return;
-    this.ble = await bleStatus();
+    if (this.#bleInitialized) return;
+    this.#bleInitialized = true;
+    const seq = ++this.#bleReqSeq;
+    const status = await bleStatus();
+    if (seq === this.#bleReqSeq) this.ble = status;
     this.#bleUnlisten = await listenBleStatus(async () => {
-      this.ble = await bleStatus();
+      const seq = ++this.#bleReqSeq;
+      const status = await bleStatus();
+      if (seq === this.#bleReqSeq) this.ble = status;
     });
   }
 
   async setBleEnabled(on: boolean) {
-    await bleSetEnabled(on);
-    this.ble = await bleStatus();
+    try {
+      await bleSetEnabled(on);
+      const seq = ++this.#bleReqSeq;
+      const status = await bleStatus();
+      if (seq === this.#bleReqSeq) this.ble = status;
+      this.bleActionError = null;
+    } catch (e) {
+      this.bleActionError = `BLE 설정을 변경하지 못했습니다: ${e}`;
+    }
   }
 }
 

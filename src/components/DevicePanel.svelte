@@ -8,7 +8,8 @@
 
   let enabled = $derived(store.ble?.enabled ?? false);
   let peers = $derived(store.ble?.peers ?? []);
-  let lastError = $derived(store.ble?.last_error ?? null);
+  // 토글 자체 실패(로컬)를 백엔드 last_error 보다 우선 표시한다 — 둘은 같은 오류 영역을 공유한다
+  let shownError = $derived(store.bleActionError ?? store.ble?.last_error ?? null);
 </script>
 
 <div class="panel">
@@ -26,8 +27,8 @@
     </button>
   </div>
 
-  {#if lastError}
-    <p class="error">{lastError}</p>
+  {#if shownError}
+    <p class="error">{shownError}</p>
   {/if}
 
   {#if enabled}
