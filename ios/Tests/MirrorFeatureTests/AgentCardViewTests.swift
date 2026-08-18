@@ -123,4 +123,32 @@ final class AgentCardViewTests: XCTestCase {
         v.configure(agent: Fixture.agent(p5: 62, r5: 999_000), now: now)
         XCTAssertEqual(v.quotaFivePercentText, "0%", "리셋 시각이 지났으면 실제 p5 값과 무관하게 0% 여야 한다")
     }
+
+    /// 22pt 숫자와 "tok/s" 사이 간격. `.unit { margin-left: 4px }`(AgentCard.svelte:90)
+    /// 만 옮기면 4pt 지만, `.big`(:89)은 flex 가 아닌 일반 블록이라 :59-60 사이의
+    /// 줄바꿈이 공백 하나로 접혀 **부모의 22px 폰트로 실제로 그려진다**.
+    /// 이 화면에서 유일한 non-flex 컨테이너이고 하필 가장 큰 숫자 옆이다.
+    ///   22pt bold 시스템 폰트의 공백 폭 4.72pt + margin 4pt = 8.72pt
+    func testGapBetweenRateAndUnitIncludesTheRenderedSpaceOfTheBlockContainer() {
+        // 공백 폭이 실제로 4.72pt 인지부터 확인한다 — 이 값이 상수의 근거다.
+        let space = (" " as NSString).size(withAttributes: [.font: Typography.bigRate]).width
+        XCTAssertEqual(space, 4.72, accuracy: 0.01, "22pt bold 시스템 폰트의 공백 폭")
+
+        XCTAssertEqual(AgentCardView.unitGap, 8.72, accuracy: 0.001,
+                       "공백 4.72 + margin-left 4 = 8.72pt")
+
+        let v = AgentCardView()
+        v.configure(agent: Fixture.agent(r: 1234), now: now)
+        v.frame = CGRect(x: 0, y: 0, width: 337, height: 120)
+        v.setNeedsLayout()
+        v.layoutIfNeeded()
+
+        // 레이아웃 결과는 3x 기기의 픽셀 격자(1/3pt)로 스냅되므로 8.6667 이 나온다 —
+        // 상수 자체는 위에서 정확히 고정했고, 여기서는 그 상수가 실제로 이 간격에
+        // 적용됐는지(4pt 로 되돌아가지 않았는지)를 확인한다.
+        XCTAssertEqual(
+            v.rateToUnitGap, 8.72, accuracy: 0.34,
+            "4pt 만 두면 맥보다 약 4.7pt 좁다 — 공백 하나가 렌더링된다는 사실이 빠진 것이다"
+        )
+    }
 }

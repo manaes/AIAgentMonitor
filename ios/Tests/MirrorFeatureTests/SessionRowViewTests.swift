@@ -37,6 +37,41 @@ final class SessionRowViewTests: XCTestCase {
         XCTAssertEqual(v.dotColor, Palette.dormantDot, "dormant 는 에이전트 색이 아니라 회색")
     }
 
+    /// 원본은 오른쪽 칸의 **폰트도** 상태에 따라 갈린다.
+    ///   active → `.rate { font-weight: 600; tabular-nums }` (SessionList.svelte:57)
+    ///   그 외   → `<span class="subtle">` (SessionList.svelte:35) — 색만 지정되고
+    ///            굵기는 상속된 normal, 크기는 app.css:22 의 11px.
+    /// 폰트가 init 에 있으면 idle/dormant/unknown 이 맥에 없는 semibold 로 그려지므로
+    /// 이 단정으로 "switch 안에서 정한다"를 고정한다.
+    func testActiveUsesRateFontAndOtherStatusesUseBodyFont() {
+        let v = SessionRowView()
+
+        v.configure(project: project(n: "a", m: "m", r: 98.25, t: 999_990, s: 0),
+                    kind: .claude, now: now)
+        XCTAssertEqual(v.rightFont, Typography.rate, "active 의 속도만 11pt semibold tabular")
+
+        for (status, word) in [(UInt8(1), "idle"), (UInt8(2), "dormant"), (UInt8(3), "unknown")] {
+            v.configure(project: project(n: "a", m: "m", r: 0, t: 999_990, s: status),
+                        kind: .claude, now: now)
+            XCTAssertEqual(v.rightText, word)
+            XCTAssertEqual(v.rightFont, Typography.body,
+                           "\(word) 은 맥에서 보통 굵기다 — semibold 로 그리면 나란히 놓았을 때 바로 보인다")
+        }
+    }
+
+    /// 행이 재사용되므로 폰트도 되돌아와야 한다 — active 를 그린 슬롯이 다음
+    /// 프레임에 idle 이 되면 semibold 가 남아 있으면 안 된다.
+    func testRightFontRevertsWhenActiveRowBecomesIdle() {
+        let v = SessionRowView()
+        v.configure(project: project(n: "a", m: "m", r: 98.25, t: 999_990, s: 0),
+                    kind: .claude, now: now)
+        XCTAssertEqual(v.rightFont, Typography.rate)
+
+        v.configure(project: project(n: "a", m: "m", r: 0, t: 999_990, s: 1),
+                    kind: .claude, now: now)
+        XCTAssertEqual(v.rightFont, Typography.body, "이전 프레임의 semibold 가 남으면 안 된다")
+    }
+
     func testCodexActiveUsesCodexColor() {
         let v = SessionRowView()
         v.configure(project: project(n: "qux", m: "m", r: 10, t: 999_999, s: 0),

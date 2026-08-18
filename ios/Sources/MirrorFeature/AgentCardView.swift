@@ -30,6 +30,12 @@ public final class AgentCardView: UIView {
     public var quotaFivePercentText: String? { quotaBarView.fivePercentText }
     public var quotaWeeklyPercentText: String? { quotaBarView.weeklyPercentText }
     public var quotaFallbackText: String? { quotaBarView.fallbackText }
+    /// 22pt 숫자와 "tok/s" 사이 간격. 상수 자체가 원본 CSS 에서 곧바로 읽히지 않는
+    /// 유일한 값이라(아래 unitGap 주석 참고) 레이아웃 결과로도 고정해 둔다.
+    public var rateToUnitGap: CGFloat { unitLabel.frame.minX - rateLabel.frame.maxX }
+
+    /// 4.72(`.big` 의 22pt 폰트로 그려지는 공백 하나) + 4(`.unit { margin-left: 4px }`).
+    static let unitGap: CGFloat = 4.72 + 4
 
     public init() {
         super.init(frame: .zero)
@@ -73,7 +79,15 @@ public final class AgentCardView: UIView {
             make.top.equalTo(nameLabel.snp.bottom).offset(4)
         }
         unitLabel.snp.makeConstraints { make in
-            make.leading.equalTo(rateLabel.snp.trailing).offset(4)
+            // AgentCard.svelte:90 `.unit { margin-left: 4px }` 만 옮기면 4pt 인데,
+            // 원본의 실제 간격은 그보다 넓다. `.big`(AgentCard.svelte:89)은 flex 가
+            // 아니라 **일반 블록**이라, 숫자와 <span class="unit"> 사이의 줄바꿈
+            // (AgentCard.svelte:59-60)이 공백 하나로 접혀 **실제로 그려지고**, 그
+            // 공백은 부모의 22px 폰트를 쓴다. 이 화면에서 유일한 non-flex 컨테이너라
+            // 다른 간격은 전부 그냥 옮겨도 맞았다(flex 는 공백 텍스트 노드를 버린다).
+            //   22pt bold 시스템 폰트의 공백 폭 = 4.72pt (실측)
+            //   실제 간격 = 4.72(공백) + 4(margin-left) = 8.72pt
+            make.leading.equalTo(rateLabel.snp.trailing).offset(AgentCardView.unitGap)
             make.firstBaseline.equalTo(rateLabel.snp.firstBaseline)
         }
         projectLabel.snp.makeConstraints { make in

@@ -28,6 +28,8 @@ public final class SessionRowView: UIView {
             .joined(separator: " ")
     }
     public var rightText: String? { rightLabel.text }
+    /// active(속도) 와 그 외(상태 단어)의 폰트가 실제로 갈리는지 고정하기 위한 창구.
+    public var rightFont: UIFont? { rightLabel.font }
     public var relativeText: String? { relativeLabel.text }
     public var dotColor: UIColor? { dot.color }
 
@@ -48,7 +50,8 @@ public final class SessionRowView: UIView {
         projLabel.textColor = Palette.primaryText
         modelLabel.font = Typography.body
         modelLabel.textColor = Palette.subtle
-        rightLabel.font = Typography.rate
+        // rightLabel.font 는 여기서 정하지 않는다 — 상태에 따라 갈리므로
+        // configure 의 switch 안에서 색과 함께 설정한다(아래 주석 참고).
         relativeLabel.font = Typography.body
         relativeLabel.textColor = Palette.subtle
 
@@ -144,21 +147,33 @@ public final class SessionRowView: UIView {
         projLabel.text = "· \(project.name)"
         modelLabel.text = project.model
 
+        // 오른쪽 칸은 상태에 따라 텍스트·색뿐 아니라 **폰트도** 갈린다.
+        //   active  → SessionList.svelte:57 `.rate { font-weight: 600; tabular-nums }`
+        //             = Typography.rate (11pt semibold, monospacedDigit)
+        //   그 외    → SessionList.svelte:35 `<span class="subtle">{row.status}</span>`
+        //             .subtle 은 색만 지정하고(:59), 크기는 app.css:22 의 11px,
+        //             굵기는 상속된 normal 이다 = Typography.body (11pt regular)
+        // 폰트를 init 에서 한 번만 정하면 idle/dormant/unknown 이 맥에는 없는
+        // semibold·tabular 로 그려진다 — 그래서 여기 switch 안에서 색과 함께 정한다.
         switch project.status {
         case .active:
             rightLabel.text = "\(MirrorFormat.tokensPerSec(project.ratePerSec)) tok/s"
+            rightLabel.font = Typography.rate
             rightLabel.textColor = Palette.rate
         case .idle:
             rightLabel.text = "idle"
+            rightLabel.font = Typography.body
             rightLabel.textColor = Palette.subtle
         case .dormant:
             rightLabel.text = "dormant"
+            rightLabel.font = Typography.body
             rightLabel.textColor = Palette.subtle
         case .unknown:
             // Wire.ActivityStatusCode.unknown 은 "미래에 Rust 가 새 코드를 추가했을 때
             // dormant 로 조용히 뭉개지 않기 위한" 값(MirrorSnapshot.swift 주석 참고).
             // 그러니 여기서도 dormant 라고 잘못 표시하지 않고 있는 그대로 알린다.
             rightLabel.text = "unknown"
+            rightLabel.font = Typography.body
             rightLabel.textColor = Palette.subtle
         }
 
