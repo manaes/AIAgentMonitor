@@ -29,6 +29,18 @@ final class MirrorFormatTests: XCTestCase {
         XCTAssertEqual(MirrorFormat.tokensPerSec(123.5), "124")
     }
 
+    /// 오늘 와이어로는 NaN 이 올 수 없다(JSONDecoder 가 숫자가 아닌 리터럴에서 던지고
+    /// JSON 자체에 NaN 표현이 없다) — 그래도 동점 판정 로직이 여기서 트랩하면
+    /// 화면 전체가 죽으므로 방어적으로 트랩하지 않는지 확인한다. 값 자체는
+    /// String(format:) 의 플랫폼 표기(nan/inf)를 그대로 노출하는 것으로 충분하다.
+    func testTokensPerSecDoesNotCrashOnNonFiniteInput() {
+        XCTAssertEqual(MirrorFormat.tokensPerSec(Float.nan), "nank")
+        XCTAssertEqual(MirrorFormat.tokensPerSec(Float.infinity), "infk")
+        // 음의 무한대/음의 0은 모두 `v < 1` 분기에서 걸려 toFixed 까지 가지도 않는다.
+        XCTAssertEqual(MirrorFormat.tokensPerSec(-Float.infinity), "0")
+        XCTAssertEqual(MirrorFormat.tokensPerSec(-0.0), "0")
+    }
+
     // MARK: tokensTotal — formatTokensTotal 와 동일
 
     func testTokensTotalBoundaries() {

@@ -16,8 +16,11 @@ public enum MirrorFormat {
     /// 1.14999999999999991118... 인데 10 을 곱하면 반올림 오차로 정확히 11.5 가 되어
     /// 버리고, 그러면 실제로는 동점이 아닌 값을 동점으로 잘못 판단해 JS 와 어긋난다.)
     private static func awayFromZeroTieString(_ v: Double, places: Int) -> String? {
-        // 이 앱의 도메인(토큰 수/속도)에는 음수가 없다.
-        precondition(v >= 0, "MirrorFormat 은 음수 입력을 다루지 않는다")
+        // 이 앱의 도메인(토큰 수/속도)에는 음수가 없고, 유한한 값만 온다.
+        // 와이어를 타고 오늘 NaN 이 실제로 들어올 경로는 없다(JSONDecoder 가 숫자가
+        // 아닌 리터럴에서 던지고 JSON 자체에 NaN 표현이 없다) — 그래도 방어적으로
+        // 여기서 막아, 동점 판정 로직이 이상한 문자열을 만들다 트랩하지 않게 한다.
+        guard v.isFinite, v >= 0 else { return nil }
 
         // places 이후로 한참 더 전개해서 "진짜 5000...0" 인지, 아니면 "4999..." 나
         // "5000...01" 처럼 실제로는 동점이 아닌지 구분한다. 이 앱이 다루는 값들은
