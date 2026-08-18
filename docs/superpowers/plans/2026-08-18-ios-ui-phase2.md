@@ -18,6 +18,7 @@
 - 시뮬레이터 목적지는 항상 `'platform=iOS Simulator,name=iPhone 16,OS=18.5'`.
 - Tuist 4.158.2는 테스트 타깃의 독립 스킴을 자동 생성하지 않는다. 새 테스트 타깃마다 `Project.swift`의 `schemes:` 배열에 항목을 추가해야 `xcodebuild -scheme`이 찾는다.
 - 생성된 Xcode 산출물(`.xcodeproj`/`.xcworkspace`/`Derived/`)은 커밋하지 않는다.
+- **Swift 튜플은 `Equatable` 을 만족할 수 없어 `XCTAssertEqual(튜플, 튜플)` 이 컴파일되지 않는다.** 튜플 비교는 `XCTAssertTrue(a == b)` 로 쓴다 (Task 3 실측).
 - **Tuist 4.158.2 는 타깃의 소스 글롭 디렉토리가 없으면 `tuist generate` 자체가 실패한다.** 새 모듈을 추가할 때는 `Project.swift` 수정 전에 `mkdir -p ios/Sources/<모듈>` 로 디렉토리를 먼저 만든다 (Task 1 실측).
 - **BLE는 시뮬레이터에서 동작하지 않는다.** 이 계획의 모든 자동 테스트는 순수 로직만 다루고, 실제 데이터 표시는 Task 7의 실기기 확인에서 검증한다.
 
@@ -434,25 +435,25 @@ final class PaletteTests: XCTestCase {
         XCTAssertEqual(rgb(UIColor(hex: 0x30d158)).0, 0x30)
         XCTAssertEqual(rgb(UIColor(hex: 0x30d158)).1, 0xd1)
         XCTAssertEqual(rgb(UIColor(hex: 0x30d158)).2, 0x58)
-        XCTAssertEqual(rgb(UIColor(hex: 0x000000)), (0, 0, 0))
-        XCTAssertEqual(rgb(UIColor(hex: 0xffffff)), (255, 255, 255))
+        XCTAssertTrue(rgb(UIColor(hex: 0x000000)) == (0, 0, 0))
+        XCTAssertTrue(rgb(UIColor(hex: 0xffffff)) == (255, 255, 255))
     }
 
     /// macOS Detail 창과 같은 색이어야 한다. 값이 바뀌면 두 화면이 달라진다.
     func testPaletteMatchesMacOS() {
-        XCTAssertEqual(rgb(Palette.claudeDot), rgb(UIColor(hex: 0x30d158)))
-        XCTAssertEqual(rgb(Palette.codexDot), rgb(UIColor(hex: 0xff9f0a)))
-        XCTAssertEqual(rgb(Palette.cardBackground), rgb(UIColor(hex: 0x2c2c2e)))
-        XCTAssertEqual(rgb(Palette.barTrack), rgb(UIColor(hex: 0x1c1c1e)))
-        XCTAssertEqual(rgb(Palette.separator), rgb(UIColor(hex: 0x3a3a3c)))
-        XCTAssertEqual(rgb(Palette.subtle), rgb(UIColor(hex: 0x8e8e93)))
-        XCTAssertEqual(rgb(Palette.fainter), rgb(UIColor(hex: 0x636366)))
-        XCTAssertEqual(rgb(Palette.primaryText), rgb(UIColor(hex: 0xf2f2f7)))
-        XCTAssertEqual(rgb(Palette.percent), rgb(UIColor(hex: 0x30d158)))
-        XCTAssertEqual(rgb(Palette.countdown), rgb(UIColor(hex: 0xff9f0a)))
-        XCTAssertEqual(rgb(Palette.rate), rgb(UIColor(hex: 0x0a84ff)))
-        XCTAssertEqual(rgb(Palette.dormantDot), rgb(UIColor(hex: 0x636366)))
-        XCTAssertEqual(rgb(Palette.idleDot), rgb(UIColor(hex: 0xff9f0a)))
+        XCTAssertTrue(rgb(Palette.claudeDot) == rgb(UIColor(hex: 0x30d158)))
+        XCTAssertTrue(rgb(Palette.codexDot) == rgb(UIColor(hex: 0xff9f0a)))
+        XCTAssertTrue(rgb(Palette.cardBackground) == rgb(UIColor(hex: 0x2c2c2e)))
+        XCTAssertTrue(rgb(Palette.barTrack) == rgb(UIColor(hex: 0x1c1c1e)))
+        XCTAssertTrue(rgb(Palette.separator) == rgb(UIColor(hex: 0x3a3a3c)))
+        XCTAssertTrue(rgb(Palette.subtle) == rgb(UIColor(hex: 0x8e8e93)))
+        XCTAssertTrue(rgb(Palette.fainter) == rgb(UIColor(hex: 0x636366)))
+        XCTAssertTrue(rgb(Palette.primaryText) == rgb(UIColor(hex: 0xf2f2f7)))
+        XCTAssertTrue(rgb(Palette.percent) == rgb(UIColor(hex: 0x30d158)))
+        XCTAssertTrue(rgb(Palette.countdown) == rgb(UIColor(hex: 0xff9f0a)))
+        XCTAssertTrue(rgb(Palette.rate) == rgb(UIColor(hex: 0x0a84ff)))
+        XCTAssertTrue(rgb(Palette.dormantDot) == rgb(UIColor(hex: 0x636366)))
+        XCTAssertTrue(rgb(Palette.idleDot) == rgb(UIColor(hex: 0xff9f0a)))
     }
 
     func testDotViewIsCircularAfterLayout() {
@@ -465,7 +466,7 @@ final class PaletteTests: XCTestCase {
     func testDotViewColorIsApplied() {
         let dot = DotView(diameter: 6)
         dot.color = Palette.idleDot
-        XCTAssertEqual(rgb(dot.backgroundColor ?? .clear), rgb(Palette.idleDot))
+        XCTAssertTrue(rgb(dot.backgroundColor ?? .clear) == rgb(Palette.idleDot))
     }
 }
 ```
