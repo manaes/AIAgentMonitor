@@ -1,0 +1,12 @@
+{
+  "chunk_size": 20,
+  "frame_id": 7,
+  "frames": [
+    "0700054149204167656e74204d6f6e69746f7220",
+    "070105424c4520ebafb8eb9fac20eab3a8eb93a0",
+    "07020520ebb2a1ed84b020e2809420ed959ceab8",
+    "0703058020eba980ed8bb0ebb094ec9db4ed8ab8",
+    "07040520ed8faced95a8"
+  ],
+  "message": "AI Agent Monitor BLE 미러 골든 벡터 — 한글 멀티바이트 포함"
+}
