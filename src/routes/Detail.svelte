@@ -5,8 +5,9 @@
   import SessionList from "../components/SessionList.svelte";
   import TriggerList from "../components/TriggerList.svelte";
   import AddTriggerForm from "../components/AddTriggerForm.svelte";
+  import DevicePanel from "../components/DevicePanel.svelte";
 
-  let activeTab = $state<"sessions" | "triggers">("sessions");
+  let activeTab = $state<"sessions" | "triggers" | "devices">("sessions");
 
   onMount(() => {
     store.loadTriggers();
@@ -32,6 +33,9 @@
     <button class="tab" class:active={activeTab === "triggers"} onclick={() => (activeTab = "triggers")}>
       Triggers
     </button>
+    <button class="tab" class:active={activeTab === "devices"} onclick={() => (activeTab = "devices")}>
+      Devices
+    </button>
   </div>
 
   {#if activeTab === "sessions"}
@@ -42,11 +46,13 @@
     {:else}
       <p class="subtle">Waiting for snapshot…</p>
     {/if}
-  {:else}
+  {:else if activeTab === "triggers"}
     <div class="triggers">
       <TriggerList />
       <AddTriggerForm />
     </div>
+  {:else}
+    <DevicePanel />
   {/if}
 </div>
 

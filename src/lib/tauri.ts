@@ -80,3 +80,27 @@ export async function toggleTriggerRule(id: string): Promise<TriggerRule> {
 export async function fireTriggerNow(id: string): Promise<void> {
   return invoke<void>("fire_trigger_now", { id });
 }
+
+// ── BLE 미러 ────────────────────────────────────────────────
+
+export type BlePeer = { id: string; mtu: number };
+export type BleStatus = {
+  enabled: boolean;
+  advertising: boolean;
+  peers: BlePeer[];
+  /// 마지막 BLE 오류. 이 앱에는 tracing subscriber 가 없어 tracing::error! 출력이 전부 유실되므로,
+  /// 블루투스 권한 거부 같은 실패는 이 필드로만 사용자에게 도달한다.
+  last_error: string | null;
+};
+
+export async function bleStatus(): Promise<BleStatus> {
+  return invoke<BleStatus>("ble_status");
+}
+
+export async function bleSetEnabled(enabled: boolean): Promise<void> {
+  return invoke<void>("ble_set_enabled", { enabled });
+}
+
+export async function listenBleStatus(cb: () => void): Promise<UnlistenFn> {
+  return listen("ble_status", () => cb());
+}

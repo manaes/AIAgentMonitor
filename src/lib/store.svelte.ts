@@ -5,8 +5,12 @@ import {
   removeTriggerRule,
   toggleTriggerRule,
   fireTriggerNow,
+  bleStatus,
+  bleSetEnabled,
+  listenBleStatus,
   type Snapshot,
   type TriggerRule,
+  type BleStatus,
 } from "./tauri";
 
 class SnapshotStore {
@@ -42,6 +46,8 @@ class SnapshotStore {
       this.#staleTimer = null;
     }
     this.#initialized = false;
+    this.#bleUnlisten?.();
+    this.#bleUnlisten = null;
   }
 
   async loadTriggers() {
@@ -71,6 +77,22 @@ class SnapshotStore {
 
   async fireNow(id: string) {
     await fireTriggerNow(id);
+  }
+
+  ble = $state<BleStatus | null>(null);
+  #bleUnlisten: (() => void) | null = null;
+
+  async initBle() {
+    if (this.#bleUnlisten) return;
+    this.ble = await bleStatus();
+    this.#bleUnlisten = await listenBleStatus(async () => {
+      this.ble = await bleStatus();
+    });
+  }
+
+  async setBleEnabled(on: boolean) {
+    await bleSetEnabled(on);
+    this.ble = await bleStatus();
   }
 }
 
