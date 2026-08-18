@@ -8,6 +8,10 @@ public enum ConnectionState: Equatable, Sendable {
     case connecting
     case streaming
     case disconnected(reason: String)
+    /// 서버가 이 클라이언트가 지원하지 않는 프로토콜 버전을 보냈을 때. 재시도로
+    /// 해결되지 않으므로 `disconnected` 와 분리해 "앱 업데이트가 필요하다" 는
+    /// 사실을 명확히 드러낸다.
+    case versionMismatch
 
     public var label: String {
         switch self {
@@ -17,6 +21,7 @@ public enum ConnectionState: Equatable, Sendable {
         case .connecting: return "연결 중…"
         case .streaming: return "연결됨"
         case .disconnected(let reason): return "연결 끊김 · \(reason)"
+        case .versionMismatch: return "앱 업데이트 필요 · 프로토콜 버전 불일치"
         }
     }
 }

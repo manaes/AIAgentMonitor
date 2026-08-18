@@ -26,4 +26,8 @@ final class ConnectionStateTests: XCTestCase {
     func testBluetoothOffIsDistinctFromDisconnected() {
         XCTAssertEqual(ConnectionState.bluetoothOff.label, "블루투스가 꺼져 있습니다")
     }
+
+    func testVersionMismatchIsDistinctFromDisconnected() {
+        XCTAssertEqual(ConnectionState.versionMismatch.label, "앱 업데이트 필요 · 프로토콜 버전 불일치")
+    }
 }
