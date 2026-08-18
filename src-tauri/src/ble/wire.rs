@@ -202,4 +202,26 @@ mod tests {
         s.emitted_at = UNIX_EPOCH - Duration::from_secs(10);
         assert_eq!(MirrorSnapshot::from(&s).t, 0, "역행 시각은 0 으로 clamp");
     }
+
+    /// Swift Wire 모듈과 공유하는 골든 벡터.
+    /// 갱신: UPDATE_GOLDEN=1 cargo test --manifest-path src-tauri/Cargo.toml ble::wire::tests::golden
+    #[test]
+    fn golden_snapshot_matches() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/ble-protocol/golden/snapshot-sample.json");
+        let actual = serde_json::to_value(MirrorSnapshot::from(&sample_snapshot())).unwrap();
+
+        if std::env::var("UPDATE_GOLDEN").is_ok() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, serde_json::to_string_pretty(&actual).unwrap() + "\n").unwrap();
+            return;
+        }
+        let expected: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect(
+                "골든 벡터가 없다. UPDATE_GOLDEN=1 로 생성하고 커밋하라",
+            ))
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
 }
