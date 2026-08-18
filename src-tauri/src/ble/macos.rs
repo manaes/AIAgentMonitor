@@ -75,13 +75,29 @@ define_class!(
     unsafe impl CBPeripheralManagerDelegate for Delegate {
         #[unsafe(method(peripheralManagerDidUpdateState:))]
         fn did_update_state(&self, mgr: &CBPeripheralManager) {
-            let powered = unsafe { mgr.state() } == CBManagerState::PoweredOn;
+            let state = unsafe { mgr.state() };
+            let powered = state == CBManagerState::PoweredOn;
             let st = self.ivars().borrow();
             let _ = st.events.send(if powered {
                 PeripheralEvent::PoweredOn
             } else {
                 PeripheralEvent::PoweredOff
             });
+            // 단순히 꺼져 있는 것과 권한 거부/미지원은 사용자에게 다른 안내가 필요하므로 구분해서 보낸다.
+            match state {
+                CBManagerState::Unauthorized => {
+                    let _ = st.events.send(PeripheralEvent::Error(
+                        "블루투스 권한이 거부되었습니다. 시스템 설정 > 개인정보 보호 및 보안 > Bluetooth 에서 허용하세요."
+                            .to_string(),
+                    ));
+                }
+                CBManagerState::Unsupported => {
+                    let _ = st.events.send(PeripheralEvent::Error(
+                        "이 기기는 BLE 주변장치 모드를 지원하지 않습니다.".to_string(),
+                    ));
+                }
+                _ => {}
+            }
             drop(st);
             if powered {
                 self.publish(mgr);
@@ -144,8 +160,7 @@ define_class!(
 );
 
 fn central_id(c: &CBCentral) -> String {
-    let id: Retained<NSObject> = unsafe { msg_send![c, identifier] };
-    format!("{id:?}")
+    unsafe { c.identifier().UUIDString().to_string() }
 }
 
 impl Delegate {
@@ -200,22 +215,15 @@ fn hostname_prefix() -> String {
 
 pub struct MacPeripheral {
     app: AppHandle,
-    delegate: Mutex<Option<Retained<Delegate>>>,
     events: UnboundedSender<PeripheralEvent>,
     /// 메인 스레드가 아닌 곳에서 조회하기 위한 구독자 사본
     subs_mirror: Mutex<Vec<Subscriber>>,
 }
 
-// Retained<Delegate> 는 Send 가 아니므로 메인 스레드 밖으로 새어나가지 않게
-// 모든 접근을 run_on_main_thread 안으로 가둔다.
-unsafe impl Send for MacPeripheral {}
-unsafe impl Sync for MacPeripheral {}
-
 impl MacPeripheral {
     pub fn new(app: AppHandle, events: UnboundedSender<PeripheralEvent>) -> Self {
         Self {
             app,
-            delegate: Mutex::new(None),
             events,
             subs_mirror: Mutex::new(Vec::new()),
         }
