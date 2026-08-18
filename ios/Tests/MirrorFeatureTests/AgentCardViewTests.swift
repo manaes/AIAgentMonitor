@@ -88,4 +88,22 @@ final class AgentCardViewTests: XCTestCase {
         v.configure(agent: Fixture.agent(r5: 1_000_000 + 3661), now: now)
         XCTAssertEqual(v.countdownText, "약 1시간 1분 1초 남음")
     }
+
+    /// k 가 알려지지 않은 값(2)이면 AgentKindCode.unknown 이 된다 — Claude/Codex 로
+    /// 잘못 표시하지 않고 별도 문구·회색 점으로 조용히 나타내는지 확인한다.
+    func testUnknownAgentKind() {
+        let v = AgentCardView()
+        v.configure(agent: Fixture.agent(k: 2), now: now)
+        XCTAssertEqual(v.nameText, "알 수 없음")
+        XCTAssertEqual(v.dotColor, Palette.dormantDot)
+    }
+
+    /// autoPct(5h)/weeklyPct(주간)가 뒤바뀌어도 컴파일은 통과하므로(둘 다 Float?),
+    /// 실제로 서로 다른 값이 서로 다른 자리에 표시되는지 직접 검증한다.
+    func testQuotaBarWiringDoesNotTransposeAutoAndWeekly() {
+        let v = AgentCardView()
+        v.configure(agent: Fixture.agent(p5: 62, pw: 31), now: now)
+        XCTAssertEqual(v.quotaBar.fivePercentText, "62%", "p5(5h)는 5h 행에 표시되어야 한다")
+        XCTAssertEqual(v.quotaBar.weeklyPercentText, "31%", "pw(주간)는 주간 행에 표시되어야 한다")
+    }
 }

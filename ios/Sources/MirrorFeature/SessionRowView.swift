@@ -9,33 +9,55 @@ import Wire
 public final class SessionRowView: UIView {
 
     private let dot = DotView(diameter: 6)
-    private let leftLabel = UILabel()
+    /// 원본의 `.left { display: flex; gap: 6px }` 를 실제 뷰 간격으로 재현하기 위해
+    /// 세 라벨을 스택뷰로 나눈다. 단일 라벨 + attributed string 은 spacing 비율이
+    /// 원본과 어긋난다(리뷰 지적) — `.model { margin-left: 4px }` 가 `gap: 6px` 위에
+    /// 더해져 모델 쪽이 더 떨어져 보이는데, 균일한 공백 문자로는 그 차이를 못 낸다.
+    private let nameLabel = UILabel()
+    private let projLabel = UILabel()
+    private let modelLabel = UILabel()
+    private let leftStack = UIStackView()
     private let rightLabel = UILabel()
     private let relativeLabel = UILabel()
 
-    /// attributedText 로 구간을 나눠 그리므로 평문은 여기서 꺼낸다.
-    public var leftText: String? { leftLabel.attributedText?.string ?? leftLabel.text }
+    /// 세 라벨을 공백으로 이어 붙인 평문. 고정된 테스트 문자열
+    /// ("Claude · foo claude-opus-5")과의 호환을 위해 유지한다.
+    public var leftText: String? {
+        [nameLabel.text, projLabel.text, modelLabel.text]
+            .compactMap { $0 }
+            .joined(separator: " ")
+    }
     public var rightText: String? { rightLabel.text }
     public var relativeText: String? { relativeLabel.text }
     public var dotColor: UIColor? { dot.color }
 
     public init() {
         super.init(frame: .zero)
-        // 아래 configure 에서 attributedText 로 구간별 스타일을 지정한다.
-        leftLabel.font = Typography.body
-        leftLabel.textColor = Palette.primaryText
+        nameLabel.font = Typography.strong
+        nameLabel.textColor = Palette.primaryText
+        projLabel.font = Typography.medium
+        projLabel.textColor = Palette.primaryText
+        modelLabel.font = Typography.body
+        modelLabel.textColor = Palette.subtle
         rightLabel.font = Typography.rate
         relativeLabel.font = Typography.body
         relativeLabel.textColor = Palette.subtle
 
-        [dot, leftLabel, rightLabel, relativeLabel].forEach(addSubview)
+        leftStack.axis = .horizontal
+        leftStack.spacing = 6
+        [nameLabel, projLabel, modelLabel].forEach(leftStack.addArrangedSubview)
+        // .model { margin-left: 4px } 이 .left 의 gap: 6px 위에 더해져 모델이
+        // 10px 만큼 떨어진다 — 균일 6px 이 아니라 이 두 번째 간격만 넓힌다.
+        leftStack.setCustomSpacing(10, after: projLabel)
+
+        [dot, leftStack, rightLabel, relativeLabel].forEach(addSubview)
 
         dot.snp.makeConstraints { make in
             make.leading.equalToSuperview()
             make.centerY.equalToSuperview()
             make.width.height.equalTo(6)
         }
-        leftLabel.snp.makeConstraints { make in
+        leftStack.snp.makeConstraints { make in
             make.leading.equalTo(dot.snp.trailing).offset(6)
             make.top.bottom.equalToSuperview().inset(6)
         }
@@ -46,7 +68,7 @@ public final class SessionRowView: UIView {
         rightLabel.snp.makeConstraints { make in
             make.trailing.equalTo(relativeLabel.snp.leading).offset(-12)
             make.centerY.equalToSuperview()
-            make.leading.greaterThanOrEqualTo(leftLabel.snp.trailing).offset(8)
+            make.leading.greaterThanOrEqualTo(leftStack.snp.trailing).offset(8)
         }
     }
 
@@ -74,20 +96,9 @@ public final class SessionRowView: UIView {
         //   <strong>Claude</strong>          → 굵게
         //   <span class="proj">· 이름</span>  → weight 500
         //   <span class="model subtle">모델</span> → 흐린 색
-        // 단일 라벨로 뭉개면 전부 같게 보이므로 attributed string 으로 구간을 나눈다.
-        let line = NSMutableAttributedString(
-            string: agentName,
-            attributes: [.font: Typography.strong, .foregroundColor: Palette.primaryText]
-        )
-        line.append(NSAttributedString(
-            string: " · \(project.name)",
-            attributes: [.font: Typography.medium, .foregroundColor: Palette.primaryText]
-        ))
-        line.append(NSAttributedString(
-            string: " \(project.model)",
-            attributes: [.font: Typography.body, .foregroundColor: Palette.subtle]
-        ))
-        leftLabel.attributedText = line
+        nameLabel.text = agentName
+        projLabel.text = "· \(project.name)"
+        modelLabel.text = project.model
 
         switch project.status {
         case .active:
@@ -96,8 +107,14 @@ public final class SessionRowView: UIView {
         case .idle:
             rightLabel.text = "idle"
             rightLabel.textColor = Palette.subtle
-        case .dormant, .unknown:
+        case .dormant:
             rightLabel.text = "dormant"
+            rightLabel.textColor = Palette.subtle
+        case .unknown:
+            // Wire.ActivityStatusCode.unknown 은 "미래에 Rust 가 새 코드를 추가했을 때
+            // dormant 로 조용히 뭉개지 않기 위한" 값(MirrorSnapshot.swift 주석 참고).
+            // 그러니 여기서도 dormant 라고 잘못 표시하지 않고 있는 그대로 알린다.
+            rightLabel.text = "unknown"
             rightLabel.textColor = Palette.subtle
         }
 

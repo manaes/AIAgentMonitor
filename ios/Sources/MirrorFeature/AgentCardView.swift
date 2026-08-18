@@ -15,7 +15,7 @@ public final class AgentCardView: UIView {
     private let unitLabel = UILabel()
     private let projectLabel = UILabel()
     private let countdownLabel = UILabel()
-    private let quotaBar = QuotaBarView()
+    private let quotaBarView = QuotaBarView()
 
     public var nameText: String? { nameLabel.text }
     public var modelText: String? { modelLabel.text }
@@ -23,6 +23,9 @@ public final class AgentCardView: UIView {
     public var projectText: String? { projectLabel.text }
     public var countdownText: String? { countdownLabel.isHidden ? nil : countdownLabel.text }
     public var dotColor: UIColor? { dot.color }
+    /// autoPct/weeklyPct 전달이 뒤바뀌어도 컴파일은 되므로(둘 다 Float?), 실제 표시값을
+    /// 검증할 수 있도록 QuotaBarView 를 그대로 노출한다.
+    public var quotaBar: QuotaBarView { quotaBarView }
 
     public init() {
         super.init(frame: .zero)
@@ -45,7 +48,7 @@ public final class AgentCardView: UIView {
         countdownLabel.textAlignment = .right
 
         [dot, nameLabel, modelLabel, rateLabel, unitLabel,
-         projectLabel, countdownLabel, quotaBar].forEach(addSubview)
+         projectLabel, countdownLabel, quotaBarView].forEach(addSubview)
 
         dot.snp.makeConstraints { make in
             make.leading.equalToSuperview().offset(12)
@@ -78,7 +81,7 @@ public final class AgentCardView: UIView {
             make.centerY.equalTo(projectLabel)
             make.leading.greaterThanOrEqualTo(projectLabel.snp.trailing).offset(8)
         }
-        quotaBar.snp.makeConstraints { make in
+        quotaBarView.snp.makeConstraints { make in
             make.leading.equalToSuperview().offset(12)
             make.trailing.equalToSuperview().offset(-12)
             make.top.equalTo(projectLabel.snp.bottom).offset(6)
@@ -116,7 +119,7 @@ public final class AgentCardView: UIView {
             countdownLabel.text = nil
         }
 
-        quotaBar.configure(
+        quotaBarView.configure(
             tokens5h: agent.tokens5h,
             autoPct: agent.usedPct5h,
             weeklyPct: agent.usedPctWeekly,

@@ -44,4 +44,23 @@ final class SessionRowViewTests: XCTestCase {
         XCTAssertEqual(v.leftText, "Codex · qux m")
         XCTAssertEqual(v.dotColor, Palette.codexDot)
     }
+
+    /// s 가 알려지지 않은 값(3)이면 ActivityStatusCode.unknown 이 된다 — 회색 점은
+    /// dormant 와 같이 취급하되, 문구는 "dormant" 로 잘못 표시하지 않고 "unknown" 이어야 한다.
+    func testUnknownStatusShowsUnknownWordNotDormant() {
+        let v = SessionRowView()
+        v.configure(project: project(n: "quux", m: "m", r: 0, t: 900_000, s: 3),
+                    kind: .claude, now: now)
+        XCTAssertEqual(v.rightText, "unknown", "unknown 을 dormant 로 잘못 표시하면 안 된다")
+        XCTAssertEqual(v.dotColor, Palette.dormantDot)
+    }
+
+    /// k 가 알려지지 않은 값(2)이면 AgentKindCode.unknown 이 된다.
+    func testUnknownAgentKindShowsPlaceholderNameAndDormantDot() {
+        let v = SessionRowView()
+        v.configure(project: project(n: "corge", m: "m", r: 5, t: 999_999, s: 0),
+                    kind: .unknown, now: now)
+        XCTAssertEqual(v.leftText, "? · corge m")
+        XCTAssertEqual(v.dotColor, Palette.dormantDot, "unknown 에이전트의 active 점도 회색이어야 한다")
+    }
 }
