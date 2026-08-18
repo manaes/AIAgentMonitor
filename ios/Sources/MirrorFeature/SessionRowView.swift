@@ -31,6 +31,15 @@ public final class SessionRowView: UIView {
     public var relativeText: String? { relativeLabel.text }
     public var dotColor: UIColor? { dot.color }
 
+    /// 잘림 순서 검증용 테스트 창구. `xLabelWidth`는 레이아웃 이후 실제 폭,
+    /// `xLabelIntrinsicWidth`는 한 줄로 다 보여줄 때 필요한 폭(잘리지 않았다면 서로 같다).
+    public var nameLabelWidth: CGFloat { nameLabel.bounds.width }
+    public var projLabelWidth: CGFloat { projLabel.bounds.width }
+    public var modelLabelWidth: CGFloat { modelLabel.bounds.width }
+    public var nameLabelIntrinsicWidth: CGFloat { nameLabel.intrinsicContentSize.width }
+    public var projLabelIntrinsicWidth: CGFloat { projLabel.intrinsicContentSize.width }
+    public var modelLabelIntrinsicWidth: CGFloat { modelLabel.intrinsicContentSize.width }
+
     public init() {
         super.init(frame: .zero)
         nameLabel.font = Typography.strong
@@ -42,6 +51,20 @@ public final class SessionRowView: UIView {
         rightLabel.font = Typography.rate
         relativeLabel.font = Typography.body
         relativeLabel.textColor = Palette.subtle
+
+        // 원본 CSS 에는 줄바꿈/잘림 규칙이 없지만, 실제 기기에서는 한 줄을 넘기면
+        // 반드시 무언가 잘려야 한다. 정보량이 적은 순서대로 잘리게 우선순위를 정한다:
+        // 에이전트 이름(가장 중요, 절대 안 잘림) > 프로젝트 이름 > 모델 이름(가장 반복적, 제일 먼저 잘림).
+        [nameLabel, projLabel, modelLabel].forEach {
+            $0.numberOfLines = 1
+            $0.lineBreakMode = .byTruncatingTail
+        }
+        nameLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        projLabel.setContentCompressionResistancePriority(UILayoutPriority(700), for: .horizontal)
+        modelLabel.setContentCompressionResistancePriority(UILayoutPriority(500), for: .horizontal)
+        nameLabel.setContentHuggingPriority(.required, for: .horizontal)
+        projLabel.setContentHuggingPriority(UILayoutPriority(700), for: .horizontal)
+        modelLabel.setContentHuggingPriority(UILayoutPriority(500), for: .horizontal)
 
         leftStack.axis = .horizontal
         leftStack.spacing = 6

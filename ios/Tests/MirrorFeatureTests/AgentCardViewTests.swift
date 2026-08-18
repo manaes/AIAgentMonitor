@@ -103,7 +103,24 @@ final class AgentCardViewTests: XCTestCase {
     func testQuotaBarWiringDoesNotTransposeAutoAndWeekly() {
         let v = AgentCardView()
         v.configure(agent: Fixture.agent(p5: 62, pw: 31), now: now)
-        XCTAssertEqual(v.quotaBar.fivePercentText, "62%", "p5(5h)는 5h 행에 표시되어야 한다")
-        XCTAssertEqual(v.quotaBar.weeklyPercentText, "31%", "pw(주간)는 주간 행에 표시되어야 한다")
+        XCTAssertEqual(v.quotaFivePercentText, "62%", "p5(5h)는 5h 행에 표시되어야 한다")
+        XCTAssertEqual(v.quotaWeeklyPercentText, "31%", "pw(주간)는 주간 행에 표시되어야 한다")
+    }
+
+    /// autoPct(p5)가 없으면(동기화 전) tokens5h(t5)가 폴백 문구에 그대로 이어져야 한다.
+    /// t5 와 폴백 텍스트 사이의 배선도 configure() 를 거치는 경계이므로 직접 확인한다.
+    func testQuotaBarFallsBackToTokenTotalWhenNoPercent() {
+        let v = AgentCardView()
+        v.configure(agent: Fixture.agent(t5: 1500, p5: nil), now: now)
+        XCTAssertEqual(v.quotaFallbackText, "5h 토큰: 1.5k · 동기화 전")
+        XCTAssertNil(v.quotaFivePercentText, "동기화 전에는 퍼센트 행이 아니라 폴백만 보여야 한다")
+    }
+
+    /// r5(리셋 시각)가 이미 지났으면 QuotaDisplay.isReset5h 가 true 가 되어 5h 사용률이
+    /// autoPct 값과 무관하게 0% 로 표시되어야 한다(원본의 reset_5h 파생과 동일).
+    func testQuotaBarShowsZeroPercentAfterReset() {
+        let v = AgentCardView()
+        v.configure(agent: Fixture.agent(p5: 62, r5: 999_000), now: now)
+        XCTAssertEqual(v.quotaFivePercentText, "0%", "리셋 시각이 지났으면 실제 p5 값과 무관하게 0% 여야 한다")
     }
 }

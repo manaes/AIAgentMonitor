@@ -63,4 +63,35 @@ final class SessionRowViewTests: XCTestCase {
         XCTAssertEqual(v.leftText, "? · corge m")
         XCTAssertEqual(v.dotColor, Palette.dormantDot, "unknown 에이전트의 active 점도 회색이어야 한다")
     }
+
+    /// 원본 CSS 에는 잘림 규칙이 없지만 실제 기기 폭에서는 셋 중 하나가 반드시 잘린다.
+    /// 우선순위: 에이전트 이름(절대 유지) > 프로젝트 이름 > 모델 이름(가장 먼저 잘림).
+    /// 정확한 pt 값은 폰트 렌더링에 따라 흔들릴 수 있어 절대값 대신 상대적 순서만 고정한다.
+    func testTruncationOrderKeepsAgentNameShrinksModelFirst() {
+        let v = SessionRowView()
+        // 이 리포지토리 실제 경로 이름 정도 길이의 프로젝트명 + 충분히 긴 모델명으로
+        // 리뷰가 실측한 폭 초과 상황(약 209pt vs 약 200pt 가용폭)을 재현한다.
+        v.configure(project: project(n: "4AIAgentMonitor",
+                                      m: "claude-opus-5-extended-thinking",
+                                      r: 10, t: 999_999, s: 0),
+                    kind: .claude, now: now)
+        v.frame = CGRect(x: 0, y: 0, width: 300, height: 24)
+        v.setNeedsLayout()
+        v.layoutIfNeeded()
+
+        XCTAssertEqual(
+            v.nameLabelWidth, v.nameLabelIntrinsicWidth,
+            accuracy: 0.5,
+            "에이전트 이름은 좁은 폭에서도 잘리지 않아야 한다"
+        )
+        XCTAssertEqual(
+            v.projLabelWidth, v.projLabelIntrinsicWidth,
+            accuracy: 0.5,
+            "프로젝트 이름도 모델보다는 먼저 지켜져야 한다"
+        )
+        XCTAssertLessThan(
+            v.modelLabelWidth, v.modelLabelIntrinsicWidth - 0.5,
+            "모델 이름은 폭이 부족하면 가장 먼저, 가장 많이 잘려야 한다"
+        )
+    }
 }

@@ -24,8 +24,12 @@ public final class AgentCardView: UIView {
     public var countdownText: String? { countdownLabel.isHidden ? nil : countdownLabel.text }
     public var dotColor: UIColor? { dot.color }
     /// autoPct/weeklyPct 전달이 뒤바뀌어도 컴파일은 되므로(둘 다 Float?), 실제 표시값을
-    /// 검증할 수 있도록 QuotaBarView 를 그대로 노출한다.
-    public var quotaBar: QuotaBarView { quotaBarView }
+    /// 검증할 수 있도록 다른 테스트 창구와 같은 스타일(읽기 전용 String?)로 노출한다.
+    /// QuotaBarView 자체를 노출하지 않는 이유: configure() 를 우회해 바를 직접
+    /// 조작할 수 있는 통로가 생기는 것을 막기 위해서다.
+    public var quotaFivePercentText: String? { quotaBarView.fivePercentText }
+    public var quotaWeeklyPercentText: String? { quotaBarView.weeklyPercentText }
+    public var quotaFallbackText: String? { quotaBarView.fallbackText }
 
     public init() {
         super.init(frame: .zero)
