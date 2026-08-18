@@ -18,6 +18,7 @@
 - 시뮬레이터 목적지는 항상 `'platform=iOS Simulator,name=iPhone 16,OS=18.5'`.
 - Tuist 4.158.2는 테스트 타깃의 독립 스킴을 자동 생성하지 않는다. 새 테스트 타깃마다 `Project.swift`의 `schemes:` 배열에 항목을 추가해야 `xcodebuild -scheme`이 찾는다.
 - 생성된 Xcode 산출물(`.xcodeproj`/`.xcworkspace`/`Derived/`)은 커밋하지 않는다.
+- **Tuist 4.158.2 는 타깃의 소스 글롭 디렉토리가 없으면 `tuist generate` 자체가 실패한다.** 새 모듈을 추가할 때는 `Project.swift` 수정 전에 `mkdir -p ios/Sources/<모듈>` 로 디렉토리를 먼저 만든다 (Task 1 실측).
 - **BLE는 시뮬레이터에서 동작하지 않는다.** 이 계획의 모든 자동 테스트는 순수 로직만 다루고, 실제 데이터 표시는 Task 7의 실기기 확인에서 검증한다.
 
 ### 미러링 대상의 정확한 값 (macOS 원본에서 그대로 옮긴다)
@@ -236,7 +237,7 @@ Run:
 ```bash
 cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme MirrorFormatTests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' 2>&1 | grep -E "Executed|TEST"
 ```
-Expected: `Executed 9 tests, with 0 failures` · `** TEST SUCCEEDED **`
+Expected: `Executed 8 tests, with 0 failures` · `** TEST SUCCEEDED **`
 
 - [ ] **Step 6: 커밋한다**
 
@@ -372,7 +373,7 @@ Run:
 ```bash
 cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme MirrorFormatTests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' 2>&1 | grep -E "Executed|TEST"
 ```
-Expected: `Executed 15 tests, with 0 failures` (Task 1 의 9개 + 6개)
+Expected: `Executed 14 tests, with 0 failures` (Task 1 의 8개 + 6개)
 
 - [ ] **Step 5: 커밋한다**
 
@@ -1599,7 +1600,7 @@ cd ios && for S in WireTests BLETransportTests MirrorFormatTests DesignSystemTes
     | grep -E "Executed [0-9]+ tests?, with" | tail -1
 done
 ```
-Expected: Wire 3, BLETransport 12, MirrorFormat 15, DesignSystem 9, MirrorFeature 14 — 실패 0
+Expected: Wire 3, BLETransport 12, MirrorFormat 14, DesignSystem 9, MirrorFeature 14 — 실패 0
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml`
 Expected: **76 passed** — Rust 는 이 계획에서 건드리지 않는다
