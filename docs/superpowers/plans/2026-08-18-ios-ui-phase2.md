@@ -1387,9 +1387,17 @@ public final class SessionListView: UIView {
         backgroundColor = Palette.cardBackground
         layer.cornerRadius = 8
 
-        titleLabel.text = "ACTIVE SESSIONS · SORTED BY RECENT ACTIVITY"
-        titleLabel.font = Typography.sectionLabel
-        titleLabel.textColor = Palette.subtle
+        // 원본은 소문자 텍스트에 CSS 로 text-transform: uppercase 와 letter-spacing: 0.4px 를
+        // 적용한다(SessionList.svelte:47). iOS 에는 text-transform 이 없으므로 대문자화는
+        // 여기서 하고, 자간은 attributedText 의 .kern 으로 재현한다.
+        titleLabel.attributedText = NSAttributedString(
+            string: "Active sessions · sorted by recent activity".uppercased(),
+            attributes: [
+                .kern: 0.4,
+                .font: Typography.sectionLabel,
+                .foregroundColor: Palette.subtle,
+            ]
+        )
 
         emptyLabel.text = "No sessions yet."
         emptyLabel.font = Typography.body
