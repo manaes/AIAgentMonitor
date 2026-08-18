@@ -1224,11 +1224,11 @@ public final class SessionRowView: UIView {
         case .active: dot.color = agentColor
         }
 
-        // 원본은 한 줄 안에 세 가지 스타일이 공존한다(SessionList.svelte).
-        //   <strong>Claude</strong>          → 굵게
-        //   <span class="proj">· 이름</span>  → weight 500
-        //   <span class="model subtle">모델</span> → 흐린 색
-        // 단일 라벨로 뭉개면 전부 같게 보이므로 attributed string 으로 구간을 나눈다.
+        // 원본은 한 줄 안에 세 가지 스타일이 공존하고 간격도 균일하지 않다(SessionList.svelte).
+        //   .left { gap: 6px }  →  점 —6— 에이전트 —6— 프로젝트 —10— 모델
+        //   .model { margin-left: 4px } 가 gap 위에 얹혀 모델을 1.67배로 떼어놓는다.
+        // 공백 문자로 흉내내면 그 비율이 사라져 "· foo model" 이 한 구절로 뭉친다.
+        // 따라서 라벨 3개를 UIStackView 에 담고 실제 간격을 준다.
         let line = NSMutableAttributedString(
             string: agentName,
             attributes: [.font: Typography.strong, .foregroundColor: Palette.primaryText]
@@ -1250,8 +1250,13 @@ public final class SessionRowView: UIView {
         case .idle:
             rightLabel.text = "idle"
             rightLabel.textColor = Palette.subtle
-        case .dormant, .unknown:
+        case .dormant:
             rightLabel.text = "dormant"
+            rightLabel.textColor = Palette.subtle
+        case .unknown:
+            // Wire 가 .unknown 을 둔 이유가 "새 상태 코드를 dormant 와 뭉치지 않기" 이므로
+            // 점 색만 회색으로 낮추고 문구는 사실대로 적는다. 원본도 상태 문자열을 그대로 찍는다.
+            rightLabel.text = "unknown"
             rightLabel.textColor = Palette.subtle
         }
 
