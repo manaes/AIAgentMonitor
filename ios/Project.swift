@@ -32,6 +32,8 @@ let project = Project(
     name: "AIAgentMonitorMirror",
     packages: [],
     targets: [
+        framework("MirrorFormat"),
+        unitTests("MirrorFormatTests", for: "MirrorFormat"),
         framework("Wire"),
         unitTests("WireTests", for: "Wire"),
         framework("BLETransport", deps: [.target(name: "Wire")]),
@@ -67,6 +69,11 @@ let project = Project(
         // Tuist 4.158.2 는 테스트 타겟용 스킴을 자동 생성하지 않고 의존 대상(Wire)의
         // 스킴에 테스트 액션으로 묶는다. CI/리뷰에서 `WireTests` 스킴을 직접 지정해
         // 실행할 수 있도록 명시적으로 선언한다.
+        .scheme(
+            name: "MirrorFormatTests",
+            buildAction: .buildAction(targets: [.target("MirrorFormatTests")]),
+            testAction: .targets([.testableTarget(target: .target("MirrorFormatTests"))])
+        ),
         .scheme(
             name: "WireTests",
             buildAction: .buildAction(targets: [.target("WireTests")]),
