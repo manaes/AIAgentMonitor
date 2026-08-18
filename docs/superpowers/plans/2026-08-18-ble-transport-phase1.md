@@ -1860,7 +1860,14 @@ git commit -m "feat(ble): 스냅샷 틱을 BleBridge에 연결하고 상태 명�
 // ── BLE 미러 ────────────────────────────────────────────────
 
 export type BlePeer = { id: string; mtu: number };
-export type BleStatus = { enabled: boolean; advertising: boolean; peers: BlePeer[] };
+export type BleStatus = {
+  enabled: boolean;
+  advertising: boolean;
+  peers: BlePeer[];
+  /// 마지막 BLE 오류. 이 앱에는 tracing subscriber 가 없어 tracing::error! 출력이 전부 유실되므로,
+  /// 블루투스 권한 거부 같은 실패는 이 필드로만 사용자에게 도달한다.
+  last_error: string | null;
+};
 
 export async function bleStatus(): Promise<BleStatus> {
   return invoke<BleStatus>("ble_status");
@@ -1916,6 +1923,7 @@ export async function listenBleStatus(cb: () => void): Promise<UnlistenFn> {
 
   let enabled = $derived(store.ble?.enabled ?? false);
   let peers = $derived(store.ble?.peers ?? []);
+  let lastError = $derived(store.ble?.last_error ?? null);
 </script>
 
 <div class="panel">
@@ -1932,6 +1940,10 @@ export async function listenBleStatus(cb: () => void): Promise<UnlistenFn> {
       {enabled ? "켜짐" : "꺼짐"}
     </button>
   </div>
+
+  {#if lastError}
+    <p class="error">{lastError}</p>
+  {/if}
 
   {#if enabled}
     <p class="warn">
@@ -1965,6 +1977,10 @@ export async function listenBleStatus(cb: () => void): Promise<UnlistenFn> {
   }
   .toggle.on { background: #0a84ff; color: #fff; }
   .warn { color: #ff9f0a; font-size: 10px; margin: 8px 0 0; }
+  .error {
+    color: #ff453a; font-size: 11px; line-height: 1.4; margin: 8px 0 0;
+    background: #3a2a2a; border-radius: 6px; padding: 6px 8px;
+  }
   .status { margin: 4px 0 0; }
   .label {
     font-size: 9px; color: #8e8e93; text-transform: uppercase;
@@ -2020,6 +2036,9 @@ Run: `pnpm tauri dev`
 2. 토글이 기본 **꺼짐**이다
 3. 켜면 "광고 중" 으로 바뀌고, macOS 블루투스 권한 프롬프트가 뜬다면 허용한다
 4. 끄면 다시 꺼짐으로 돌아온다
+5. **권한을 거부하면** 빨간 오류 문구가 패널에 표시된다. 이 앱에는 tracing subscriber 가 없어
+   `tracing::error!` 출력이 전부 유실되므로, 이 화면이 사용자가 실패 원인을 알 수 있는 **유일한 경로**다.
+   (권한을 이미 허용했다면 시스템 설정 > 개인정보 보호 및 보안 > Bluetooth 에서 잠시 껐다가 확인)
 
 - [ ] **Step 6: 커밋한다**
 
