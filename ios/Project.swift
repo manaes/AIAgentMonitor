@@ -34,6 +34,8 @@ let project = Project(
     targets: [
         framework("Wire"),
         unitTests("WireTests", for: "Wire"),
+        framework("BLETransport", deps: [.target(name: "Wire")]),
+        unitTests("BLETransportTests", for: "BLETransport"),
     ],
     schemes: [
         // Tuist 4.158.2 는 테스트 타겟용 스킴을 자동 생성하지 않고 의존 대상(Wire)의
@@ -43,6 +45,11 @@ let project = Project(
             name: "WireTests",
             buildAction: .buildAction(targets: [.target("WireTests")]),
             testAction: .targets([.testableTarget(target: .target("WireTests"))])
+        ),
+        .scheme(
+            name: "BLETransportTests",
+            buildAction: .buildAction(targets: [.target("BLETransportTests")]),
+            testAction: .targets([.testableTarget(target: .target("BLETransportTests"))])
         ),
     ]
 )
