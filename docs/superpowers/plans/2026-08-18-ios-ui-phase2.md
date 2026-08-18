@@ -378,18 +378,7 @@ cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorM
 ```
 Expected: `Executed 14 tests, with 0 failures` (Task 1 의 8개 + 6개)
 
-- [ ] **Step 5: 실기기 절차 문서를 2단계 기준으로 갱신한다**
-
-`docs/ble-protocol/DEVICE-TEST.md` 는 1단계에 작성돼 "원본 JSON 이 표시된다" 를 확인 항목으로 담고 있다.
-그 화면은 이 태스크에서 사라지므로 문서를 갱신하지 않으면 사용자가 열었을 때 실물과 어긋난다.
-
-바꿀 것:
-- 확인 항목을 아래 Step 7 의 목록으로 교체한다(원본 JSON 관련 항목 제거).
-- "1단계 범위 밖" 절의 "iPhone 화면은 원본 JSON 덤프다. Detail 창과 똑같이 생긴 화면은 2단계에서 만든다" 를
-  2단계 완료 사실에 맞게 고친다.
-- 여전히 유효한 부분(코드 서명 팀 지정, 권한 허용, 로그가 남지 않는다는 경고, 페어링 부재)은 그대로 둔다.
-
-- [ ] **Step 6: 커밋한다**
+- [ ] **Step 5: 커밋한다**
 
 ```bash
 git add ios/
