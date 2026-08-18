@@ -8,6 +8,10 @@ public enum Typography {
     public static let body = UIFont.systemFont(ofSize: 11)
     public static let rate = monospacedDigit(ofSize: 11, weight: .semibold)
     public static let countdown = monospacedDigit(ofSize: 11, weight: .semibold)
+    /// AgentCard.svelte:90 `.unit` 과 SessionList.svelte:53 `.proj` 의 font-weight: 500
+    public static let medium = UIFont.systemFont(ofSize: 11, weight: .medium)
+    /// SessionList 한 줄의 `<strong>` — 행 font-size 11px 를 상속한 굵은 글씨
+    public static let strong = UIFont.systemFont(ofSize: 11, weight: .bold)
     public static let label = UIFont.systemFont(ofSize: 10)
     public static let sectionLabel = UIFont.systemFont(ofSize: 9)
     /// AgentCard.svelte:88 의 `.name` 은 font-weight: 600 만 지정하고 크기는

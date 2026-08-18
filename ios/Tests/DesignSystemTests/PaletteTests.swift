@@ -53,6 +53,22 @@ final class PaletteTests: XCTestCase {
         XCTAssertEqual(Typography.name.pointSize, 12)
     }
 
+    private func weight(of font: UIFont) -> CGFloat? {
+        guard let traits = font.fontDescriptor.object(forKey: .traits) as? [UIFontDescriptor.TraitKey: Any] else {
+            return nil
+        }
+        return traits[.weight] as? CGFloat
+    }
+
+    /// AgentCard.svelte:90 `.unit`(11px/500)과 SessionList.svelte:53 `.proj`(행의
+    /// 11px 상속/500), 그리고 같은 행의 `<strong>`(11px 상속/기본 굵기)을 고정한다.
+    func testUnitAndRowFontsMatchSource() {
+        XCTAssertEqual(Typography.medium.pointSize, 11)
+        XCTAssertEqual(weight(of: Typography.medium) ?? 0, UIFont.Weight.medium.rawValue, accuracy: 0.01)
+        XCTAssertEqual(Typography.strong.pointSize, 11)
+        XCTAssertEqual(weight(of: Typography.strong) ?? 0, UIFont.Weight.bold.rawValue, accuracy: 0.01)
+    }
+
     func testDotViewColorIsApplied() {
         let dot = DotView(diameter: 6)
         dot.color = Palette.idleDot
