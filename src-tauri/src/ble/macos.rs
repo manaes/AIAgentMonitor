@@ -33,6 +33,18 @@ fn delegate_slot() -> &'static Mutex<Option<usize>> {
     DELEGATE.get_or_init(|| Mutex::new(None))
 }
 
+/// 슬롯에 델리게이트가 있으면 메인 스레드에서 `f` 를 실행한다. 원시 포인터를
+/// `&Delegate` 로 되돌리는 유일한 지점 — 이 함수 밖에서는 절대 역참조하지 않는다.
+fn with_delegate(app: &AppHandle, f: impl FnOnce(&Delegate) + Send + 'static) {
+    let _ = app.run_on_main_thread(move || {
+        let Some(raw) = *delegate_slot().lock().unwrap() else {
+            return;
+        };
+        // 메인 스레드에서만 실행되는 클로저 안이므로 역참조가 안전하다.
+        f(unsafe { &*(raw as *const Delegate) });
+    });
+}
+
 /// 메인 스레드에서만 접근하는 상태.
 struct MainState {
     manager: Option<Retained<CBPeripheralManager>>,
@@ -255,6 +267,23 @@ impl MacPeripheral {
 
 impl BlePeripheral for MacPeripheral {
     fn start(&self) -> anyhow::Result<()> {
+        // 이미 만들어진 델리게이트가 있으면 재사용한다. 매 on/off 사이클마다 새
+        // Delegate+CBPeripheralManager+CBMutableService 를 만들면 이전 것들이 해제되지
+        // 않고 계속 쌓이고, 동일한 SERVICE_UUID 가 GATT DB 에 중복 등록된다. stop() 은
+        // 광고만 멈췄을 뿐이므로, 재개할 때도 광고만 다시 시작하면 된다.
+        if delegate_slot().lock().unwrap().is_some() {
+            with_delegate(&self.app, |d| {
+                let Some(mgr) = d.ivars().borrow().manager.clone() else {
+                    return;
+                };
+                // PoweredOn 이 아니면 didUpdateState 콜백이 다시 켜졌을 때 publish()가 처리한다.
+                if unsafe { mgr.state() } == CBManagerState::PoweredOn {
+                    d.advertise(&mgr);
+                }
+            });
+            return Ok(());
+        }
+
         let events = self.events.clone();
         self.app.run_on_main_thread(move || {
             let state = MainState {
@@ -283,11 +312,7 @@ impl BlePeripheral for MacPeripheral {
 
     fn stop(&self) {
         self.subs_mirror.lock().unwrap().clear();
-        let _ = self.app.run_on_main_thread(|| {
-            let Some(raw) = *delegate_slot().lock().unwrap() else {
-                return;
-            };
-            let d: &Delegate = unsafe { &*(raw as *const Delegate) };
+        with_delegate(&self.app, |d| {
             if let Some(mgr) = d.ivars().borrow().manager.clone() {
                 unsafe { mgr.stopAdvertising() };
             }
@@ -296,12 +321,7 @@ impl BlePeripheral for MacPeripheral {
 
     fn offer_frame(&self, ch: CharId, chunks: Vec<Vec<u8>>) {
         let uuid = ch.uuid();
-        let _ = self.app.run_on_main_thread(move || {
-            let Some(raw) = *delegate_slot().lock().unwrap() else {
-                return;
-            };
-            // 메인 스레드에서만 실행되므로 역참조가 안전하다.
-            let d: &Delegate = unsafe { &*(raw as *const Delegate) };
+        with_delegate(&self.app, move |d| {
             {
                 let mut st = d.ivars().borrow_mut();
                 if let Some(q) = st.queues.get_mut(uuid) {

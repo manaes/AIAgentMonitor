@@ -24,6 +24,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
 use types::{AgentKind, TokenEvent};
 
+#[cfg(target_os = "macos")]
 use ble::peripheral::BlePeripheral;
 use ble::BleBridge;
 
@@ -38,6 +39,7 @@ pub struct BleStatus {
     pub enabled: bool,
     pub advertising: bool,
     pub peers: Vec<BlePeer>,
+    pub last_error: Option<String>,
 }
 
 pub struct BleHandle {
@@ -45,6 +47,9 @@ pub struct BleHandle {
     #[cfg(target_os = "macos")]
     pub peripheral: std::sync::Arc<ble::macos::MacPeripheral>,
     pub advertising: AtomicBool,
+    // tracing 에는 이 크레이트에 subscriber 가 없어 아무 데도 남지 않는다 —
+    // 권한 거부/미지원 같은 오류를 프론트가 표시할 수 있도록 여기 보관한다.
+    pub last_error: std::sync::Mutex<Option<String>>,
 }
 
 #[tauri::command]
@@ -63,6 +68,7 @@ async fn ble_status(state: tauri::State<'_, Arc<BleHandle>>) -> Result<BleStatus
         enabled: bridge.is_enabled(),
         advertising: state.advertising.load(Ordering::Relaxed),
         peers,
+        last_error: state.last_error.lock().unwrap().clone(),
     })
 }
 
@@ -74,6 +80,7 @@ async fn ble_set_enabled(
     state.bridge.lock().await.set_enabled(enabled);
     if !enabled {
         state.advertising.store(false, Ordering::Relaxed);
+        *state.last_error.lock().unwrap() = None;
     }
     Ok(())
 }
@@ -545,6 +552,7 @@ pub fn run() {
                         bridge: Mutex::new(BleBridge::new(periph.clone())),
                         peripheral: periph,
                         advertising: AtomicBool::new(false),
+                        last_error: std::sync::Mutex::new(None),
                     })
                 };
                 #[cfg(not(target_os = "macos"))]
@@ -555,6 +563,7 @@ pub fn run() {
                             ble::peripheral::FakePeripheral::new(),
                         ))),
                         advertising: AtomicBool::new(false),
+                        last_error: std::sync::Mutex::new(None),
                     })
                 };
                 {
@@ -570,11 +579,20 @@ pub fn run() {
                         while let Some(ev) = ble_rx.recv().await {
                             #[cfg(target_os = "macos")]
                             h.peripheral.apply_event(&ev);
-                            if let ble::peripheral::PeripheralEvent::AdvertisingStarted = ev {
-                                h.advertising.store(true, Ordering::Relaxed);
-                            }
-                            if let ble::peripheral::PeripheralEvent::Error(ref e) = ev {
-                                tracing::error!("BLE 오류: {e}");
+                            match &ev {
+                                ble::peripheral::PeripheralEvent::AdvertisingStarted => {
+                                    h.advertising.store(true, Ordering::Relaxed);
+                                    *h.last_error.lock().unwrap() = None;
+                                }
+                                ble::peripheral::PeripheralEvent::PoweredOff => {
+                                    h.advertising.store(false, Ordering::Relaxed);
+                                }
+                                ble::peripheral::PeripheralEvent::Error(e) => {
+                                    h.advertising.store(false, Ordering::Relaxed);
+                                    *h.last_error.lock().unwrap() = Some(e.clone());
+                                    tracing::error!("BLE 오류: {e}");
+                                }
+                                _ => {}
                             }
                             let _ = app_for_ble.emit("ble_status", ());
                         }
