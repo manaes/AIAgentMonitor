@@ -531,9 +531,12 @@ public enum Typography {
     public static let bigRate = monospacedDigit(ofSize: 22, weight: .bold)
     public static let percent = monospacedDigit(ofSize: 13, weight: .bold)
     public static let body = UIFont.systemFont(ofSize: 11)
-    public static let bodySemibold = UIFont.systemFont(ofSize: 11, weight: .semibold)
     public static let rate = monospacedDigit(ofSize: 11, weight: .semibold)
     public static let countdown = monospacedDigit(ofSize: 11, weight: .semibold)
+    /// AgentCard.svelte:90 `.unit` 과 SessionList.svelte:53 `.proj` 의 font-weight: 500
+    public static let medium = UIFont.systemFont(ofSize: 11, weight: .medium)
+    /// SessionList 한 줄의 `<strong>` — 행 font-size 11px 를 상속한 굵은 글씨
+    public static let strong = UIFont.systemFont(ofSize: 11, weight: .bold)
     public static let label = UIFont.systemFont(ofSize: 10)
     public static let sectionLabel = UIFont.systemFont(ofSize: 9)
     /// AgentCard.svelte:88 의 `.name` 은 font-weight: 600 만 지정하고 크기는
@@ -1045,7 +1048,7 @@ public final class AgentCardView: UIView {
         modelLabel.textColor = Palette.subtle
         rateLabel.font = Typography.bigRate
         rateLabel.textColor = Palette.primaryText
-        unitLabel.font = Typography.label
+        unitLabel.font = Typography.medium
         unitLabel.textColor = Palette.subtle
         unitLabel.text = "tok/s"
         projectLabel.font = Typography.body
@@ -1153,13 +1156,15 @@ public final class SessionRowView: UIView {
     private let rightLabel = UILabel()
     private let relativeLabel = UILabel()
 
-    public var leftText: String? { leftLabel.text }
+    /// attributedText 로 구간을 나눠 그리므로 평문은 여기서 꺼낸다.
+    public var leftText: String? { leftLabel.attributedText?.string ?? leftLabel.text }
     public var rightText: String? { rightLabel.text }
     public var relativeText: String? { relativeLabel.text }
     public var dotColor: UIColor? { dot.color }
 
     public init() {
         super.init(frame: .zero)
+        // 아래 configure 에서 attributedText 로 구간별 스타일을 지정한다.
         leftLabel.font = Typography.body
         leftLabel.textColor = Palette.primaryText
         rightLabel.font = Typography.rate
@@ -1208,7 +1213,24 @@ public final class SessionRowView: UIView {
         case .active: dot.color = agentColor
         }
 
-        leftLabel.text = "\(agentName) · \(project.name) \(project.model)"
+        // 원본은 한 줄 안에 세 가지 스타일이 공존한다(SessionList.svelte).
+        //   <strong>Claude</strong>          → 굵게
+        //   <span class="proj">· 이름</span>  → weight 500
+        //   <span class="model subtle">모델</span> → 흐린 색
+        // 단일 라벨로 뭉개면 전부 같게 보이므로 attributed string 으로 구간을 나눈다.
+        let line = NSMutableAttributedString(
+            string: agentName,
+            attributes: [.font: Typography.strong, .foregroundColor: Palette.primaryText]
+        )
+        line.append(NSAttributedString(
+            string: " · \(project.name)",
+            attributes: [.font: Typography.medium, .foregroundColor: Palette.primaryText]
+        ))
+        line.append(NSAttributedString(
+            string: "  \(project.model)",
+            attributes: [.font: Typography.body, .foregroundColor: Palette.subtle]
+        ))
+        leftLabel.attributedText = line
 
         switch project.status {
         case .active:
