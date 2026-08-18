@@ -5,18 +5,30 @@ import Foundation
 /// 반올림 방식과 경계값을 원본과 정확히 맞춘다.
 public enum MirrorFormat {
 
+    /// JS 의 toFixed 는 away-from-zero 로 반올림하는데 Swift 의 String(format:) 은
+    /// C 라이브러리의 짝수 반올림을 쓴다. 두 화면에 같은 숫자가 보여야 하므로
+    /// 포맷 전에 명시적으로 away-from-zero 로 맞춘다.
+    private static func toFixed(_ v: Double, _ places: Int) -> String {
+        let f = pow(10.0, Double(places))
+        let rounded = (v * f).rounded(.toNearestOrAwayFromZero) / f
+        return String(format: "%.\(places)f", rounded)
+    }
+
     /// formatTokensPerSec: 1 미만은 "0", 1000 미만은 정수, 그 이상은 "N.Nk"
     public static func tokensPerSec(_ v: Float) -> String {
-        if v < 1 { return "0" }
-        if v < 1000 { return String(format: "%.0f", v) }
-        return String(format: "%.1fk", v / 1000)
+        // f32 로 전송된 값을 그대로 Double 로 넓힌다. Mac 쪽도 동일한 f32 값을
+        // JSON 으로 파싱해 JS 의 double 로 다루므로, 정밀도를 더 얹지 않아야 두 값이 같아진다.
+        let d = Double(v)
+        if d < 1 { return "0" }
+        if d < 1000 { return toFixed(d, 0) }
+        return toFixed(d / 1000, 1) + "k"
     }
 
     /// formatTokensTotal: 1000 미만 정수, 100만 미만 "N.Nk", 그 이상 "N.NNM"
     public static func tokensTotal(_ n: UInt32) -> String {
         if n < 1000 { return String(n) }
-        if n < 1_000_000 { return String(format: "%.1fk", Double(n) / 1000) }
-        return String(format: "%.2fM", Double(n) / 1_000_000)
+        if n < 1_000_000 { return toFixed(Double(n) / 1000, 1) + "k" }
+        return toFixed(Double(n) / 1_000_000, 2) + "M"
     }
 
     /// relativeTime: 원본이 영문이므로 영문 그대로 둔다(두 화면 일치가 목적).
