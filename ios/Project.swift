@@ -36,6 +36,32 @@ let project = Project(
         unitTests("WireTests", for: "Wire"),
         framework("BLETransport", deps: [.target(name: "Wire")]),
         unitTests("BLETransportTests", for: "BLETransport"),
+        .target(
+            name: "App",
+            destinations: .iOS,
+            product: .app,
+            bundleId: bundlePrefix,
+            deploymentTargets: iOS,
+            infoPlist: .extendingDefault(with: [
+                "UILaunchScreen": [:],
+                "NSBluetoothAlwaysUsageDescription":
+                    "Mac 의 AI Agent Monitor 와 연결해 모니터링 화면을 표시합니다.",
+                "UIApplicationSceneManifest": [
+                    "UIApplicationSupportsMultipleScenes": false,
+                    "UISceneConfigurations": [
+                        "UIWindowSceneSessionRoleApplication": [[
+                            "UISceneConfigurationName": "Default",
+                            "UISceneDelegateClassName": "$(PRODUCT_MODULE_NAME).SceneDelegate",
+                        ]]
+                    ],
+                ],
+            ]),
+            sources: ["Sources/App/**"],
+            dependencies: [
+                .target(name: "BLETransport"),
+                .external(name: "SnapKit"),
+            ]
+        ),
     ],
     schemes: [
         // Tuist 4.158.2 는 테스트 타겟용 스킴을 자동 생성하지 않고 의존 대상(Wire)의
