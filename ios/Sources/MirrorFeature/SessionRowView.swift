@@ -73,20 +73,23 @@ public final class SessionRowView: UIView {
         // 10px 만큼 떨어진다 — 균일 6px 이 아니라 이 두 번째 간격만 넓힌다.
         leftStack.setCustomSpacing(10, after: projLabel)
 
-        // 모델이 가장 먼저 잘리는 것과, 0 폭까지 사라지는 것은 다르다 — 후자는
-        // 잘림이 아니라 정보 삭제다. 실제 존재하는 모델명(claude-sonnet-5 등, 최대
-        // claude-sonnet-4-6 정도 길이)과 흔한 프로젝트 폴더명 조합에서는 모델이
-        // 10pt 안팎만 잘리는 정도라 이 바닥에 닿을 일이 거의 없다. 그래도 아주
-        // 긴 값이 들어오는 병적인 입력에서 모델이 완전히 사라지지 않도록 최소
-        // 30pt 는 지키게 한다.
+        // 순서는 model(500) < 이 바닥(600) < project(700) < name(required) —
+        // 여유가 줄어들 때 항상 "model 이 project 보다 먼저 줄어든다"가 유지되도록
+        // 바닥을 project 보다 낮게 둔다.
         //
-        // 우선순위는 project(700)보다 낮은 600 으로 둔다 — model(500) < 이 바닥(600)
-        // < project(700) < name(required) 순서를 지켜야, 여유가 줄어들 때 항상
-        // "model 이 project 보다 먼저 줄어든다"는 설계가 유지된다. (한때 800 으로
-        // 올린 적이 있었는데, 그건 존재하지 않는 31자짜리 모델명으로 만든 인위적인
-        // 위기 상황에 맞춰 순서를 뒤집은 것이었다 — project 가 model 보다 먼저,
-        // 그것도 크게 희생됐다. 실제 모델명 길이로 다시 재보니 600 으로도 충분했다.
-        // 자세한 경위는 task-5-report.md의 "Fix Round 4" 참고.)
+        // 주의: 이 우선순위(600)에서 바닥은 실제로는 작동하지 않는다. project(700)
+        // 보다 낮은 제약은, 공간이 부족해지면 project 가 한 치도 양보하기 전에
+        // 모델의 물리적 최소값인 0 까지 먼저 완전히 희생된다 — 즉 30pt 를 지켜주지
+        // 못하고 그대로 통과해 사라진다(215~320pt 로 실측 확인,
+        // testPathologicalLongModelNameCurrentlyCanStillReachZero 가 이 실제
+        // 동작을 고정해둔다). 바닥을 진짜로 작동시키려면 project(700)보다 높은
+        // 우선순위가 필요한데, 그러면 이번엔 이 순서가 뒤집혀 project 가 model
+        // 보다 먼저, 그것도 크게 희생된다 — 라운드 3에서 실제로 그렇게 했다가
+        // 존재하지 않는 31자짜리 모델명 픽스처 때문이었다는 게 드러나 되돌렸다.
+        // 실제 모델명(claude-opus-5, claude-sonnet-5, haiku/opus/sonnet)과 흔한
+        // 프로젝트 폴더명 조합에서는 초과폭이 10pt 안팎이라 이 바닥 근처에도 가지
+        // 않는다 — 그러니 이 트레이드오프 자체가 실사용 경로에서는 발생하지 않는다.
+        // 자세한 경위와 실측값은 task-5-report.md의 "Fix Round 4" 참고.
         modelLabel.snp.makeConstraints { make in
             make.width.greaterThanOrEqualTo(30).priority(600)
         }
