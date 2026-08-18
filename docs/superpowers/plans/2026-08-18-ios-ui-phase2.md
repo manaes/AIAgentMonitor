@@ -621,7 +621,16 @@ final class QuotaBarViewTests: XCTestCase {
         v.configure(tokens5h: 48210, autoPct: 62.4, weeklyPct: 31.5, isReset5h: false)
         XCTAssertEqual(v.fivePercentText, "62%", "원본은 toFixed(0)")
         XCTAssertEqual(v.weeklyPercentText, "32%", "31.5 는 반올림되어 32")
+        // 주의: 31.5 는 두 반올림 규칙이 우연히 일치하는 값이라 tie-break 를 증명하지 못한다.
+        // 실제 구분은 아래 testPercentUsesAwayFromZeroRoundingLikeSource 가 한다.
         XCTAssertNil(v.fallbackText, "동기화됐으면 폴백 문구는 없다")
+    }
+
+    func testPercentUsesAwayFromZeroRoundingLikeSource() {
+        let v = QuotaBarView()
+        // 짝수 반올림이면 "30%", JS toFixed 와 맞추면 "31%" 다. 31.5 는 양쪽이 같아 구분 못 한다.
+        v.configure(tokens5h: 0, autoPct: 30.5, weeklyPct: nil, isReset5h: false)
+        XCTAssertEqual(v.fivePercentText, "31%")
     }
 
     func testShowsFallbackBeforeSync() {
@@ -781,7 +790,9 @@ private final class PercentRow: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) 는 쓰지 않는다") }
 
     func apply(percent: Float) {
-        percentLabel.text = String(format: "%.0f%%", percent)
+        // 직접 String(format:) 을 쓰면 짝수 반올림이 되어 JS toFixed 와 갈린다
+        // (30.5 → Swift "30" vs JS "31"). 골든 표로 고정된 공용 구현을 쓴다.
+        percentLabel.text = MirrorFormat.toFixed(Double(percent), 0) + "%"
         ratio = CGFloat(max(0, min(100, percent)) / 100)
         let g = QuotaDisplay.gradient(forPercent: percent)
         gradient.colors = [UIColor(hex: g.startHex).cgColor, UIColor(hex: g.endHex).cgColor]
