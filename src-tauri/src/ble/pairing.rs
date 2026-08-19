@@ -17,6 +17,13 @@
 //! 성공 확률이 0.0005% 다. 이 두 상수를 늘리면 그 근거가 무너지므로 임의로
 //! 바꾸지 않는다.
 //!
+//! **창에는 소유자가 없다.** 창이 열려 있는 동안에는 어느 central 이든
+//! `CODE:` 를 제출할 수 있고, 시도 5회는 창 전체가 공유한다. 첫
+//! `HELLO`/`CODE` 를 보낸 central 에게 창을 묶는 설계도 검토했으나 채택하지
+//! 않았다 — 그러면 근처 공격자가 `HELLO` 한 번으로 시도를 단 1회도 쓰지
+//! 않고 창을 조용히 120초 동안 죽일 수 있고, 사람이 코드를 입력하는
+//! 속도로는 그 재선점 경쟁에서 이길 수 없다(스펙 5.1/5.2).
+//!
 //! ## 재연결: 논스 챌린지-응답
 //!
 //! 128비트 토큰을 재연결마다 평문으로 그대로 보내면, 근접 스니핑 한 번으로
@@ -104,12 +111,9 @@ pub fn parse_auth_request(bytes: &[u8]) -> AuthRequest {
 struct PendingCode {
     code: String,
     issued_at: SystemTime,
+    /// 창 전체가 공유하는 시도 예산. 특정 central 것이 아니다 — 창에는
+    /// 소유자가 없다(스펙 5.1).
     attempts_left: u8,
-    /// 이 창을 처음 건드린(HELLO 또는 CODE 를 처음 보낸) central. 처음
-    /// 보낸 쪽이 창을 "소유"하게 되고, 그 뒤로는 다른 central 이 무엇을
-    /// 보내든 — 심지어 우연히 맞는 코드라도 — 이 창에 대해서는 거부된다.
-    /// 아직 아무도 건드리지 않았으면 None.
-    owner: Option<String>,
 }
 
 #[derive(Debug)]
@@ -122,7 +126,11 @@ struct PendingNonce {
 pub struct PairingManager {
     pending: Option<PendingCode>,
     tokens: HashSet<String>,
-    authorized: HashSet<String>,
+    /// central id → 그 central 을 인가시킨 토큰. 어떤 토큰이 어떤 세션을
+    /// 열었는지 기록해 둬야 `revoke_token`/`revoke_all` 이 살아 있는
+    /// 세션까지 내릴 수 있다(스펙 5.1: "토큰 폐기는 살아 있는 세션까지
+    /// 닿는다").
+    authorized: HashMap<String, String>,
     /// central id → 그 central 이 마지막 `AUTH` 로 받은 논스. central 마다
     /// 따로 두는 이유는 여러 기기가 동시에 재연결을 시도할 수 있어서다.
     /// 새 `AUTH` 는 이전 논스를 덮어써 무효화한다.
@@ -138,13 +146,17 @@ impl PairingManager {
     /// 코드를 발급하고, 120초짜리 "페어링 창"을 열고, 이 창의 시도 예산을
     /// 5회로 되돌린다. 새 창은 이전 창의 코드를 즉시 무효화한다 — 동시에
     /// 두 코드가 살아 있으면 공격면이 두 배가 된다.
+    ///
+    /// **이 함수는 사용자의 명시적 제스처(Devices 탭 [페어링 시작] 클릭)에서만
+    /// 호출한다.** 연결·구독·`HELLO`·앱 재시작 등 어떤 자동 경로에서도
+    /// 호출해서는 안 된다. 6자리 코드의 무차별 대입 방어(스펙 5.2)가
+    /// 전적으로 이 성질에 의존한다.
     pub fn begin_pairing(&mut self, now: SystemTime) -> String {
         let code = Self::random_code();
         self.pending = Some(PendingCode {
             code: code.clone(),
             issued_at: now,
             attempts_left: MAX_ATTEMPTS,
-            owner: None,
         });
         code
     }
@@ -165,31 +177,51 @@ impl PairingManager {
     }
 
     pub fn is_authorized(&self, id: &CentralId) -> bool {
-        self.authorized.contains(&id.0)
+        self.authorized.contains_key(&id.0)
     }
 
-    /// 이 central 의 세션 인가만 지운다(연결이 끊겼을 때, 또는 사용자가
-    /// 세션만 끊고 싶을 때 호출). 저장된 토큰 자체는 지우지 않으므로,
-    /// 같은 토큰으로 다시 재연결(`AUTH`/`PROOF:`)하면 즉시 재인가된다 —
-    /// 완전한 언페어링(토큰 폐기)이 필요하면 `revoke_token`/`revoke_all` 을
-    /// 함께 호출해야 한다.
+    /// 이 central 의 세션 인가와, 그 central 이 갖고 있던 미사용 논스를
+    /// 지운다(연결이 끊겼을 때, 또는 사용자가 세션만 끊고 싶을 때 호출).
+    /// 저장된 토큰 자체는 지우지 않으므로, 같은 토큰으로 다시
+    /// 재연결(`AUTH`/`PROOF:`)하면 즉시 재인가된다 — 완전한
+    /// 언페어링(토큰 폐기)이 필요하면 `revoke_token`/`revoke_all` 을 함께
+    /// 호출해야 한다.
     ///
     /// 호출자(BLE 브리지)는 central 의 연결이 끊어질 때 반드시 이를
     /// 호출해야 한다 — 그러지 않으면 인가 상태가 실제 연결보다 오래
     /// 살아남는다.
     pub fn end_session(&mut self, id: &CentralId) {
         self.authorized.remove(&id.0);
+        self.nonces.remove(&id.0);
     }
 
     /// 토큰 하나를 완전히 폐기한다 — 이후 이 토큰으로의 재연결 인증은
-    /// 거부된다. 스펙 6의 언페어링(`ble_unpair`)이 사용한다.
-    pub fn revoke_token(&mut self, token: &str) {
+    /// 거부된다. 저장된 토큰만 지우는 게 아니라, **그 토큰으로 이미
+    /// 인가된 살아 있는 세션도 함께 내린다** — 언페어링을 눌러도 화면
+    /// 미러링이 계속되면 언페어링이 아니다. 내려간 central id 를 반환하니
+    /// 호출자(BLE 브리지)가 그 연결을 실제로 끊어야 한다(스펙 6
+    /// `ble_unpair`).
+    pub fn revoke_token(&mut self, token: &str) -> Vec<CentralId> {
         self.tokens.remove(token);
+        let dropped: Vec<String> = self
+            .authorized
+            .iter()
+            .filter(|(_, t)| t.as_str() == token)
+            .map(|(cid, _)| cid.clone())
+            .collect();
+        for cid in &dropped {
+            self.authorized.remove(cid);
+        }
+        dropped.into_iter().map(CentralId).collect()
     }
 
-    /// 저장된 토큰을 모두 폐기한다(전체 언페어링).
-    pub fn revoke_all(&mut self) {
+    /// 저장된 토큰을 모두 폐기한다(전체 언페어링). `revoke_token` 과 같은
+    /// 이유로, 살아 있는 세션 전부를 내리고 그 central id 를 반환한다.
+    pub fn revoke_all(&mut self) -> Vec<CentralId> {
         self.tokens.clear();
+        let dropped: Vec<String> = self.authorized.keys().cloned().collect();
+        self.authorized.clear();
+        dropped.into_iter().map(CentralId).collect()
     }
 
     /// 화면에 표시할 코드. 만료됐으면 None — UI 가 따로 만료를 계산하지
@@ -203,13 +235,14 @@ impl PairingManager {
     }
 
     /// 이 central 이 현재 어떤 인증 상태인지. UI/로깅이 쓸 수 있게 세 값을
-    /// 실제 상태에서 도출한다.
+    /// 실제 상태에서 도출한다. 창에는 소유자가 없으므로, 창이 열려 있는
+    /// 동안에는 (아직 인가되지 않은) 어느 central 이든 `AwaitingCode` 다.
     pub fn state(&self, id: &CentralId, now: SystemTime) -> AuthState {
         if self.is_authorized(id) {
             return AuthState::Authorized;
         }
         if let Some(p) = &self.pending {
-            if !Self::expired(p, now) && p.owner.as_deref() == Some(id.0.as_str()) {
+            if !Self::expired(p, now) {
                 return AuthState::AwaitingCode;
             }
         }
@@ -220,38 +253,44 @@ impl PairingManager {
         now.duration_since(p.issued_at).unwrap_or_default() > CODE_TTL
     }
 
-    /// 창이 열려 있는지 확인하고, 아직 아무도 소유하지 않았다면 이
-    /// central 에 바인딩한다. 이미 다른 central 에 바인딩돼 있으면 None —
-    /// 이 요청은 시도 횟수를 건드리지 않고 거부돼야 한다(다른 central 의
-    /// 페어링 세션을 노려 소유자의 시도 예산을 소진시키는 것을 막는다).
-    /// 만료됐으면 창을 닫고 None.
-    fn open_window_for(&mut self, id: &CentralId, now: SystemTime) -> Option<&mut PendingCode> {
+    /// 창이 열려 있으면 그 창을 돌려준다. 창에는 소유자가 없다 — 어느
+    /// central 이든 열린 창에 `CODE:` 를 제출할 수 있다(스펙 5.1). 만료됐으면
+    /// 창을 닫고 None.
+    fn open_window(&mut self, now: SystemTime) -> Option<&mut PendingCode> {
         if matches!(&self.pending, Some(p) if Self::expired(p, now)) {
             self.pending = None;
         }
-        let p = self.pending.as_mut()?;
-        match &p.owner {
-            None => p.owner = Some(id.0.clone()),
-            Some(o) if o == &id.0 => {}
-            Some(_) => return None,
-        }
-        Some(p)
+        self.pending.as_mut()
+    }
+
+    /// 만료된 논스를 청소한다. `AUTH` 만 보내고 사라지는 central 이 계속
+    /// 쌓이면 원격에서 키우는 메모리 누수가 되므로, 모든 요청 처리
+    /// 시점마다 훑는다.
+    fn sweep_expired_nonces(&mut self, now: SystemTime) {
+        self.nonces
+            .retain(|_, n| now.duration_since(n.issued_at).unwrap_or_default() <= NONCE_TTL);
+    }
+
+    #[cfg(test)]
+    fn nonce_count(&self) -> usize {
+        self.nonces.len()
     }
 
     pub fn handle(&mut self, id: &CentralId, req: AuthRequest, now: SystemTime) -> AuthReply {
+        self.sweep_expired_nonces(now);
         match req {
-            AuthRequest::Hello => match self.open_window_for(id, now) {
+            AuthRequest::Hello => match self.open_window(now) {
                 Some(_) => AuthReply::AwaitingCode,
                 None => AuthReply::Rejected,
             },
             AuthRequest::Code(given) => {
-                let Some(p) = self.open_window_for(id, now) else {
+                let Some(p) = self.open_window(now) else {
                     return AuthReply::Rejected;
                 };
                 if given == p.code {
                     let token = Self::random_hex128();
                     self.tokens.insert(token.clone());
-                    self.authorized.insert(id.0.clone());
+                    self.authorized.insert(id.0.clone(), token.clone());
                     self.pending = None;
                     AuthReply::Granted { token }
                 } else {
@@ -293,15 +332,16 @@ impl PairingManager {
                     // 같은 기준을 적용한다.
                     return AuthReply::Rejected;
                 }
-                if now.duration_since(pending.issued_at).unwrap_or_default() > NONCE_TTL {
-                    return AuthReply::Rejected;
-                }
-                let ok = self
+                // 만료 검사는 없다 — handle() 진입 시 sweep_expired_nonces 가
+                // 이미 이 `now` 기준으로 지난 논스를 전부 제거했으므로,
+                // 여기까지 남아 있다면 반드시 유효하다.
+                let matched = self
                     .tokens
                     .iter()
-                    .any(|token| Self::verify_proof(token, &pending.nonce, &given));
-                if ok {
-                    self.authorized.insert(id.0.clone());
+                    .find(|token| Self::verify_proof(token, &pending.nonce, &given))
+                    .cloned();
+                if let Some(token) = matched {
+                    self.authorized.insert(id.0.clone(), token);
                     AuthReply::Authorized
                 } else {
                     AuthReply::Rejected
@@ -338,14 +378,36 @@ impl PairingManager {
         mac.verify_slice(&given_bytes).is_ok()
     }
 
+    /// hex 문자열을 바이트로 디코드한다. **바이트 단위로만 동작한다** —
+    /// `str` 을 문자 경계 기준으로 슬라이싱(`&s[i..i+2]`)하지 않는다.
+    /// 그렇게 슬라이싱하면 멀티바이트 UTF-8 입력(예: `PROOF:한글…`)이
+    /// char 경계를 침범해 패닉한다 — 원격에서 아무나 그 값을 보내
+    /// Mac 앱을 죽일 수 있다는 뜻이다. `is_valid_lowercase_hex` 같은
+    /// 앞단 형식 검사가 대부분의 경우 이 함수에 닿기 전에 걸러내지만,
+    /// 방어를 검사 하나에 의존시키지 않는다 — 이 함수 자체가 어떤
+    /// 입력에도 패닉하지 않아야 한다.
     fn hex_decode(s: &str) -> Option<Vec<u8>> {
-        if s.len() % 2 != 0 {
+        let bytes = s.as_bytes();
+        if bytes.len() % 2 != 0 {
             return None;
         }
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        bytes
+            .chunks_exact(2)
+            .map(|pair| {
+                let hi = Self::hex_nibble(pair[0])?;
+                let lo = Self::hex_nibble(pair[1])?;
+                Some((hi << 4) | lo)
+            })
             .collect()
+    }
+
+    fn hex_nibble(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
     }
 
     fn random_code() -> String {
@@ -451,11 +513,11 @@ mod tests {
     }
 
     #[test]
-    fn code_without_prior_hello_still_binds_and_grants() {
+    fn code_without_prior_hello_still_grants() {
         let mut m = PairingManager::new();
         let code = m.begin_pairing(t(1000));
-        // HELLO 를 생략하고 바로 CODE 를 보내도, 이 central 이 창을
-        // 소유하게 되고 통과해야 한다 — 바인딩은 HELLO 전용이 아니다.
+        // HELLO 를 생략하고 바로 CODE 를 보내도 통과해야 한다 — 창에는
+        // 소유자가 없으므로 HELLO 를 먼저 보낼 필요가 없다.
         let r = m.handle(&id("A"), AuthRequest::Code(code), t(1001));
         assert!(matches!(r, AuthReply::Granted { .. }));
     }
@@ -547,24 +609,55 @@ mod tests {
         assert!(matches!(ok, AuthReply::Granted { .. }));
     }
 
+    /// F1 재검토 후 계약이 뒤집힌 테스트: 예산이 코드 단위였을 때는 "다른
+    /// central 의 추측은 내 예산을 깎지 않는다" 였지만, 예산이 창 단위로
+    /// 바뀌면서(그리고 소유자 바인딩이 사라지면서) "창은 공유되므로 누구의
+    /// 추측이든 같은 예산을 깎는다"로 바뀌었다. 소유자를 남겨뒀다면 근처
+    /// 공격자가 `HELLO` 한 번으로 시도를 단 1회도 쓰지 않고 창을 조용히
+    /// 120초 동안 죽일 수 있었다 — 그 방어가 이 계약 전환의 이유다.
     #[test]
-    fn foreign_guesses_do_not_drain_owner_budget() {
+    fn window_budget_is_shared_across_centrals() {
         let mut m = PairingManager::new();
         let code = m.begin_pairing(t(1000));
-        // A 가 정당한 소유자로 바인딩된다.
-        m.handle(&id("A"), AuthRequest::Hello, t(1000));
-        // B(공격자)가 다섯 번 틀린 코드를 넣어도 A 의 예산에는 영향이
-        // 없어야 한다.
-        for _ in 0..5 {
-            let r = m.handle(&id("B"), AuthRequest::Code(wrong_code(&code)), t(1000));
-            assert!(matches!(r, AuthReply::Rejected), "다른 central 의 제출은 시도 횟수를 건드리지 않는다");
-        }
-        // A 는 여전히 5회를 온전히 갖고 있다.
-        for expected_left in [4u8, 3, 2, 1, 0] {
-            let r = m.handle(&id("A"), AuthRequest::Code(wrong_code(&code)), t(1000));
+        // 서로 다른 5개 central 이 각각 한 번씩 틀린 코드를 넣는다.
+        for (idx, expected_left) in [4u8, 3, 2, 1, 0].into_iter().enumerate() {
+            let guesser = id(&format!("C{idx}"));
+            let r = m.handle(&guesser, AuthRequest::Code(wrong_code(&code)), t(1000));
             assert!(matches!(r, AuthReply::Denied { left } if left == expected_left),
-                    "B 의 시도가 A 의 예산을 깎으면 안 된다: {r:?}");
+                    "central 이 달라도 같은 창 예산을 공유해야 한다: {r:?}");
         }
+        // 창이 소진됐다 — 이제는 올바른 코드를 내도(누가 냈든) 거부된다.
+        let after = m.handle(&id("A"), AuthRequest::Code(code), t(1001));
+        assert!(matches!(after, AuthReply::Rejected), "예산이 소진되면 창은 완전히 닫힌다");
+    }
+
+    /// F1 회귀 테스트: 소유자 바인딩이 있던 시절엔 근처 공격자가 `HELLO`
+    /// 한 번 보내고 사라지는 것만으로 창을 120초 동안 "공짜로" 잠글 수
+    /// 있었다(시도를 한 번도 안 쓰고). 소유자를 없앤 뒤에는 그 잠금이
+    /// 성립하지 않아야 한다.
+    #[test]
+    fn hello_does_not_reserve_the_window() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let hello = m.handle(&id("ATK"), AuthRequest::Hello, t(1000));
+        assert!(matches!(hello, AuthReply::AwaitingCode));
+        // ATK 는 그 뒤로 아무것도 보내지 않고 사라진다. A 가 곧바로 올바른
+        // 코드를 제출하면 통과해야 한다 — ATK 의 HELLO 가 창을 선점하지
+        // 않는다.
+        let r = m.handle(&id("A"), AuthRequest::Code(code), t(1001));
+        assert!(matches!(r, AuthReply::Granted { .. }), "HELLO 는 창을 잠그지 않는다");
+    }
+
+    #[test]
+    fn any_central_may_submit_the_code() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        // 공격자가 한 번 틀린 값을 넣는다.
+        let r1 = m.handle(&id("ATK"), AuthRequest::Code(wrong_code(&code)), t(1000));
+        assert!(matches!(r1, AuthReply::Denied { left: 4 }));
+        // 다른 central 이 곧바로 올바른 코드를 내도 통과해야 한다.
+        let r2 = m.handle(&id("A"), AuthRequest::Code(code), t(1001));
+        assert!(matches!(r2, AuthReply::Granted { .. }));
     }
 
     /// C1 회귀 테스트: 공격자가 `HELLO` 를 반복해 시도 예산을 리셋하려
@@ -575,7 +668,7 @@ mod tests {
         let mut m = PairingManager::new();
         let code = m.begin_pairing(t(1000));
 
-        // 라운드 0: 공격자가 창에 바인딩되고, 5회를 모두 소진한다.
+        // 라운드 0: 공격자가 창이 공유하는 5회를 모두 소진한다.
         let hello0 = m.handle(&id("ATK"), AuthRequest::Hello, t(1000));
         assert!(matches!(hello0, AuthReply::AwaitingCode));
         for expected_left in [4u8, 3, 2, 1, 0] {
@@ -644,21 +737,65 @@ mod tests {
         assert!(m.is_authorized(&id("A")));
     }
 
+    /// F3 재검토 후 강화된 테스트: 토큰 폐기는 저장된 토큰을 지우는 데서
+    /// 끝나지 않는다 — 그 토큰으로 이미 인가된 살아 있는 세션도 즉시
+    /// 내려야 한다. 그러지 않으면 사용자가 언페어링을 눌러도 화면
+    /// 미러링이 계속된다. 내려간 central id 를 반환값으로 확인한다 —
+    /// 호출자(BLE 브리지)가 실제로 연결을 끊으려면 그 id 가 필요하다.
     #[test]
-    fn revoke_token_prevents_future_authorization() {
+    fn revoking_a_token_drops_its_live_session() {
         let mut m = PairingManager::new();
         let code = m.begin_pairing(t(1000));
         let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1001)) else {
             panic!()
         };
-        m.revoke_token(&token);
+        assert!(m.is_authorized(&id("A")));
 
+        let dropped = m.revoke_token(&token);
+        assert!(!m.is_authorized(&id("A")), "토큰을 폐기하면 이미 인가된 세션도 즉시 내려가야 한다");
+        assert_eq!(dropped, vec![id("A")], "내려간 central 을 호출자가 알아야 실제 연결을 끊을 수 있다");
+
+        // 같은 토큰으로의 재인증도 당연히 거부된다.
         let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1002)) else {
             panic!()
         };
         let proof = compute_proof(&token, &nonce);
         let r = m.handle(&id("A"), AuthRequest::Proof(proof), t(1003));
         assert!(matches!(r, AuthReply::Rejected), "폐기된 토큰은 더 이상 통하지 않는다");
+    }
+
+    #[test]
+    fn revoking_a_token_leaves_other_sessions_alone() {
+        let mut m = PairingManager::new();
+        let code_a = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token: token_a } = m.handle(&id("A"), AuthRequest::Code(code_a), t(1001)) else {
+            panic!()
+        };
+        let code_b = m.begin_pairing(t(2000));
+        m.handle(&id("B"), AuthRequest::Code(code_b), t(2001));
+        assert!(m.is_authorized(&id("A")));
+        assert!(m.is_authorized(&id("B")));
+
+        m.revoke_token(&token_a);
+        assert!(!m.is_authorized(&id("A")));
+        assert!(m.is_authorized(&id("B")), "다른 토큰으로 인가된 세션은 영향받지 않아야 한다");
+    }
+
+    #[test]
+    fn revoke_all_drops_every_live_session() {
+        let mut m = PairingManager::new();
+        let code_a = m.begin_pairing(t(1000));
+        m.handle(&id("A"), AuthRequest::Code(code_a), t(1001));
+        let code_b = m.begin_pairing(t(2000));
+        m.handle(&id("B"), AuthRequest::Code(code_b), t(2001));
+        assert!(m.is_authorized(&id("A")));
+        assert!(m.is_authorized(&id("B")));
+
+        let mut dropped = m.revoke_all();
+        dropped.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(dropped, vec![id("A"), id("B")]);
+        assert!(!m.is_authorized(&id("A")));
+        assert!(!m.is_authorized(&id("B")));
     }
 
     #[test]
@@ -751,9 +888,10 @@ mod tests {
     #[test]
     fn state_reflects_awaiting_code_then_authorized() {
         let mut m = PairingManager::new();
+        assert_eq!(m.state(&id("A"), t(999)), AuthState::Unauthorized, "창이 없으면 미인가");
         let code = m.begin_pairing(t(1000));
-        assert_eq!(m.state(&id("A"), t(1000)), AuthState::Unauthorized);
-        m.handle(&id("A"), AuthRequest::Hello, t(1000));
+        // 창에는 소유자가 없다 — A 가 아무것도 보내지 않아도, 창이 열려
+        // 있는 동안에는 코드 대기 상태로 보인다.
         assert_eq!(m.state(&id("A"), t(1000)), AuthState::AwaitingCode);
         m.handle(&id("A"), AuthRequest::Code(code), t(1001));
         assert_eq!(m.state(&id("A"), t(1001)), AuthState::Authorized);
@@ -890,6 +1028,108 @@ mod tests {
             panic!()
         };
         assert_ne!(first, second, "매 AUTH 마다 새 논스를 내야 한다 — 예측 가능하면 재생 공격에 취약해진다");
+    }
+
+    /// F2 회귀 테스트: `AUTH` 만 보내고 사라지는 central 이 계속 쌓이면
+    /// `nonces` 맵이 무한히 자란다(원격에서 키우는 메모리 누수). 만료된
+    /// 항목은 다음 `handle` 호출에서 청소돼야 한다.
+    #[test]
+    fn expired_nonces_are_swept() {
+        let mut m = PairingManager::new();
+        m.handle(&id("A"), AuthRequest::Auth, t(1000));
+        m.handle(&id("B"), AuthRequest::Auth, t(1000));
+        m.handle(&id("C"), AuthRequest::Auth, t(1000));
+        assert_eq!(m.nonce_count(), 3);
+
+        // 31초 뒤, 요청 종류와 무관하게(sweep 은 handle 진입 시 항상
+        // 실행된다) 아무 요청이나 하나 처리하면 만료된 논스가 전부
+        // 청소돼야 한다.
+        m.handle(&id("D"), AuthRequest::Hello, t(1031));
+        assert_eq!(m.nonce_count(), 0, "만료된 논스는 다음 handle 호출에서 청소돼야 한다");
+    }
+
+    #[test]
+    fn end_session_drops_the_nonce() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1001)) else {
+            panic!()
+        };
+        let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1002)) else {
+            panic!()
+        };
+        m.end_session(&id("A"));
+        assert_eq!(m.nonce_count(), 0, "end_session 은 그 central 의 논스도 지워야 한다");
+
+        // 토큰은 여전히 유효하고 proof 계산도 올바르지만, 논스 자체가
+        // 지워졌으므로 거부돼야 한다 — end_session 이 논스를 지우지
+        // 않았다면 이 제출은 통과했을 것이다.
+        let proof = compute_proof(&token, &nonce);
+        let r = m.handle(&id("A"), AuthRequest::Proof(proof), t(1003));
+        assert!(matches!(r, AuthReply::Rejected));
+    }
+
+    /// F4-a 회귀 테스트: 논스는 검증 성공/실패와 무관하게 즉시 폐기돼야
+    /// 한다. 성공했을 때만 버리도록 약화되면(뮤테이션으로 실증됨) 같은
+    /// 논스에 틀린 PROOF 를 낸 뒤 맞는 PROOF 를 다시 낼 수 있게 된다.
+    #[test]
+    fn nonce_burns_on_a_failed_proof() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1001)) else {
+            panic!()
+        };
+        let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1002)) else {
+            panic!()
+        };
+
+        let wrong = compute_proof(&"f".repeat(32), &nonce);
+        let r1 = m.handle(&id("A"), AuthRequest::Proof(wrong), t(1003));
+        assert!(matches!(r1, AuthReply::Rejected));
+
+        // 같은 논스에 대해 이번엔 올바른 서명을 낸다 — 첫 시도에서 이미
+        // 소진됐어야 하므로 이것도 거부돼야 한다.
+        let correct = compute_proof(&token, &nonce);
+        let r2 = m.handle(&id("A"), AuthRequest::Proof(correct), t(1004));
+        assert!(matches!(r2, AuthReply::Rejected), "논스는 실패한 시도에서도 소진돼야 한다");
+    }
+
+    /// F4-b 회귀 테스트: `hex_decode` 는 어떤 입력에도 패닉해서는 안 된다.
+    /// 멀티바이트 UTF-8, 빈 문자열, 홀수 길이, 대문자, 잘못된 길이를 모두
+    /// 넣어 패닉 없이 거부되는지 확인한다. `AUTH` 를 먼저 받아 논스가
+    /// 있는 상태에서 시도해야 형식 검사 뒤쪽 경로까지 실제로 닿는다.
+    ///
+    /// 이 테스트 자체는 `is_valid_lowercase_hex` 형식 검사가 앞에서 대부분
+    /// 걸러내므로 통과가 쉽다 — `hex_decode` 자체의 안전성은 그 형식
+    /// 검사를 일시적으로 지운 뮤테이션으로 별도 실증했다(보고서 참고).
+    #[test]
+    fn malformed_proof_never_panics() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        m.handle(&id("A"), AuthRequest::Code(code), t(1001));
+
+        // 3바이트 한글 음절 21개 + ASCII 1글자 = 64바이트. hex_decode 가
+        // 2바이트 스텝으로 슬라이싱하면 한글의 3바이트 경계와 어긋나서,
+        // 예전 구현(`&s[i..i+2]`)이라면 char 경계 위반으로 패닉했을
+        // 입력이다.
+        let multibyte = format!("{}{}", "가".repeat(21), "x");
+        assert_eq!(multibyte.len(), 64);
+
+        let cases = [
+            multibyte,
+            "".to_string(),
+            "abc".to_string(),  // 홀수 길이
+            "F".repeat(64),     // 대문자
+            "a".repeat(65),     // 65자 — 홀수 길이이자 형식 위반
+        ];
+
+        for bogus in cases {
+            let AuthReply::Nonce { .. } = m.handle(&id("A"), AuthRequest::Auth, t(1002)) else {
+                panic!()
+            };
+            let r = m.handle(&id("A"), AuthRequest::Proof(bogus.clone()), t(1002));
+            assert!(matches!(r, AuthReply::Rejected), "패닉하지 않고 거부해야 한다: {bogus:?}");
+        }
     }
 
     /// Swift 재인증 모듈과 공유하는 골든 벡터.
