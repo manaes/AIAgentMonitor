@@ -37,7 +37,7 @@
 use crate::ble::peripheral::CentralId;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -122,10 +122,31 @@ struct PendingNonce {
     issued_at: SystemTime,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairedPeer {
+    pub peer_id: String,
+    pub paired_at: u64,
+    /// 지금 이 기기가 붙어서 인가된 상태인가. `authorized` 값(토큰)으로 판정한다.
+    pub connected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairingWindow {
+    /// 창이 열려 있다. UI 는 코드와 남은 초를 그린다.
+    Open { code: String, seconds_left: u64, attempts_left: u8 },
+    /// 시도 5회가 모두 소진돼 닫혔다. 방해일 수 있으므로 만료와 구분해 보여준다.
+    Exhausted,
+    /// 열린 적 없거나 시간이 지나 닫혔다.
+    Closed,
+}
+
 #[derive(Debug, Default)]
 pub struct PairingManager {
     pending: Option<PendingCode>,
-    tokens: HashSet<String>,
+    /// 토큰 → 페어링된 시각(unix secs). 토큰이 곧 기기 정체성이다 —
+    /// `CBCentral.identifier` 는 iOS 가 프라이버시를 위해 BLE 주소를 주기적으로
+    /// 바꾸므로 재연결 사이에 안정적이지 않아 쓸 수 없다(스펙 6장).
+    tokens: HashMap<String, u64>,
     /// central id → 그 central 을 인가시킨 토큰. 어떤 토큰이 어떤 세션을
     /// 열었는지 기록해 둬야 `revoke_token`/`revoke_all` 이 살아 있는
     /// 세션까지 내릴 수 있다(스펙 5.1: "토큰 폐기는 살아 있는 세션까지
@@ -161,19 +182,44 @@ impl PairingManager {
         code
     }
 
-    /// 영속화된 토큰을 복원한다. 앱 재시작 후에도 이미 페어링한 기기가
-    /// 통과해야 한다. `ble-peers.json` 이 손상되거나 잘려도 인증 우회로
-    /// 이어지지 않도록, 형식(정확히 32자 소문자 hex)에 맞지 않는 항목은
-    /// 조용히 버린다.
-    pub fn load_tokens(&mut self, tokens: Vec<String>) {
-        self.tokens
-            .extend(tokens.into_iter().filter(|t| Self::is_valid_lowercase_hex(t, 32)));
+    /// 영속화된 페어링을 복원한다. 형식(32자 소문자 hex)에 맞지 않는 항목은
+    /// 조용히 버린다 — 파일이 손상돼도 인증 우회로 이어지지 않게 한다.
+    pub fn load_peers(&mut self, peers: Vec<(String, u64)>) {
+        for (token, paired_at) in peers {
+            if Self::is_valid_lowercase_hex(&token, 32) {
+                self.tokens.insert(token, paired_at);
+            }
+        }
     }
 
-    pub fn issued_tokens(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.tokens.iter().cloned().collect();
-        v.sort();
+    /// 저장할 (토큰, 페어링 시각) 목록. 토큰 순 정렬(결정적 출력).
+    pub fn issued_peers(&self) -> Vec<(String, u64)> {
+        let mut v: Vec<(String, u64)> = self.tokens.iter().map(|(t, &p)| (t.clone(), p)).collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
         v
+    }
+
+    /// 화면에 그릴 기기 목록. peer_id 순 정렬. 토큰은 포함하지 않는다.
+    pub fn paired_peers(&self) -> Vec<PairedPeer> {
+        let mut v: Vec<PairedPeer> = self
+            .tokens
+            .iter()
+            .map(|(token, &paired_at)| PairedPeer {
+                peer_id: Self::peer_id_of(token),
+                paired_at,
+                connected: self.authorized.values().any(|t| t == token),
+            })
+            .collect();
+        v.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        v
+    }
+
+    /// 토큰에서 기기 id 를 파생한다. 토큰당 하나로 안정적이며, 프론트엔드에는
+    /// 이 값만 나간다 — 토큰(영구 자격증명)은 이 모듈 밖으로 나가지 않는다.
+    fn peer_id_of(token: &str) -> String {
+        use sha2::Digest;
+        let digest = Sha256::digest(token.as_bytes());
+        digest.iter().take(4).map(|b| format!("{b:02x}")).collect()
     }
 
     pub fn is_authorized(&self, id: &CentralId) -> bool {
@@ -201,7 +247,7 @@ impl PairingManager {
     /// 미러링이 계속되면 언페어링이 아니다. 내려간 central id 를 반환하니
     /// 호출자(BLE 브리지)가 그 연결을 실제로 끊어야 한다(스펙 6
     /// `ble_unpair`).
-    pub fn revoke_token(&mut self, token: &str) -> Vec<CentralId> {
+    fn revoke_token(&mut self, token: &str) -> Vec<CentralId> {
         self.tokens.remove(token);
         let dropped: Vec<String> = self
             .authorized
@@ -213,6 +259,21 @@ impl PairingManager {
             self.authorized.remove(cid);
         }
         dropped.into_iter().map(CentralId).collect()
+    }
+
+    /// peer_id 하나에 해당하는 토큰을 폐기하고, 그 토큰으로 인가돼 있던
+    /// central 들의 세션 인가도 내린다. 내려간 central 을 돌려준다.
+    /// 없는 peer_id 면 빈 벡터.
+    pub fn revoke_peer(&mut self, peer_id: &str) -> Vec<CentralId> {
+        let token = self
+            .tokens
+            .keys()
+            .find(|t| Self::peer_id_of(t) == peer_id)
+            .cloned();
+        match token {
+            Some(t) => self.revoke_token(&t),
+            None => Vec::new(),
+        }
     }
 
     /// 저장된 토큰을 모두 폐기한다(전체 언페어링). `revoke_token` 과 같은
@@ -253,14 +314,44 @@ impl PairingManager {
         now.duration_since(p.issued_at).unwrap_or_default() > CODE_TTL
     }
 
-    /// 창이 열려 있으면 그 창을 돌려준다. 창에는 소유자가 없다 — 어느
-    /// central 이든 열린 창에 `CODE:` 를 제출할 수 있다(스펙 5.1). 만료됐으면
-    /// 창을 닫고 None.
+    /// 창이 열려 있고 아직 시도 예산이 남아 있으면 그 창을 돌려준다. 창에는
+    /// 소유자가 없다 — 어느 central 이든 열린 창에 `CODE:` 를 제출할 수
+    /// 있다(스펙 5.1). 만료됐으면 창을 닫고 None. 예산이 소진됐으면(TTL 은
+    /// 아직 안 지났어도) `pending` 자체는 남겨두되(그래야 `pairing_window` 가
+    /// `Exhausted` 를 보여줄 수 있다) None 을 돌려줘 더 이상 통과시키지 않는다.
     fn open_window(&mut self, now: SystemTime) -> Option<&mut PendingCode> {
         if matches!(&self.pending, Some(p) if Self::expired(p, now)) {
             self.pending = None;
         }
-        self.pending.as_mut()
+        let usable = matches!(&self.pending, Some(p) if p.attempts_left > 0);
+        if usable {
+            self.pending.as_mut()
+        } else {
+            None
+        }
+    }
+
+    /// 페어링 창의 현재 상태를 UI 가 그릴 수 있는 형태로 노출한다. 만료와
+    /// 시도 소진을 구분하는 이유: 창에 소유자가 없다는 설계는 "방해하면 시도
+    /// 5회가 들고 그 소진이 화면에 보인다"는 전제에 의존한다(스펙 5.1/5.2) —
+    /// 그 전제가 성립하려면 소진 상태가 단순 만료와 다르게 보여야 한다.
+    pub fn pairing_window(&self, now: SystemTime) -> PairingWindow {
+        let Some(p) = &self.pending else {
+            return PairingWindow::Closed;
+        };
+        if Self::expired(p, now) {
+            return PairingWindow::Closed;
+        }
+        if p.attempts_left == 0 {
+            return PairingWindow::Exhausted;
+        }
+        let elapsed = now.duration_since(p.issued_at).unwrap_or_default();
+        let seconds_left = CODE_TTL.saturating_sub(elapsed).as_secs();
+        PairingWindow::Open {
+            code: p.code.clone(),
+            seconds_left,
+            attempts_left: p.attempts_left,
+        }
     }
 
     /// 만료된 논스를 청소한다. `AUTH` 만 보내고 사라지는 central 이 계속
@@ -289,20 +380,23 @@ impl PairingManager {
                 };
                 if given == p.code {
                     let token = Self::random_hex128();
-                    self.tokens.insert(token.clone());
+                    let paired_at = now
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    self.tokens.insert(token.clone(), paired_at);
                     self.authorized.insert(id.0.clone(), token.clone());
                     self.pending = None;
                     AuthReply::Granted { token }
                 } else {
                     p.attempts_left -= 1;
                     let left = p.attempts_left;
-                    if left == 0 {
-                        // 창 소속 예산이 소진됐다 — 창을 즉시 폐기한다. 이후
-                        // 이 central 이 HELLO 를 아무리 반복해도 새 창은
-                        // `begin_pairing`(사용자 제스처) 없이는 열리지
-                        // 않는다.
-                        self.pending = None;
-                    }
+                    // 예산이 소진돼도 `pending` 자체는 남겨둔다(즉시 지우지
+                    // 않는다) — `pairing_window` 가 TTL 내에는 `Exhausted` 로,
+                    // TTL 이 지나야 `Closed` 로 구분해 보여줘야 하기 때문이다.
+                    // `open_window` 가 attempts_left == 0 인 창을 이미
+                    // "사용 불가"로 취급하므로, HELLO/CODE 어느 쪽으로도 이
+                    // 창은 더 이상 통과되지 않는다.
                     AuthReply::Denied { left }
                 }
             }
@@ -337,7 +431,7 @@ impl PairingManager {
                 // 여기까지 남아 있다면 반드시 유효하다.
                 let matched = self
                     .tokens
-                    .iter()
+                    .keys()
                     .find(|token| Self::verify_proof(token, &pending.nonce, &given))
                     .cloned();
                 if let Some(token) = matched {
@@ -802,9 +896,9 @@ mod tests {
     fn revoke_all_clears_every_stored_token() {
         let mut m = PairingManager::new();
         let tok = "a".repeat(32);
-        m.load_tokens(vec![tok.clone(), "b".repeat(32)]);
+        m.load_peers(vec![(tok.clone(), 1000), ("b".repeat(32), 1000)]);
         m.revoke_all();
-        assert!(m.issued_tokens().is_empty());
+        assert!(m.issued_peers().is_empty());
 
         let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1000)) else {
             panic!()
@@ -818,7 +912,7 @@ mod tests {
     fn loaded_token_authorizes_via_challenge_response() {
         let mut m = PairingManager::new();
         let token = "a".repeat(32);
-        m.load_tokens(vec![token.clone()]);
+        m.load_peers(vec![(token.clone(), 1000)]);
 
         let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1000)) else {
             panic!()
@@ -830,17 +924,17 @@ mod tests {
     }
 
     #[test]
-    fn load_tokens_drops_malformed_entries() {
+    fn load_peers_drops_malformed_entries() {
         let mut m = PairingManager::new();
         let valid = "a".repeat(32);
-        m.load_tokens(vec![
-            "".to_string(),      // 빈 문자열
-            "short".to_string(), // 32자 미만
-            "A".repeat(32),      // 대문자
-            "g".repeat(32),      // hex 가 아님
-            valid.clone(),       // 유효한 값 하나
+        m.load_peers(vec![
+            ("".to_string(), 1000),      // 빈 문자열
+            ("short".to_string(), 1000), // 32자 미만
+            ("A".repeat(32), 1000),      // 대문자
+            ("g".repeat(32), 1000),      // hex 가 아님
+            (valid.clone(), 1000),       // 유효한 값 하나
         ]);
-        assert_eq!(m.issued_tokens(), vec![valid.clone()],
+        assert_eq!(m.issued_peers(), vec![(valid.clone(), 1000)],
                    "형식이 틀린 항목(손상된 설정 파일)은 조용히 버려야 한다");
 
         // 버려진 빈 문자열이 몰래 유효한 키로 취급되지 않는지 확인한다.
@@ -853,13 +947,13 @@ mod tests {
     }
 
     #[test]
-    fn issued_tokens_are_persistable() {
+    fn issued_peers_are_persistable() {
         let mut m = PairingManager::new();
         let code = m.begin_pairing(t(1000));
         let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1001)) else {
             panic!()
         };
-        assert!(m.issued_tokens().contains(&token));
+        assert!(m.issued_peers().iter().any(|(tok, _)| tok == &token));
     }
 
     #[test]
@@ -882,7 +976,7 @@ mod tests {
             panic!()
         };
         assert_ne!(tok1, tok2, "기기마다 다른 토큰을 받아야 한다 — 같으면 모든 기기가 자격증명을 공유하게 된다");
-        assert_eq!(m.issued_tokens().len(), 2);
+        assert_eq!(m.issued_peers().len(), 2);
     }
 
     #[test]
@@ -1171,5 +1265,144 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(actual, expected, "HMAC 입력 인코딩이 골든 벡터와 어긋났다");
+    }
+
+    // ---- 기기 정체성 (peer_id) ----
+
+    #[test]
+    fn peer_id_is_stable_for_a_token() {
+        let token_a = "a".repeat(32);
+        let token_b = "b".repeat(32);
+        assert_eq!(
+            PairingManager::peer_id_of(&token_a),
+            PairingManager::peer_id_of(&token_a),
+            "같은 토큰은 항상 같은 peer_id 를 내야 한다"
+        );
+        assert_ne!(
+            PairingManager::peer_id_of(&token_a),
+            PairingManager::peer_id_of(&token_b),
+            "다른 토큰은 다른 peer_id 를 내야 한다"
+        );
+    }
+
+    #[test]
+    fn peer_id_does_not_expose_the_token() {
+        let token = "a".repeat(32);
+        let peer_id = PairingManager::peer_id_of(&token);
+        assert!(!token.contains(&peer_id), "peer_id 는 토큰의 부분 문자열이면 안 된다");
+    }
+
+    #[test]
+    fn paired_peers_reports_connected_state() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1001)) else {
+            panic!()
+        };
+        let peer_id = PairingManager::peer_id_of(&token);
+
+        let peers = m.paired_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_id, peer_id);
+        assert!(peers[0].connected, "방금 인가된 기기는 connected 여야 한다");
+
+        m.end_session(&id("A"));
+        let peers = m.paired_peers();
+        assert_eq!(peers.len(), 1, "세션이 끊겨도 페어링 목록에는 남아 있어야 한다");
+        assert!(!peers[0].connected, "세션이 끊기면 connected 는 false 여야 한다");
+    }
+
+    #[test]
+    fn revoke_peer_drops_that_peer_only() {
+        let mut m = PairingManager::new();
+        let code_a = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token: token_a } = m.handle(&id("A"), AuthRequest::Code(code_a), t(1001)) else {
+            panic!()
+        };
+        let code_b = m.begin_pairing(t(2000));
+        let AuthReply::Granted { token: token_b } = m.handle(&id("B"), AuthRequest::Code(code_b), t(2001)) else {
+            panic!()
+        };
+        let peer_id_a = PairingManager::peer_id_of(&token_a);
+        let peer_id_b = PairingManager::peer_id_of(&token_b);
+
+        let dropped = m.revoke_peer(&peer_id_a);
+        assert_eq!(dropped, vec![id("A")]);
+        assert!(!m.is_authorized(&id("A")));
+        assert!(m.is_authorized(&id("B")), "다른 기기의 인가는 유지돼야 한다");
+
+        let remaining = m.paired_peers();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].peer_id, peer_id_b, "폐기한 기기만 목록에서 사라져야 한다");
+    }
+
+    #[test]
+    fn revoke_peer_with_unknown_id_is_a_noop() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        m.handle(&id("A"), AuthRequest::Code(code), t(1001));
+        assert_eq!(m.paired_peers().len(), 1);
+
+        let dropped = m.revoke_peer("deadbeef");
+        assert!(dropped.is_empty(), "없는 peer_id 는 아무것도 지우지 않는다");
+        assert_eq!(m.paired_peers().len(), 1, "기존 페어링이 그대로 남아 있어야 한다");
+        assert!(m.is_authorized(&id("A")));
+    }
+
+    // ---- 페어링 창 상태 ----
+
+    #[test]
+    fn window_reports_exhausted_separately_from_expiry() {
+        let mut m = PairingManager::new();
+        assert_eq!(m.pairing_window(t(999)), PairingWindow::Closed, "발급 전에는 닫힌 창");
+
+        let code = m.begin_pairing(t(1000));
+        match m.pairing_window(t(1000)) {
+            PairingWindow::Open { code: c, attempts_left, .. } => {
+                assert_eq!(c, code);
+                assert_eq!(attempts_left, MAX_ATTEMPTS);
+            }
+            other => panic!("정상 창은 Open 이어야 한다: {other:?}"),
+        }
+        match m.pairing_window(t(1050)) {
+            PairingWindow::Open { seconds_left, .. } => {
+                assert!(seconds_left < CODE_TTL.as_secs(), "시간이 지나면 남은 초가 줄어야 한다");
+            }
+            other => panic!("아직 열려 있어야 한다: {other:?}"),
+        }
+
+        // 시도 5회를 모두 소진한다.
+        for _ in 0..MAX_ATTEMPTS {
+            m.handle(&id("ATK"), AuthRequest::Code(wrong_code(&code)), t(1000));
+        }
+        assert_eq!(
+            m.pairing_window(t(1000)),
+            PairingWindow::Exhausted,
+            "소진 직후(TTL 안)에는 Exhausted 여야 한다"
+        );
+
+        // TTL 이 지나면 Exhausted 가 아니라 Closed 로 바뀌어야 한다.
+        assert_eq!(
+            m.pairing_window(t(1000) + CODE_TTL + Duration::from_secs(1)),
+            PairingWindow::Closed,
+            "TTL 이 지나면 오래된 경고를 계속 띄우지 않기 위해 Closed 여야 한다"
+        );
+    }
+
+    #[test]
+    fn paired_at_survives_a_reload() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1010)) else {
+            panic!()
+        };
+        let peers = m.issued_peers();
+
+        let mut reloaded = PairingManager::new();
+        reloaded.load_peers(peers);
+        let paired = reloaded.paired_peers();
+        assert_eq!(paired.len(), 1);
+        assert_eq!(paired[0].peer_id, PairingManager::peer_id_of(&token));
+        assert_eq!(paired[0].paired_at, 1010, "왕복 후에도 페어링 시각이 보존돼야 한다");
     }
 }
