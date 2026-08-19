@@ -4,6 +4,7 @@ pub mod framing;
 pub mod macos;
 pub mod peripheral;
 pub mod pairing;
+pub mod peers;
 pub mod send_queue;
 pub mod wire;
 
