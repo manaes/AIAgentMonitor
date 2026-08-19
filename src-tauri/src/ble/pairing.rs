@@ -891,4 +891,45 @@ mod tests {
         };
         assert_ne!(first, second, "매 AUTH 마다 새 논스를 내야 한다 — 예측 가능하면 재생 공격에 취약해진다");
     }
+
+    /// Swift 재인증 모듈과 공유하는 골든 벡터.
+    ///
+    /// 이 값을 고정하는 이유: HMAC 입력이 "hex 문자열의 UTF-8 바이트"인지
+    /// "hex 를 디코드한 raw bytes"인지가 Rust/Swift 양쪽에서 프로즈로만
+    /// 합의되면 조용히 어긋날 수 있다. 어긋나면 페어링은 성공하고 토큰도
+    /// 저장되지만, 이후 모든 재연결이 이유 없이 실패한다 — 로그가 없는
+    /// 앱이라 원인을 알 방법이 없다. token/nonce 는 길이·내용이 뚜렷이
+    /// 다른 고정값이다(전부 0 같은 값은 잘못된 해석 여러 개가 우연히
+    /// 일치할 수 있어 피한다).
+    ///
+    /// 갱신: UPDATE_GOLDEN=1 cargo test --manifest-path src-tauri/Cargo.toml ble::pairing::tests::golden
+    #[test]
+    fn golden_hmac_vector_matches() {
+        use std::path::PathBuf;
+
+        let token = "3f14a9c2e5b6d8710f2a4c6e8b1d3f50";
+        let nonce = "7ac4e19b2d5f8067c3a1e9d4b6f02358";
+        let proof = compute_proof(token, nonce);
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/ble-protocol/golden/hmac-sample.json");
+        let actual = serde_json::json!({
+            "token": token,
+            "nonce": nonce,
+            "proof": proof,
+            "note": "proof = lowercase-hex(HMAC-SHA256(key = raw bytes decoded from token hex, msg = raw bytes decoded from nonce hex)). NOT the UTF-8 bytes of the hex strings themselves.",
+        });
+
+        if std::env::var("UPDATE_GOLDEN").is_ok() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, serde_json::to_string_pretty(&actual).unwrap() + "\n").unwrap();
+            return;
+        }
+        let expected: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect(
+                "골든 벡터가 없다. UPDATE_GOLDEN=1 로 생성하고 커밋하라",
+            ))
+            .unwrap();
+        assert_eq!(actual, expected, "HMAC 입력 인코딩이 골든 벡터와 어긋났다");
+    }
 }

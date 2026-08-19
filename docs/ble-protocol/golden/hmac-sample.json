@@ -1,0 +1,6 @@
+{
+  "nonce": "7ac4e19b2d5f8067c3a1e9d4b6f02358",
+  "note": "proof = lowercase-hex(HMAC-SHA256(key = raw bytes decoded from token hex, msg = raw bytes decoded from nonce hex)). NOT the UTF-8 bytes of the hex strings themselves.",
+  "proof": "3716cff23eec3f09bbb0ec31db22da1a02e66f26dd76e3278aefd3a37196be32",
+  "token": "3f14a9c2e5b6d8710f2a4c6e8b1d3f50"
+}
