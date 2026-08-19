@@ -2,8 +2,10 @@
 //!
 //! 이 모듈은 순수하다 — CoreBluetooth 도 모르고 설정 파일도 읽거나 쓰지 않는다.
 //! (유일한 예외: 암호학적 난수를 위해 `/dev/urandom` 을 직접 읽는다 — 이
-//! 크레이트에는 CSPRNG 가 없다.) 그래야 코드 만료, 시도 제한, 토큰 재사용
-//! 같은 보안 성질을 하드웨어 없이 검증할 수 있다.
+//! 크레이트에는 CSPRNG 가 없다.) 그래야 코드 만료, 시도 제한, 토큰 재사용,
+//! 논스 재생 같은 보안 성질을 하드웨어 없이 검증할 수 있다.
+//!
+//! ## 초기 페어링: 6자리 코드
 //!
 //! 무차별 대입 방어는 코드 수명 120초와, **사용자가 연 창** 하나당 시도
 //! 5회다. `HELLO` 는 코드를 발급하지 않는다 — 그러면 공짜로, 무제한으로
@@ -14,18 +16,40 @@
 //! 페어링을 시작할 때 — 발급된다. 6자리는 100만 조합이므로, 창당 5회로는
 //! 성공 확률이 0.0005% 다. 이 두 상수를 늘리면 그 근거가 무너지므로 임의로
 //! 바꾸지 않는다.
+//!
+//! ## 재연결: 논스 챌린지-응답
+//!
+//! 128비트 토큰을 재연결마다 평문으로 그대로 보내면, 근접 스니핑 한 번으로
+//! 영구 접근권이 넘어간다. 그래서 재연결은 `AUTH` → 128비트 논스 발급 →
+//! `PROOF:<hex>`(= HMAC-SHA256(key=토큰, msg=논스)) 검증으로 바뀌었다.
+//! 도청자는 논스와 서명만 보므로 토큰을 복원할 수 없고, 논스는 30초
+//! 유효·1회용이라(검증 성공/실패와 무관하게 즉시 폐기) 재생 공격도
+//! 막힌다. HMAC 비교는 `hmac::Mac::verify_slice` 를 쓴다 — 이 크레이트가
+//! 이미 상수 시간 비교를 구현하므로(RustCrypto `hmac`), 별도로 `subtle` 을
+//! 끌어오지 않았다.
 use crate::ble::peripheral::CentralId;
-use std::collections::HashSet;
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
+
+type HmacSha256 = Hmac<Sha256>;
 
 pub const CODE_TTL: Duration = Duration::from_secs(120);
 pub const MAX_ATTEMPTS: u8 = 5;
+/// 재연결 논스의 수명. 코드보다 훨씬 짧다 — 논스는 연결할 때마다 매번
+/// 새로 받아 즉시 쓰는 값이라, 사용자가 화면을 보고 옮겨 적는 코드처럼
+/// 여유 시간이 필요 없다.
+pub const NONCE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthRequest {
     Hello,
     Code(String),
-    Token(String),
+    /// 재연결 시작. 논스를 요청한다.
+    Auth,
+    /// `AUTH` 로 받은 논스에 대한 HMAC-SHA256 서명(hex).
+    Proof(String),
     Malformed,
 }
 
@@ -34,9 +58,17 @@ pub enum AuthReply {
     /// 창이 열려 있고 이 central 에 바인딩됐다는 응답. 코드 자체는 담지
     /// 않는다 — 코드는 오직 `begin_pairing` 을 통해 로컬(Mac UI)로만 전달된다.
     AwaitingCode,
+    /// `CODE:` 성공 시에만 쓴다 — 새로 발급된 토큰을 실제로 전달해야 하는
+    /// 유일한 경로이기 때문이다.
     Granted { token: String },
     Denied { left: u8 },
     Rejected,
+    /// `AUTH` 응답. 클라이언트는 이 논스를 저장된 토큰으로 서명해
+    /// `PROOF:` 로 되돌려보내야 한다.
+    Nonce { nonce: String },
+    /// `PROOF:` 성공. 클라이언트가 이미 아는 토큰을 그대로 검증했을
+    /// 뿐이므로, 되돌려보낼 비밀이 없다 — 그래서 아무 필드도 없다.
+    Authorized,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,11 +88,14 @@ pub fn parse_auth_request(bytes: &[u8]) -> AuthRequest {
     if s == "HELLO" {
         return AuthRequest::Hello;
     }
+    if s == "AUTH" {
+        return AuthRequest::Auth;
+    }
     if let Some(rest) = s.strip_prefix("CODE:") {
         return AuthRequest::Code(rest.to_string());
     }
-    if let Some(rest) = s.strip_prefix("TOKEN:") {
-        return AuthRequest::Token(rest.to_string());
+    if let Some(rest) = s.strip_prefix("PROOF:") {
+        return AuthRequest::Proof(rest.to_string());
     }
     AuthRequest::Malformed
 }
@@ -77,11 +112,21 @@ struct PendingCode {
     owner: Option<String>,
 }
 
+#[derive(Debug)]
+struct PendingNonce {
+    nonce: String,
+    issued_at: SystemTime,
+}
+
 #[derive(Debug, Default)]
 pub struct PairingManager {
     pending: Option<PendingCode>,
     tokens: HashSet<String>,
     authorized: HashSet<String>,
+    /// central id → 그 central 이 마지막 `AUTH` 로 받은 논스. central 마다
+    /// 따로 두는 이유는 여러 기기가 동시에 재연결을 시도할 수 있어서다.
+    /// 새 `AUTH` 는 이전 논스를 덮어써 무효화한다.
+    nonces: HashMap<String, PendingNonce>,
 }
 
 impl PairingManager {
@@ -110,11 +155,7 @@ impl PairingManager {
     /// 조용히 버린다.
     pub fn load_tokens(&mut self, tokens: Vec<String>) {
         self.tokens
-            .extend(tokens.into_iter().filter(|t| Self::is_valid_token_format(t)));
-    }
-
-    fn is_valid_token_format(s: &str) -> bool {
-        s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            .extend(tokens.into_iter().filter(|t| Self::is_valid_lowercase_hex(t, 32)));
     }
 
     pub fn issued_tokens(&self) -> Vec<String> {
@@ -129,9 +170,9 @@ impl PairingManager {
 
     /// 이 central 의 세션 인가만 지운다(연결이 끊겼을 때, 또는 사용자가
     /// 세션만 끊고 싶을 때 호출). 저장된 토큰 자체는 지우지 않으므로,
-    /// 같은 토큰으로 다시 `TOKEN:` 인증하면 즉시 재인가된다 — 완전한
-    /// 언페어링(토큰 폐기)이 필요하면 `revoke_token`/`revoke_all` 을 함께
-    /// 호출해야 한다.
+    /// 같은 토큰으로 다시 재연결(`AUTH`/`PROOF:`)하면 즉시 재인가된다 —
+    /// 완전한 언페어링(토큰 폐기)이 필요하면 `revoke_token`/`revoke_all` 을
+    /// 함께 호출해야 한다.
     ///
     /// 호출자(BLE 브리지)는 central 의 연결이 끊어질 때 반드시 이를
     /// 호출해야 한다 — 그러지 않으면 인가 상태가 실제 연결보다 오래
@@ -140,7 +181,7 @@ impl PairingManager {
         self.authorized.remove(&id.0);
     }
 
-    /// 토큰 하나를 완전히 폐기한다 — 이후 이 토큰으로의 `TOKEN:` 인증은
+    /// 토큰 하나를 완전히 폐기한다 — 이후 이 토큰으로의 재연결 인증은
     /// 거부된다. 스펙 6의 언페어링(`ble_unpair`)이 사용한다.
     pub fn revoke_token(&mut self, token: &str) {
         self.tokens.remove(token);
@@ -208,7 +249,7 @@ impl PairingManager {
                     return AuthReply::Rejected;
                 };
                 if given == p.code {
-                    let token = Self::random_token();
+                    let token = Self::random_hex128();
                     self.tokens.insert(token.clone());
                     self.authorized.insert(id.0.clone());
                     self.pending = None;
@@ -226,14 +267,42 @@ impl PairingManager {
                     AuthReply::Denied { left }
                 }
             }
-            AuthRequest::Token(given) => {
-                if self.tokens.contains(&given) {
+            AuthRequest::Auth => {
+                // 새 논스는 이전 논스를 덮어써 무효화한다 — 코드와 마찬가지로
+                // 동시에 두 논스가 살아 있을 이유가 없다.
+                let nonce = Self::random_hex128();
+                self.nonces.insert(
+                    id.0.clone(),
+                    PendingNonce {
+                        nonce: nonce.clone(),
+                        issued_at: now,
+                    },
+                );
+                AuthReply::Nonce { nonce }
+            }
+            AuthRequest::Proof(given) => {
+                // 검증 성공/실패와 무관하게 즉시 폐기한다 — 그래야 같은
+                // 응답을 재생해도 두 번째부터는 통하지 않는다(1회용 논스).
+                let Some(pending) = self.nonces.remove(&id.0) else {
+                    // AUTH 없이 곧바로 온 PROOF, 혹은 이미 소비된 논스.
+                    return AuthReply::Rejected;
+                };
+                if !Self::is_valid_lowercase_hex(&given, 64) {
+                    // HMAC-SHA256 출력은 정확히 64자 소문자 hex 다. 형식이
+                    // 다르면 굳이 디코드를 시도하지 않고 거부한다 — 토큰과
+                    // 같은 기준을 적용한다.
+                    return AuthReply::Rejected;
+                }
+                if now.duration_since(pending.issued_at).unwrap_or_default() > NONCE_TTL {
+                    return AuthReply::Rejected;
+                }
+                let ok = self
+                    .tokens
+                    .iter()
+                    .any(|token| Self::verify_proof(token, &pending.nonce, &given));
+                if ok {
                     self.authorized.insert(id.0.clone());
-                    // 이미 클라이언트가 알고 있는 자격증명을 평문 링크로
-                    // 되돌려보낼 이유가 없다 — 새 토큰이 아니므로 빈 값.
-                    AuthReply::Granted {
-                        token: String::new(),
-                    }
+                    AuthReply::Authorized
                 } else {
                     AuthReply::Rejected
                 }
@@ -242,11 +311,49 @@ impl PairingManager {
         }
     }
 
+    fn is_valid_lowercase_hex(s: &str, len: usize) -> bool {
+        s.len() == len && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    }
+
+    /// HMAC-SHA256(key=token, msg=nonce) 를 계산해 클라이언트가 보낸
+    /// 서명과 비교한다. 키·메시지 모두 hex 로 인코딩된 원본 바이트로
+    /// 디코드한 뒤 계산한다(iOS 쪽도 동일하게 raw bytes 로 계산해야
+    /// 한다 — 3단계 배선 작업에서 맞춰야 하는 지점).
+    ///
+    /// `Mac::verify_slice` 는 상수 시간으로 비교한다(RustCrypto `hmac`
+    /// 크레이트 내부 구현) — 타이밍으로 서명 바이트를 하나씩 유추하는
+    /// 사이드 채널을 막는다.
+    fn verify_proof(token_hex: &str, nonce_hex: &str, given_hex: &str) -> bool {
+        let (Some(token_bytes), Some(nonce_bytes), Some(given_bytes)) = (
+            Self::hex_decode(token_hex),
+            Self::hex_decode(nonce_hex),
+            Self::hex_decode(given_hex),
+        ) else {
+            return false;
+        };
+        let Ok(mut mac) = HmacSha256::new_from_slice(&token_bytes) else {
+            return false;
+        };
+        mac.update(&nonce_bytes);
+        mac.verify_slice(&given_bytes).is_ok()
+    }
+
+    fn hex_decode(s: &str) -> Option<Vec<u8>> {
+        if s.len() % 2 != 0 {
+            return None;
+        }
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+            .collect()
+    }
+
     fn random_code() -> String {
         format!("{:06}", Self::random_u64() % 1_000_000)
     }
 
-    fn random_token() -> String {
+    /// 128비트 난수를 32자 소문자 hex 로. 토큰과 논스가 공유하는 형식이다.
+    fn random_hex128() -> String {
         format!("{:016x}{:016x}", Self::random_u64(), Self::random_u64())
     }
 
@@ -286,11 +393,26 @@ mod tests {
         chars.into_iter().collect()
     }
 
+    fn hex_encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// 테스트에서 "iOS 클라이언트" 역할을 대신한다 — 토큰으로 논스에
+    /// 서명해 올바른 PROOF 값을 만든다.
+    fn compute_proof(token: &str, nonce: &str) -> String {
+        let token_bytes = PairingManager::hex_decode(token).expect("토큰은 유효한 hex 다");
+        let nonce_bytes = PairingManager::hex_decode(nonce).expect("논스는 유효한 hex 다");
+        let mut mac = HmacSha256::new_from_slice(&token_bytes).expect("HMAC 키 길이 오류 없음");
+        mac.update(&nonce_bytes);
+        hex_encode(&mac.finalize().into_bytes())
+    }
+
     #[test]
     fn parses_each_request_form() {
         assert!(matches!(parse_auth_request(b"HELLO"), AuthRequest::Hello));
+        assert!(matches!(parse_auth_request(b"AUTH"), AuthRequest::Auth));
         assert!(matches!(parse_auth_request(b"CODE:123456"), AuthRequest::Code(c) if c == "123456"));
-        assert!(matches!(parse_auth_request(b"TOKEN:abcdef"), AuthRequest::Token(t) if t == "abcdef"));
+        assert!(matches!(parse_auth_request(b"PROOF:abcdef"), AuthRequest::Proof(p) if p == "abcdef"));
         assert!(matches!(parse_auth_request(b"NONSENSE"), AuthRequest::Malformed));
         assert!(matches!(parse_auth_request(&[0xff, 0xfe]), AuthRequest::Malformed),
                 "UTF-8 이 아니면 Malformed");
@@ -389,35 +511,16 @@ mod tests {
     }
 
     #[test]
-    fn issued_token_authorizes_a_new_connection() {
-        let mut m = PairingManager::new();
-        let code = m.begin_pairing(t(1000));
-        let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1001)) else {
-            panic!()
-        };
-        // 재연결은 새 CentralId 로 올 수 있다.
-        let r = m.handle(&id("B"), AuthRequest::Token(token), t(2000));
-        assert!(matches!(r, AuthReply::Granted { .. }));
-        assert!(m.is_authorized(&id("B")));
-    }
-
-    #[test]
-    fn token_reconnect_does_not_echo_the_token_back() {
-        let mut m = PairingManager::new();
-        let code = m.begin_pairing(t(1000));
-        let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1001)) else {
-            panic!()
-        };
-        let r = m.handle(&id("B"), AuthRequest::Token(token), t(2000));
-        let AuthReply::Granted { token: echoed } = r else { panic!("인가돼야 한다") };
-        assert!(echoed.is_empty(), "이미 아는 자격증명을 평문 링크로 되돌려보낼 필요가 없다");
-        assert!(m.is_authorized(&id("B")));
-    }
-
-    #[test]
     fn unknown_token_is_rejected() {
         let mut m = PairingManager::new();
-        let r = m.handle(&id("A"), AuthRequest::Token("deadbeef".into()), t(1000));
+        // 페어링한 적이 없어 저장된 토큰이 하나도 없다. AUTH 는 그래도
+        // 논스를 내주지만(논스 자체는 비밀이 아니다), 어떤 값으로도
+        // 서명을 맞출 수 없다.
+        let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1000)) else {
+            panic!()
+        };
+        let bogus_proof = compute_proof(&"0".repeat(32), &nonce);
+        let r = m.handle(&id("A"), AuthRequest::Proof(bogus_proof), t(1000));
         assert!(matches!(r, AuthReply::Rejected));
         assert!(!m.is_authorized(&id("A")));
     }
@@ -529,10 +632,15 @@ mod tests {
         };
         m.end_session(&id("A"));
         assert!(!m.is_authorized(&id("A")));
-        // 토큰 자체는 살아있다 — 같은 토큰으로 다시 인증하면 즉시
+
+        // 토큰 자체는 살아있다 — 같은 토큰으로 다시 재연결하면 즉시
         // 재인가된다. 완전한 폐기는 revoke_token 이 담당한다.
-        let r = m.handle(&id("A"), AuthRequest::Token(token), t(1002));
-        assert!(matches!(r, AuthReply::Granted { .. }));
+        let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1002)) else {
+            panic!()
+        };
+        let proof = compute_proof(&token, &nonce);
+        let r = m.handle(&id("A"), AuthRequest::Proof(proof), t(1003));
+        assert!(matches!(r, AuthReply::Authorized));
         assert!(m.is_authorized(&id("A")));
     }
 
@@ -544,42 +652,67 @@ mod tests {
             panic!()
         };
         m.revoke_token(&token);
-        let r = m.handle(&id("A"), AuthRequest::Token(token), t(1002));
+
+        let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1002)) else {
+            panic!()
+        };
+        let proof = compute_proof(&token, &nonce);
+        let r = m.handle(&id("A"), AuthRequest::Proof(proof), t(1003));
         assert!(matches!(r, AuthReply::Rejected), "폐기된 토큰은 더 이상 통하지 않는다");
     }
 
     #[test]
     fn revoke_all_clears_every_stored_token() {
         let mut m = PairingManager::new();
-        m.load_tokens(vec!["a".repeat(32), "b".repeat(32)]);
+        let tok = "a".repeat(32);
+        m.load_tokens(vec![tok.clone(), "b".repeat(32)]);
         m.revoke_all();
         assert!(m.issued_tokens().is_empty());
-        let r = m.handle(&id("A"), AuthRequest::Token("a".repeat(32)), t(1000));
+
+        let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1000)) else {
+            panic!()
+        };
+        let proof = compute_proof(&tok, &nonce);
+        let r = m.handle(&id("A"), AuthRequest::Proof(proof), t(1001));
         assert!(matches!(r, AuthReply::Rejected));
     }
 
     #[test]
-    fn loaded_tokens_authorize_without_pairing() {
+    fn loaded_token_authorizes_via_challenge_response() {
         let mut m = PairingManager::new();
-        m.load_tokens(vec!["a".repeat(32)]);
-        let r = m.handle(&id("A"), AuthRequest::Token("a".repeat(32)), t(1000));
-        assert!(matches!(r, AuthReply::Granted { .. }), "저장된 토큰은 앱 재시작 후에도 통한다");
+        let token = "a".repeat(32);
+        m.load_tokens(vec![token.clone()]);
+
+        let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1000)) else {
+            panic!()
+        };
+        let proof = compute_proof(&token, &nonce);
+        let r = m.handle(&id("A"), AuthRequest::Proof(proof), t(1001));
+        assert!(matches!(r, AuthReply::Authorized), "저장된 토큰은 앱 재시작 후에도 통한다");
+        assert!(m.is_authorized(&id("A")));
     }
 
     #[test]
     fn load_tokens_drops_malformed_entries() {
         let mut m = PairingManager::new();
+        let valid = "a".repeat(32);
         m.load_tokens(vec![
-            "".to_string(),         // 빈 문자열
-            "short".to_string(),    // 32자 미만
-            "A".repeat(32),         // 대문자
-            "g".repeat(32),         // hex 가 아님
-            "a".repeat(32),         // 유효한 값 하나
+            "".to_string(),      // 빈 문자열
+            "short".to_string(), // 32자 미만
+            "A".repeat(32),      // 대문자
+            "g".repeat(32),      // hex 가 아님
+            valid.clone(),       // 유효한 값 하나
         ]);
-        assert_eq!(m.issued_tokens(), vec!["a".repeat(32)],
+        assert_eq!(m.issued_tokens(), vec![valid.clone()],
                    "형식이 틀린 항목(손상된 설정 파일)은 조용히 버려야 한다");
-        let r = m.handle(&id("A"), AuthRequest::Token(String::new()), t(1000));
-        assert!(matches!(r, AuthReply::Rejected), "빈 토큰이 인증 우회가 되면 안 된다");
+
+        // 버려진 빈 문자열이 몰래 유효한 키로 취급되지 않는지 확인한다.
+        let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1000)) else {
+            panic!()
+        };
+        let proof_from_empty_key = compute_proof("", &nonce);
+        let r = m.handle(&id("A"), AuthRequest::Proof(proof_from_empty_key), t(1000));
+        assert!(matches!(r, AuthReply::Rejected), "손상된 설정 파일이 인증 우회가 되면 안 된다");
     }
 
     #[test]
@@ -624,5 +757,138 @@ mod tests {
         assert_eq!(m.state(&id("A"), t(1000)), AuthState::AwaitingCode);
         m.handle(&id("A"), AuthRequest::Code(code), t(1001));
         assert_eq!(m.state(&id("A"), t(1001)), AuthState::Authorized);
+    }
+
+    // ---- 논스 챌린지-응답 ----
+
+    #[test]
+    fn correct_proof_authorizes() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1001)) else {
+            panic!()
+        };
+        let AuthReply::Nonce { nonce } = m.handle(&id("B"), AuthRequest::Auth, t(2000)) else {
+            panic!("AUTH 는 항상 논스를 내준다")
+        };
+        let proof = compute_proof(&token, &nonce);
+        let r = m.handle(&id("B"), AuthRequest::Proof(proof), t(2001));
+        assert_eq!(r, AuthReply::Authorized, "이미 아는 자격증명을 되돌려보낼 필요가 없다");
+        assert!(m.is_authorized(&id("B")));
+    }
+
+    #[test]
+    fn wrong_proof_does_not_authorize() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        m.handle(&id("A"), AuthRequest::Code(code), t(1001));
+        // 재연결은 새 CentralId 로 온다 — A 는 이미 정당하게 인가됐으므로,
+        // 확인할 대상은 이 새 연결(B)이 잘못된 서명으로 인가되지 않는지다.
+        let AuthReply::Nonce { nonce } = m.handle(&id("B"), AuthRequest::Auth, t(1002)) else {
+            panic!()
+        };
+        // 전혀 다른 키로 서명한 값.
+        let wrong = compute_proof(&"f".repeat(32), &nonce);
+        let r = m.handle(&id("B"), AuthRequest::Proof(wrong), t(1003));
+        assert!(matches!(r, AuthReply::Rejected));
+        assert!(!m.is_authorized(&id("B")));
+    }
+
+    #[test]
+    fn same_proof_replayed_against_same_nonce_fails() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1001)) else {
+            panic!()
+        };
+        let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1002)) else {
+            panic!()
+        };
+        let proof = compute_proof(&token, &nonce);
+
+        let first = m.handle(&id("A"), AuthRequest::Proof(proof.clone()), t(1003));
+        assert!(matches!(first, AuthReply::Authorized));
+
+        m.end_session(&id("A")); // 세션만 끊는다 — 도청자가 같은 응답을 재생하는 상황을 흉내낸다.
+        let replay = m.handle(&id("A"), AuthRequest::Proof(proof), t(1004));
+        assert!(matches!(replay, AuthReply::Rejected), "논스는 1회용이다 — 같은 응답을 재생해도 통하면 안 된다");
+    }
+
+    #[test]
+    fn proof_against_a_different_nonce_fails() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1001)) else {
+            panic!()
+        };
+        let AuthReply::Nonce { nonce: nonce_a } = m.handle(&id("A"), AuthRequest::Auth, t(1002)) else {
+            panic!()
+        };
+        let AuthReply::Nonce { nonce: nonce_b } = m.handle(&id("B"), AuthRequest::Auth, t(1002)) else {
+            panic!()
+        };
+        assert_ne!(nonce_a, nonce_b);
+
+        // A 에게 온 논스가 아니라 B 의 논스로 서명한 값을 A 로 제출한다.
+        let proof_for_wrong_nonce = compute_proof(&token, &nonce_b);
+        let r = m.handle(&id("A"), AuthRequest::Proof(proof_for_wrong_nonce), t(1003));
+        assert!(matches!(r, AuthReply::Rejected));
+    }
+
+    #[test]
+    fn expired_nonce_fails() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1001)) else {
+            panic!()
+        };
+        let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(2000)) else {
+            panic!()
+        };
+        let proof = compute_proof(&token, &nonce);
+        let r = m.handle(&id("A"), AuthRequest::Proof(proof), t(2000 + 31));
+        assert!(matches!(r, AuthReply::Rejected), "30초를 넘기면 논스가 만료된다");
+    }
+
+    #[test]
+    fn proof_without_preceding_auth_fails() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code), t(1001)) else {
+            panic!()
+        };
+        // AUTH 를 한 번도 보내지 않고 곧바로 PROOF 를 보낸다. 값 자체는
+        // (우연히) 유효한 서명 형식일 수 있지만, 검증할 논스가 없다.
+        let bogus = compute_proof(&token, &"0".repeat(32));
+        let r = m.handle(&id("A"), AuthRequest::Proof(bogus), t(1002));
+        assert!(matches!(r, AuthReply::Rejected));
+    }
+
+    #[test]
+    fn malformed_proof_format_is_rejected() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        m.handle(&id("A"), AuthRequest::Code(code), t(1001));
+
+        // 논스가 1회용이라 제출마다 새로 받아야 한다 — 그래야 각 형식
+        // 오류가 "AUTH 를 안 보냈다"가 아니라 실제로 형식 검증에 걸린다.
+        for bogus in ["", &"F".repeat(64), "not-hex", "abcd"] {
+            let reply = m.handle(&id("A"), AuthRequest::Auth, t(1002));
+            assert!(matches!(reply, AuthReply::Nonce { .. }));
+            let r = m.handle(&id("A"), AuthRequest::Proof(bogus.to_string()), t(1002));
+            assert!(matches!(r, AuthReply::Rejected), "형식이 틀린 값({bogus:?})은 느슨하게 봐주지 않는다");
+        }
+    }
+
+    #[test]
+    fn nonce_differs_between_two_auth_requests() {
+        let mut m = PairingManager::new();
+        let AuthReply::Nonce { nonce: first } = m.handle(&id("A"), AuthRequest::Auth, t(1000)) else {
+            panic!()
+        };
+        let AuthReply::Nonce { nonce: second } = m.handle(&id("A"), AuthRequest::Auth, t(1001)) else {
+            panic!()
+        };
+        assert_ne!(first, second, "매 AUTH 마다 새 논스를 내야 한다 — 예측 가능하면 재생 공격에 취약해진다");
     }
 }
