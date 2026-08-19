@@ -78,6 +78,15 @@ BLE 링크 자체는 암호화하지 않는다. 인가된 세션의 트래픽은
 > `src-tauri/src/ble/pairing.rs` 를 정본으로 삼으라.** 최종 공개 API:
 > `begin_pairing`, `handle`, `is_authorized`, `state`, `end_session`, `revoke_token`,
 > `revoke_all`, `visible_code`, `load_tokens`, `issued_tokens`, `parse_auth_request`.
+>
+> **계약 — `begin_pairing` 은 사용자의 명시적 제스처에서만 호출한다.** Devices 탭의
+> [페어링 시작] 클릭이 유일한 호출 지점이다. central 연결, 구독 시작, `HELLO` 수신,
+> 앱 재시작, BLE 공유 토글 어느 것도 이 함수를 불러서는 안 된다. 6자리 코드의 무차별
+> 대입 방어(스펙 5.2)가 전적으로 이 성질에 얹혀 있다 — 자동 호출 경로가 하나라도
+> 생기면 공격자가 코드 발급을 무한 반복시켜 시도 5회 제한이 무의미해진다.
+>
+> **창에는 소유자가 없다.** 창이 열려 있는 동안 어느 central 이든 `CODE:` 를 제출할 수
+> 있고 시도 5회는 창 전체가 공유한다(스펙 5.1).
 
 **Files:**
 - Create: `src-tauri/src/ble/pairing.rs`
@@ -639,7 +648,7 @@ git commit -m "feat(ble): 페어링 토큰 영속화 추가"
 
 **Interfaces:**
 - Consumes: `pairing::{PairingManager, AuthRequest, AuthReply, parse_auth_request}`, `peers::PeerStore`
-- Produces: `PeripheralEvent::AuthWrite { central: CentralId, data: Vec<u8> }`, `PeripheralEvent::Disconnected(CentralId)`, `BlePeripheral::notify_auth(&self, central: &CentralId, payload: Vec<u8>)`, `BlePeripheral::authorized_subscribers(&self, is_authorized: &dyn Fn(&CentralId) -> bool) -> Vec<Subscriber>`, `BleBridge::handle_auth(&mut self, central: &CentralId, data: &[u8], now: SystemTime) -> Option<Vec<String>>`, `BleBridge::visible_pairing_code(&self, now: SystemTime) -> Option<String>`, `BleBridge::unpair_all(&mut self)`
+- Produces: `PeripheralEvent::AuthWrite { central: CentralId, data: Vec<u8> }`, `PeripheralEvent::Disconnected(CentralId)`, `BlePeripheral::notify_auth(&self, central: &CentralId, payload: Vec<u8>)`, `BlePeripheral::authorized_subscribers(&self, is_authorized: &dyn Fn(&CentralId) -> bool) -> Vec<Subscriber>`, `BleBridge::handle_auth(&mut self, central: &CentralId, data: &[u8], now: SystemTime) -> Option<Vec<String>>`, `BleBridge::visible_pairing_code(&self, now: SystemTime) -> Option<String>`, `BleBridge::unpair_all(&mut self)`. Task 1 이 확정한 폐기 API: `PairingManager::revoke_token(&mut self, token: &str) -> Vec<CentralId>` 와 `PairingManager::revoke_all(&mut self) -> Vec<CentralId>` — 둘 다 저장된 토큰을 지우는 동시에 **그 토큰으로 인가된 살아 있는 세션의 인가도 내리고**, 내려간 central 목록을 돌려준다
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -843,9 +852,16 @@ Expected: FAIL — `no method named handle_auth`
         self.pairing.load_tokens(tokens);
     }
 
-    /// 모든 기기의 인가와 토큰을 폐기한다.
+    /// 모든 기기의 인가와 토큰을 폐기한다. `revoke_all` 은 인가가 내려간
+    /// central 목록을 돌려주지만, `CBPeripheralManager` 에는 연결된 central 을
+    /// 끊는 API 가 없다(1단계에서 확인). 그래서 여기서는 로그·UI 용으로만
+    /// 쓰고 버린다 — 실제 차단은 "인가가 없으면 notify 하지 않는다" 로 이뤄진다.
+    ///
+    /// `PairingManager` 를 통째로 새로 만들지 **않는다.** 그러면 사용자가 열어둔
+    /// 페어링 창까지 조용히 닫혀, 언페어링을 누른 순간 진행 중이던 페어링이
+    /// 이유 없이 죽는다.
     pub fn unpair_all(&mut self) {
-        self.pairing = pairing::PairingManager::new();
+        let _dropped = self.pairing.revoke_all();
     }
 ```
 
