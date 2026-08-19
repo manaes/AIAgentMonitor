@@ -647,6 +647,46 @@ git commit -m "feat(ble): 페어링 토큰 영속화 추가"
 
 ## Task 3: 인가 필터를 `BleBridge` 에 넣는다
 
+> **개정 (2026-08-19) — 아래 본문의 코드 블록은 옛 API 로 쓰였다.** Task 1·2 가 실제로
+> 확정한 것이 정본이고, 충돌하면 아래 표가 이긴다. 본문 코드는 구조를 보여주는 참고로
+> 읽되, 함수 이름과 타입은 표를 따른다.
+>
+> | 본문에 적힌 것 | 실제 (정본) |
+> |---|---|
+> | `PairingManager::forget` | `end_session(&mut self, id: &CentralId)` |
+> | `load_tokens(Vec<String>)` | `load_peers(&mut self, peers: Vec<(String, u64)>)` — (토큰, paired_at) |
+> | `issued_tokens() -> Vec<String>` | `issued_peers(&self) -> Vec<(String, u64)>` |
+> | `revoke_token(&str)` (공개) | **private 이다.** 밖에서는 `revoke_peer(&mut self, peer_id: &str) -> Vec<CentralId>` 를 쓴다 |
+> | `AuthRequest::Token(String)` | 없다. `Auth` 와 `Proof(String)` 이다 (챌린지-응답) |
+> | `AuthReply::CodeIssued { code }` | 없다. `AwaitingCode` 다 — 코드는 **BLE 로 보내지 않는다** |
+> | `PairingManager::new(clock)` | `new()` — 시각은 매 호출에 `now: SystemTime` 으로 받는다 |
+>
+> `AuthReply` 의 실제 variant: `AwaitingCode`, `Granted { token }`, `Denied { left }`,
+> `Rejected`, `Nonce { nonce }`, `Authorized`(필드 없음).
+>
+> **`BleBridge` 가 새로 내놔야 하는 것** (Task 5 가 소비한다):
+>
+> ```rust
+> // 인가 쓰기 처리. Granted 가 나면 저장할 목록을 돌려준다(호출자가 PeerStore 에 쓴다).
+> pub fn handle_auth(&mut self, central: &CentralId, data: &[u8], now: SystemTime)
+>     -> Option<Vec<peers::StoredPeer>>;
+> pub fn begin_pairing(&mut self, now: SystemTime) -> String;   // 사용자 제스처 전용
+> pub fn pairing_window(&self, now: SystemTime) -> pairing::PairingWindow;
+> pub fn paired_peers(&self) -> Vec<pairing::PairedPeer>;
+> pub fn stored_peers(&self) -> Vec<peers::StoredPeer>;         // 저장용
+> pub fn forget_central(&mut self, central: &CentralId);        // → end_session
+> pub fn load_peers(&mut self, peers: Vec<peers::StoredPeer>);
+> pub fn unpair_peer(&mut self, peer_id: &str) -> Vec<CentralId>;
+> pub fn unpair_all(&mut self) -> Vec<CentralId>;
+> ```
+>
+> `visible_pairing_code` 는 **만들지 않는다.** `pairing_window` 가 코드·남은 초·남은 시도를
+> 함께 주며, 만료와 시도 소진을 구분한다. 본문의 `visible_pairing_code` 호출은 전부
+> `pairing_window` 로 읽는다.
+>
+> `handle_auth` 의 반환형이 `Option<Vec<String>>` 에서 `Option<Vec<StoredPeer>>` 로 바뀐
+> 이유: 저장 포맷이 토큰만이 아니라 페어링 시각을 함께 담기 때문이다(스펙 6장).
+
 지금은 구독한 **모든** central 이 스냅샷을 받는다. 이 태스크가 그것을 인가된 central 로 좁힌다.
 
 **Files:**
