@@ -3,6 +3,7 @@ pub mod framing;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod peripheral;
+pub mod pairing;
 pub mod send_queue;
 pub mod wire;
 
