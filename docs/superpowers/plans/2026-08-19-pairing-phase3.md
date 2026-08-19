@@ -29,14 +29,27 @@
 
 ### 상태 기계 (스펙 5.1 그대로)
 
+> **이 절은 3단계 진행 중 두 번 개정됐다. 최신 정본은 스펙 §5.1 이며, Task 1 은 이미 그에 맞춰
+> 구현·검증 완료(커밋 `94c5af7`)다. Task 3 이후를 구현하는 사람은 아래 요약과 실제 소스
+> (`src-tauri/src/ble/pairing.rs`)를 보라.**
+
 ```
-[미인가] --write(HELLO)--------> [코드 대기]
-    Mac: 6자리 코드 생성 → Detail 창 표시, 120초 유효
-[코드 대기] --write(CODE:123456)--> 검증
-    성공 → 128비트 토큰 발급 → notify(Auth){"ok":true,"token":"…"} → [인가]
-    실패 → notify(Auth){"ok":false,"left":n}, 5회 소진 시 코드 폐기·연결 해제
-[미인가] --write(TOKEN:<hex>)---> 검증 성공 → [인가]
+사용자가 Mac Devices 탭에서 [페어링 시작] 클릭
+    → begin_pairing(now): 6자리 코드 + 120초 창 + 시도 5회
+    → 코드는 Mac 화면에만 표시된다 (BLE 로 절대 나가지 않는다)
+
+[미인가] --write(HELLO)--------> 창이 열려 있으면 AwaitingCode, 없으면 Rejected
+[코드 대기] --write(CODE:123456)--> 성공 → Granted{token} → [인가]
+                                   실패 → Denied{left}, 5회 소진 시 창 폐기
+
+재연결(토큰은 링크를 타지 않는다):
+[미인가] --write(AUTH)---------> Nonce{nonce}   (128비트, 30초, 1회용)
+[논스 수신] --write(PROOF:<hex>)--> HMAC-SHA256(key=토큰, msg=논스) 검증
+                                   일치 → Authorized (필드 없음) → [인가]
 ```
+
+**왜 사용자 제스처인가**: 시도 예산을 코드에 묶으면 `HELLO` 재발급으로 리셋돼 약 9시간에 뚫린다.
+**왜 챌린지-응답인가**: 토큰을 재연결마다 보내면 근접 스니핑 1회로 영구 접근권이 넘어간다.
 
 ### 명시된 한계 (스펙 5.2)
 
@@ -59,6 +72,12 @@ BLE 링크 자체는 암호화하지 않는다. 인가된 세션의 트래픽은
 ---
 
 ## Task 1: 인증 상태 기계 (`ble/pairing.rs`)
+
+> ✅ **완료 (커밋 `94c5af7`).** 아래 본문은 최초 계획이며, 보안 검토 결과 설계가 두 번 바뀌었다
+> (사용자 제스처 게이팅, 챌린지-응답). **실제 구현과 다르므로 참고용으로만 읽고, 인터페이스는
+> `src-tauri/src/ble/pairing.rs` 를 정본으로 삼으라.** 최종 공개 API:
+> `begin_pairing`, `handle`, `is_authorized`, `state`, `end_session`, `revoke_token`,
+> `revoke_all`, `visible_code`, `load_tokens`, `issued_tokens`, `parse_auth_request`.
 
 **Files:**
 - Create: `src-tauri/src/ble/pairing.rs`
@@ -649,9 +668,9 @@ git commit -m "feat(ble): 페어링 토큰 영속화 추가"
         }]);
         let now = UNIX_EPOCH + Duration::from_secs(1000);
 
-        // HELLO → 코드 발급 → 그 코드로 인가
+        // 사용자가 창을 연다 → HELLO → 그 코드로 인가
+        let code = b.begin_pairing(now);
         b.handle_auth(&CentralId("A".into()), b"HELLO", now);
-        let code = b.visible_pairing_code(now).expect("코드가 표시돼야 한다");
         b.handle_auth(&CentralId("A".into()), format!("CODE:{code}").as_bytes(), now);
 
         b.on_snapshot(&snap(1.0, 1000), now);
@@ -667,8 +686,8 @@ git commit -m "feat(ble): 페어링 토큰 영속화 추가"
             Subscriber { id: CentralId("B".into()), max_notify_len: 23 },
         ]);
         let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let code = b.begin_pairing(now);
         b.handle_auth(&CentralId("A".into()), b"HELLO", now);
-        let code = b.visible_pairing_code(now).unwrap();
         b.handle_auth(&CentralId("A".into()), format!("CODE:{code}").as_bytes(), now);
 
         b.on_snapshot(&snap(1.0, 1000), now);
@@ -699,8 +718,8 @@ git commit -m "feat(ble): 페어링 토큰 영속화 추가"
             max_notify_len: 185,
         }]);
         let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let code = b.begin_pairing(now);
         b.handle_auth(&CentralId("A".into()), b"HELLO", now);
-        let code = b.visible_pairing_code(now).unwrap();
         b.handle_auth(&CentralId("A".into()), format!("CODE:{code}").as_bytes(), now);
         b.on_snapshot(&snap(1.0, 1000), now);
         assert_eq!(fake.taken_frames().len(), 1);
@@ -790,7 +809,9 @@ Expected: FAIL — `no method named handle_auth`
         let reply = self.pairing.handle(central, req, now);
         let payload = match &reply {
             // 코드는 Mac 화면에만 보여준다 — central 에게 보내면 페어링이 무의미해진다.
-            pairing::AuthReply::CodeIssued { .. } => br#"{"ok":false,"await":"code"}"#.to_vec(),
+            pairing::AuthReply::AwaitingCode => br#"{"ok":false,"await":"code"}"#.to_vec(),
+            pairing::AuthReply::Nonce { nonce } => format!(r#"{{"ok":false,"nonce":"{nonce}"}}"#).into_bytes(),
+            pairing::AuthReply::Authorized => br#"{"ok":true}"#.to_vec(),
             pairing::AuthReply::Granted { token } => {
                 format!(r#"{{"ok":true,"token":"{token}"}}"#).into_bytes()
             }
@@ -814,7 +835,7 @@ Expected: FAIL — `no method named handle_auth`
     /// 링크가 끊긴 central 의 인가를 지운다. 같은 식별자가 재사용될 수 있으므로
     /// 연결 단위 인가는 연결이 끝나면 사라져야 한다.
     pub fn forget_central(&mut self, central: &CentralId) {
-        self.pairing.forget(central);
+        self.pairing.end_session(central);
     }
 
     /// 저장된 토큰을 복원한다.
@@ -950,8 +971,12 @@ git commit -m "feat(ble): macOS Auth 특성과 쓰기 콜백 구현"
 - Modify: `src/components/DevicePanel.svelte`
 
 **Interfaces:**
-- Consumes: `BleBridge::{handle_auth, visible_pairing_code, forget_central, load_tokens, unpair_all}`, `PeerStore`
-- Produces: `BleStatus.pairing_code: Option<String>`, `BleStatus.paired_count: usize`, Tauri command `ble_unpair_all()`
+- Consumes: `BleBridge::{begin_pairing, handle_auth, visible_pairing_code, forget_central, load_tokens, unpair_all}`, `PeerStore`
+- Produces: `BleStatus.pairing_code: Option<String>`, `BleStatus.paired_count: usize`, Tauri commands `ble_begin_pairing()` · `ble_unpair_all()`
+
+> **코드는 사용자가 [페어링 시작] 을 눌러야만 발급된다.** 이 버튼이 없으면 3단계의 보안 근거가
+> 성립하지 않는다(스펙 §5.1). `ble_begin_pairing` 이 `BleBridge::begin_pairing` 을 호출하고,
+> 반환된 코드는 `BleStatus.pairing_code` 로만 화면에 흐른다 — BLE 로는 절대 나가지 않는다.
 
 - [ ] **Step 1: 시작 시 토큰을 복원한다**
 
@@ -1028,6 +1053,10 @@ export async function bleUnpairAll(): Promise<void> {
 
 `src/components/DevicePanel.svelte` 에서 1단계의 경고 문구를 페어링 안내로 교체한다:
 ```svelte
+  {#if !store.ble?.pairing_code}
+    <button class="inline-btn" onclick={() => store.beginPairing()}>페어링 시작</button>
+  {/if}
+
   {#if store.ble?.pairing_code}
     <div class="code-box">
       <p class="code-label">iPhone 에 아래 6자리를 입력하세요 (120초)</p>
@@ -1071,7 +1100,12 @@ git commit -m "feat(ble): 페어링 코드 표시와 기기 해제 UI 추가"
 
 **Interfaces:**
 - Consumes: 없음(순수) · Security.framework
-- Produces: `AuthReplyPayload` (Decodable: `ok: Bool`, `token: String?`, `left: Int?`, `await: String?`), `PairingClient.helloFrame() -> Data`, `PairingClient.codeFrame(_ code: String) -> Data`, `PairingClient.tokenFrame(_ token: String) -> Data`, `PairingClient.parse(_ data: Data) -> AuthReplyPayload?`, `TokenStore.save(_ token: String)`, `TokenStore.load() -> String?`, `TokenStore.clear()`
+- Produces: `AuthReplyPayload` (Decodable: `ok: Bool`, `token: String?`, `left: Int?`, `awaiting: String?` ← JSON 키 `await`, `nonce: String?`), `PairingClient.helloFrame() -> Data`, `PairingClient.codeFrame(_ code: String) -> Data`, `PairingClient.authFrame() -> Data`, `PairingClient.proofFrame(token: String, nonce: String) -> Data?`, `PairingClient.parse(_ data: Data) -> AuthReplyPayload?`, `TokenStore.save(_ token: String)`, `TokenStore.load() -> String?`, `TokenStore.clear()`
+
+> **`proofFrame` 은 HMAC-SHA256(key = 토큰 hex 를 디코드한 원시 바이트, msg = 논스 hex 를 디코드한
+> 원시 바이트) 을 소문자 hex 로 만든다.** hex 문자열의 UTF-8 바이트로 계산하면 안 된다 — 그러면
+> 페어링은 성공하는데 재연결마다 조용히 실패한다. `docs/ble-protocol/golden/hmac-sample.json` 이
+> 이 계약을 고정하므로, 이 태스크의 테스트가 그 파일을 읽어 검증해야 한다. CryptoKit `HMAC<SHA256>` 사용.
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -1085,7 +1119,7 @@ final class PairingClientTests: XCTestCase {
     func testFrameEncodingMatchesRustParser() {
         XCTAssertEqual(String(data: PairingClient.helloFrame(), encoding: .utf8), "HELLO")
         XCTAssertEqual(String(data: PairingClient.codeFrame("123456"), encoding: .utf8), "CODE:123456")
-        XCTAssertEqual(String(data: PairingClient.tokenFrame("abc"), encoding: .utf8), "TOKEN:abc")
+        XCTAssertEqual(String(data: PairingClient.authFrame(), encoding: .utf8), "AUTH")
     }
 
     func testParsesGrant() {
@@ -1165,7 +1199,16 @@ public struct AuthReplyPayload: Decodable, Equatable, Sendable {
 public enum PairingClient {
     public static func helloFrame() -> Data { Data("HELLO".utf8) }
     public static func codeFrame(_ code: String) -> Data { Data("CODE:\(code)".utf8) }
-    public static func tokenFrame(_ token: String) -> Data { Data("TOKEN:\(token)".utf8) }
+    public static func authFrame() -> Data { Data("AUTH".utf8) }
+
+    /// 논스에 대한 서명. **hex 문자열이 아니라 디코드한 원시 바이트**로 계산한다 —
+    /// 이 계약은 docs/ble-protocol/golden/hmac-sample.json 이 고정한다.
+    public static func proofFrame(token: String, nonce: String) -> Data? {
+        guard let key = Data(hexString: token), let msg = Data(hexString: nonce) else { return nil }
+        let mac = HMAC<SHA256>.authenticationCode(for: msg, using: SymmetricKey(data: key))
+        let hex = mac.map { String(format: "%02x", $0) }.joined()
+        return Data("PROOF:\(hex)".utf8)
+    }
 
     public static func parse(_ data: Data) -> AuthReplyPayload? {
         try? JSONDecoder().decode(AuthReplyPayload.self, from: data)
@@ -1267,10 +1310,11 @@ git commit -m "feat(ios): 페어링 프로토콜과 Keychain 토큰 보관소 �
         peripheral.discoverCharacteristics([MirrorUUIDs.snapshot, MirrorUUIDs.auth], for: service)
 ```
 
-Auth 특성을 찾으면 구독하고, **Snapshot 구독은 인가 후로 미룬다.** 저장된 토큰이 있으면 바로 제시하고, 없으면 `HELLO` 를 보낸 뒤 `.needsPairing` 으로 간다:
+Auth 특성을 찾으면 구독하고, **Snapshot 구독은 인가 후로 미룬다.** 저장된 토큰이 있으면 `AUTH` 로 논스를 요청하고, 없으면 `HELLO` 를 보낸 뒤 `.needsPairing` 으로 간다:
 ```swift
         if let token = TokenStore.load() {
-            peripheral.writeValue(PairingClient.tokenFrame(token), for: authCh, type: .withResponse)
+            // 토큰 자체는 보내지 않는다. 논스를 받아 서명해 답한다.
+            peripheral.writeValue(PairingClient.authFrame(), for: authCh, type: .withResponse)
         } else {
             peripheral.writeValue(PairingClient.helloFrame(), for: authCh, type: .withResponse)
         }
@@ -1287,7 +1331,8 @@ Auth notify 를 처리한다:
         } else if reply.awaiting == "code" {
             stateSubject.send(.needsPairing)
         } else {
-            // 저장된 토큰이 거부됐다 — 지우고 코드 페어링으로 되돌아간다.
+            // 논스를 받았으면 서명해 답한다. 서명이 거부되면 저장된 토큰이 폐기된 것이므로
+            // 지우고 코드 페어링으로 되돌아간다.
             TokenStore.clear()
             peripheral.writeValue(PairingClient.helloFrame(), for: authCh, type: .withResponse)
         }
@@ -1359,7 +1404,7 @@ git commit -m "feat(ios): 페어링 화면과 인증 흐름 연결"
 
 **의도한 스펙 이탈 2건**
 1. **코드는 central 에게 보내지 않는다.** 스펙 5.1 의 도식은 `[코드 대기]` 로 가는 전이만 적고 응답 내용을 명시하지 않았다. 코드를 BLE 로 보내면 근처의 누구나 읽을 수 있어 페어링이 무의미해지므로, `HELLO` 의 응답은 `{"ok":false,"await":"code"}` 로 하고 코드는 Mac 화면에만 띄운다.
-2. **인가는 연결 단위다.** central 식별자는 재사용될 수 있으므로 링크가 끊기면 `forget_central` 로 즉시 지운다. 재연결 시에는 저장된 토큰으로 다시 인가된다 — 사용자에게는 끊김 없이 보인다.
+2. **인가는 연결 단위다.** central 식별자는 재사용될 수 있으므로 링크가 끊기면 `forget_central`(→ `PairingManager::end_session`) 로 즉시 지운다. 재연결 시에는 저장된 토큰으로 논스에 서명해 다시 인가된다 — 사용자에게는 끊김 없이 보인다.
 
 **Triggers 특성은 여전히 범위 밖이다** — 전송 경로가 없다. Auth 만 추가한다.
 
@@ -1367,9 +1412,10 @@ git commit -m "feat(ios): 페어링 화면과 인증 흐름 연결"
 - `AuthRequest`/`AuthReply`/`PairingManager::{handle,is_authorized,forget,visible_code,load_tokens,issued_tokens}` — Task 1 정의, Task 3 사용 일치
 - `PeerStore::{path,load_from,save_to}` — Task 2 정의, Task 5 사용 일치
 - `PeripheralEvent::{AuthWrite,Disconnected}`, `BlePeripheral::{notify_auth,authorized_subscribers}` — Task 3 정의, Task 4 구현, Task 5 소비 일치
-- `BleBridge::{handle_auth,visible_pairing_code,forget_central,load_tokens,unpair_all}` — Task 3 정의, Task 5 호출 일치
-- `PairingClient::{helloFrame,codeFrame,tokenFrame,parse}`, `TokenStore::{save,load,clear}` — Task 6 정의, Task 7 사용 일치
-- 와이어 문자열 `HELLO` / `CODE:` / `TOKEN:` — Task 1 파서와 Task 6 인코더가 같은 리터럴을 쓴다(Task 6 테스트가 이를 단언)
+- `BleBridge::{begin_pairing,handle_auth,visible_pairing_code,forget_central,load_tokens,unpair_all}` — Task 3 정의, Task 5 호출 일치
+- `PairingClient::{helloFrame,codeFrame,authFrame,proofFrame,parse}`, `TokenStore::{save,load,clear}` — Task 6 정의, Task 7 사용 일치
+- HMAC 입력 인코딩(원시 바이트) — Rust `pairing.rs` 와 Swift `PairingClient` 가 `hmac-sample.json` 으로 고정
+- 와이어 문자열 `HELLO` / `CODE:` / `AUTH` / `PROOF:` — Task 1 파서와 Task 6 인코더가 같은 리터럴을 쓴다(Task 6 테스트가 이를 단언)
 - `AuthReplyPayload.awaiting` ↔ JSON 키 `await` — Task 3 이 내보내는 키와 Task 6 의 `CodingKeys` 가 일치
 
 ---
