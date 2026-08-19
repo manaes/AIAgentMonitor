@@ -491,7 +491,14 @@ git commit -m "feat(ble): 페어링 인증 상태 기계 추가"
 
 ---
 
-## Task 2: 토큰 영속화 (`ble/peers.rs`)
+## Task 2: 토큰 영속화와 기기 정체성 (`ble/peers.rs` + `ble/pairing.rs`)
+
+> **개정 (2026-08-19).** 아래 본문의 `Vec<String>` 저장 포맷은 **폐기됐다.** 스펙 6장이
+> 요구하는 `ble_unpair(peer_id)`(기기 하나만 해제)를 지탱하지 못하기 때문이다. 정본은
+> `.superpowers/sdd/2026-08-19-pairing-phase3/task-2-rework.md` 이며, 스펙은 커밋 49f7719
+> 에서 `peer_id = hex(SHA-256(토큰))[..8]` 로 확정했다. `CBCentral.identifier` 는 iOS 의
+> 주소 변경 때문에 영속 키로 쓸 수 없다. 아래 본문은 `path()` 와 "손상 파일은 빈 목록"
+> 성질에 한해 유효하다.
 
 **Files:**
 - Create: `src-tauri/src/ble/peers.rs`
@@ -1043,25 +1050,50 @@ git commit -m "feat(ble): macOS Auth 특성과 쓰기 콜백 구현"
 - [ ] **Step 4: 해제 명령을 추가한다**
 
 ```rust
+/// 기기 하나만 해제한다(스펙 6장). `peer_id` 는 토큰에서 파생된 8자 hex 이며,
+/// 토큰 자체는 프론트엔드로 나가지 않는다.
+#[tauri::command]
+async fn ble_unpair(peer_id: String, state: tauri::State<'_, Arc<BleHandle>>) -> Result<(), String> {
+    let mut bridge = state.bridge.lock().await;
+    bridge.unpair_peer(&peer_id);
+    let path = ble::peers::PeerStore::path();
+    ble::peers::PeerStore::save_to(&path, &bridge.stored_peers()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn ble_unpair_all(state: tauri::State<'_, Arc<BleHandle>>) -> Result<(), String> {
-    state.bridge.lock().await.unpair_all();
+    let mut bridge = state.bridge.lock().await;
+    bridge.unpair_all();
     let path = ble::peers::PeerStore::path();
     ble::peers::PeerStore::save_to(&path, &[]).map_err(|e| e.to_string())?;
     Ok(())
 }
 ```
-`generate_handler!` 목록에 `ble_unpair_all,` 을 더한다.
+`generate_handler!` 목록에 `ble_unpair,` 와 `ble_unpair_all,` 을 더한다.
+
+`CBPeripheralManager` 에는 연결된 central 을 끊는 API 가 없다(1단계에서 확인). 그래서
+해제는 "인가를 내리면 더 이상 notify 하지 않는다" 로 이뤄지고, `unpair_peer` 가 돌려주는
+central 목록은 로그·UI 용이다.
 
 - [ ] **Step 5: 프론트 타입과 화면을 확장한다**
 
 `src/lib/tauri.ts` 의 `BleStatus` 에:
 ```ts
-  pairing_code: string | null;
-  paired_count: number;
+  /// 페어링 창 상태. UI 가 만료와 시도 소진을 구분해 보여줘야 한다 —
+  /// 소진이 보인다는 것이 창에 소유자를 두지 않기로 한 근거의 절반이다(스펙 5.1).
+  pairing_window:
+    | { kind: "open"; code: string; seconds_left: number; attempts_left: number }
+    | { kind: "exhausted" }
+    | { kind: "closed" };
+  paired_peers: { peer_id: string; paired_at: number; connected: boolean }[];
 ```
 그리고:
 ```ts
+export async function bleUnpair(peerId: string): Promise<void> {
+  return invoke<void>("ble_unpair", { peerId });
+}
+
 export async function bleUnpairAll(): Promise<void> {
   return invoke<void>("ble_unpair_all");
 }
@@ -1069,24 +1101,37 @@ export async function bleUnpairAll(): Promise<void> {
 
 `src/components/DevicePanel.svelte` 에서 1단계의 경고 문구를 페어링 안내로 교체한다:
 ```svelte
-  {#if !store.ble?.pairing_code}
+  {#if store.ble?.pairing_window.kind !== "open"}
     <button class="inline-btn" onclick={() => store.beginPairing()}>페어링 시작</button>
   {/if}
 
-  {#if store.ble?.pairing_code}
+  {#if store.ble?.pairing_window.kind === "open"}
     <div class="code-box">
-      <p class="code-label">iPhone 에 아래 6자리를 입력하세요 (120초)</p>
-      <p class="code">{store.ble.pairing_code}</p>
+      <p class="code-label">iPhone 에 아래 6자리를 입력하세요 ({store.ble.pairing_window.seconds_left}초 남음)</p>
+      <p class="code">{store.ble.pairing_window.code}</p>
+      <p class="subtle">시도 {store.ble.pairing_window.attempts_left}회 남음</p>
     </div>
+  {:else if store.ble?.pairing_window.kind === "exhausted"}
+    <p class="warn">
+      시도 5회가 모두 틀렸습니다. 근처의 다른 기기가 코드를 추측했을 수 있습니다.
+      다시 시작하려면 [페어링 시작] 을 누르세요.
+    </p>
   {/if}
 ```
 그리고 `1단계에는 기기 인증이 없습니다…` 경고를 지우고, 대신 페어링된 기기 수와 해제 버튼을 둔다:
 ```svelte
-  {#if (store.ble?.paired_count ?? 0) > 0}
-    <div class="row">
-      <span class="subtle">페어링된 기기 {store.ble?.paired_count}대</span>
-      <button class="inline-btn" onclick={() => store.unpairAll()}>전체 해제</button>
-    </div>
+  {#if (store.ble?.paired_peers.length ?? 0) > 0}
+    <ul class="peer-list">
+      {#each store.ble?.paired_peers ?? [] as peer (peer.peer_id)}
+        <li class="row">
+          <span class="mono">{peer.peer_id}</span>
+          <span class="subtle">{formatPairedAt(peer.paired_at)}</span>
+          {#if peer.connected}<span class="dot-live">연결됨</span>{/if}
+          <button class="inline-btn" onclick={() => store.unpair(peer.peer_id)}>해제</button>
+        </li>
+      {/each}
+    </ul>
+    <button class="inline-btn" onclick={() => store.unpairAll()}>전체 해제</button>
   {/if}
 ```
 `store.svelte.ts` 에 `unpairAll()` 을 더한다(기존 `setBleEnabled` 와 같은 try/catch 패턴).
