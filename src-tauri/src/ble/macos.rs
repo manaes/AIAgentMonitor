@@ -387,4 +387,30 @@ impl BlePeripheral for MacPeripheral {
     fn subscribers(&self) -> Vec<Subscriber> {
         self.subs_mirror.lock().unwrap().clone()
     }
+
+    /// Auth 특성으로 그 central 하나에만 응답한다(`pump()` 와 달리 큐를 거치지
+    /// 않는다 — 페어링 응답은 스트리밍이 아니라 요청 하나에 응답 하나다).
+    /// Auth 특성의 실제 GATT 등록·쓰기 수신(`didReceiveWrite`)은 아직 이
+    /// 파일에 연결되지 않았다(3단계 인가 필터는 BleBridge/추상화 계층까지가
+    /// 범위) — 그래서 characteristic 이나 central 을 못 찾으면 조용히
+    /// 아무 일도 하지 않는다. 이후 배선 작업이 채워 넣을 때까지는 no-op 이다.
+    fn notify_auth(&self, central: &CentralId, payload: Vec<u8>) {
+        let id = central.0.clone();
+        with_delegate(&self.app, move |d| {
+            let st = d.ivars().borrow();
+            let (Some(mgr), Some(ch), Some((c, _))) = (
+                st.manager.clone(),
+                st.chars.get(CharId::Auth.uuid()).cloned(),
+                st.subs.get(&id).cloned(),
+            ) else {
+                return;
+            };
+            let data = NSData::with_bytes(&payload);
+            let target: &CBCentral = &c;
+            let targets = NSArray::from_slice(&[target]);
+            unsafe {
+                mgr.updateValue_forCharacteristic_onSubscribedCentrals(&data, &ch, Some(&targets))
+            };
+        });
+    }
 }

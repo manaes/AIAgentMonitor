@@ -47,6 +47,10 @@ pub enum PeripheralEvent {
     Unsubscribed(CentralId),
     AdvertisingStarted,
     Error(String),
+    /// central 이 Auth 특성에 무언가 썼다. 해석은 pairing 모듈이 한다.
+    AuthWrite { central: CentralId, data: Vec<u8> },
+    /// 링크가 끊겼다. 인가 상태를 그 자리에서 지우기 위해 필요하다.
+    Disconnected(CentralId),
 }
 
 pub trait BlePeripheral: Send + Sync {
@@ -59,6 +63,17 @@ pub trait BlePeripheral: Send + Sync {
     fn min_notify_len(&self) -> Option<usize> {
         self.subscribers().iter().map(|s| s.max_notify_len).min()
     }
+    /// Auth 특성으로 한 central 에만 응답한다.
+    fn notify_auth(&self, central: &CentralId, payload: Vec<u8>);
+
+    /// 인가된 구독자만 추린다. 청크 크기 계산도 이 목록으로 해야
+    /// 미인가 기기의 작은 MTU 에 끌려가지 않는다.
+    fn authorized_subscribers(&self, is_authorized: &dyn Fn(&CentralId) -> bool) -> Vec<Subscriber> {
+        self.subscribers()
+            .into_iter()
+            .filter(|s| is_authorized(&s.id))
+            .collect()
+    }
 }
 
 /// 테스트용 구현. 넘어온 프레임을 기록만 한다.
@@ -69,6 +84,7 @@ pub struct FakePeripheral {
     started: Mutex<bool>,
     /// Some 이면 start() 가 이 메시지로 실패한다(오류 전파 테스트용).
     start_error: Mutex<Option<String>>,
+    auth_replies: Mutex<Vec<(CentralId, Vec<u8>)>>,
 }
 
 impl FakePeripheral {
@@ -88,6 +104,10 @@ impl FakePeripheral {
     pub fn set_start_error(&self, msg: Option<String>) {
         *self.start_error.lock().unwrap() = msg;
     }
+    /// 기록된 Auth 응답을 꺼내고 비운다.
+    pub fn taken_auth_replies(&self) -> Vec<(CentralId, Vec<u8>)> {
+        std::mem::take(&mut *self.auth_replies.lock().unwrap())
+    }
 }
 
 impl BlePeripheral for FakePeripheral {
@@ -106,6 +126,9 @@ impl BlePeripheral for FakePeripheral {
     }
     fn subscribers(&self) -> Vec<Subscriber> {
         self.subs.lock().unwrap().clone()
+    }
+    fn notify_auth(&self, central: &CentralId, payload: Vec<u8>) {
+        self.auth_replies.lock().unwrap().push((central.clone(), payload));
     }
 }
 

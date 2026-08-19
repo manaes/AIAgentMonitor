@@ -10,7 +10,7 @@ pub mod wire;
 
 use crate::emitter::EmitGate;
 use crate::types::Snapshot;
-use peripheral::{BlePeripheral, CharId};
+use peripheral::{BlePeripheral, CentralId, CharId};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use wire::MirrorSnapshot;
@@ -23,6 +23,7 @@ pub struct BleBridge {
     gate: EmitGate,
     enabled: bool,
     next_frame_id: u8,
+    pairing: pairing::PairingManager,
 }
 
 impl BleBridge {
@@ -32,6 +33,7 @@ impl BleBridge {
             gate: EmitGate::new(BLE_THROTTLE),
             enabled: false,
             next_frame_id: 0,
+            pairing: pairing::PairingManager::new(),
         }
     }
 
@@ -65,8 +67,14 @@ impl BleBridge {
         if !self.enabled {
             return;
         }
-        // 구독자가 없으면 직렬화조차 하지 않는다(스펙 4.4).
-        let Some(max_chunk) = self.peripheral.min_notify_len() else {
+        // 인가된 구독자만 대상으로 삼는다. 미인가 기기가 붙어 있어도
+        // 스냅샷은 만들지 않는다(스펙 5.1). 청크 크기도 인가된 구독자
+        // 기준으로만 정해야, 미인가 기기의 작은 MTU 에 끌려가지 않는다.
+        let pairing = &self.pairing;
+        let authorized = self
+            .peripheral
+            .authorized_subscribers(&|id| pairing.is_authorized(id));
+        let Some(max_chunk) = authorized.iter().map(|s| s.max_notify_len).min() else {
             return;
         };
         if !self.gate.should_emit(snap, now) {
@@ -94,6 +102,95 @@ impl BleBridge {
                 self.gate.reset();
             }
         }
+    }
+
+    /// 사용자가 Mac Devices 탭에서 "페어링 시작"을 누를 때만 호출한다. 다른
+    /// 어떤 경로(연결, 구독, HELLO, 앱 재시작)에서도 호출해서는 안 된다 —
+    /// 6자리 코드의 무차별 대입 방어 전체가 이 성질에 얹혀 있다(스펙 5.1/5.2).
+    pub fn begin_pairing(&mut self, now: SystemTime) -> String {
+        self.pairing.begin_pairing(now)
+    }
+
+    /// 페어링 창의 현재 상태. 코드·남은 초·남은 시도를 함께 주며, 만료와
+    /// 시도 소진을 구분한다.
+    pub fn pairing_window(&self, now: SystemTime) -> pairing::PairingWindow {
+        self.pairing.pairing_window(now)
+    }
+
+    /// Devices 패널에 그릴 기기 목록.
+    pub fn paired_peers(&self) -> Vec<pairing::PairedPeer> {
+        self.pairing.paired_peers()
+    }
+
+    /// 디스크에 저장할 (토큰, 페어링 시각) 목록.
+    pub fn stored_peers(&self) -> Vec<peers::StoredPeer> {
+        self.pairing
+            .issued_peers()
+            .into_iter()
+            .map(|(token, paired_at)| peers::StoredPeer { token, paired_at })
+            .collect()
+    }
+
+    /// Auth 특성 쓰기를 처리하고 응답을 보낸다. 인가가 성립하면(`CODE:` 로
+    /// 새 토큰이 발급되면) 영속화할 전체 목록을 돌려준다 — 호출부가
+    /// `PeerStore::save_to` 로 디스크에 쓴다.
+    pub fn handle_auth(
+        &mut self,
+        central: &CentralId,
+        data: &[u8],
+        now: SystemTime,
+    ) -> Option<Vec<peers::StoredPeer>> {
+        let req = pairing::parse_auth_request(data);
+        let reply = self.pairing.handle(central, req, now);
+        let payload = match &reply {
+            // 코드는 Mac 화면에만 보여준다 — central 에게 보내면 페어링이 무의미해진다.
+            pairing::AuthReply::AwaitingCode => br#"{"ok":false,"await":"code"}"#.to_vec(),
+            pairing::AuthReply::Nonce { nonce } => {
+                format!(r#"{{"ok":false,"nonce":"{nonce}"}}"#).into_bytes()
+            }
+            pairing::AuthReply::Authorized => br#"{"ok":true}"#.to_vec(),
+            pairing::AuthReply::Granted { token } => {
+                format!(r#"{{"ok":true,"token":"{token}"}}"#).into_bytes()
+            }
+            pairing::AuthReply::Denied { left } => {
+                format!(r#"{{"ok":false,"left":{left}}}"#).into_bytes()
+            }
+            pairing::AuthReply::Rejected => br#"{"ok":false}"#.to_vec(),
+        };
+        self.peripheral.notify_auth(central, payload);
+
+        match reply {
+            pairing::AuthReply::Granted { .. } => Some(self.stored_peers()),
+            _ => None,
+        }
+    }
+
+    /// 링크가 끊긴(또는 사용자가 세션만 끊으려는) central 의 인가를 지운다.
+    /// 같은 식별자가 재사용될 수 있으므로 연결 단위 인가는 연결이 끝나면
+    /// 사라져야 한다. 저장된 토큰 자체는 지우지 않는다 — 같은 토큰으로
+    /// 재연결하면 즉시 재인가된다.
+    pub fn forget_central(&mut self, central: &CentralId) {
+        self.pairing.end_session(central);
+    }
+
+    /// 디스크에서 읽은 페어링 목록을 복원한다(앱 시작 시 1회).
+    pub fn load_peers(&mut self, peers: Vec<peers::StoredPeer>) {
+        self.pairing
+            .load_peers(peers.into_iter().map(|p| (p.token, p.paired_at)).collect());
+    }
+
+    /// 기기 하나만 골라 해제한다(스펙 6 `ble_unpair`). 내려간 central 을
+    /// 돌려준다 — 호출자가 저장소를 갱신하고, 가능하면 실제 연결도 끊는다.
+    pub fn unpair_peer(&mut self, peer_id: &str) -> Vec<CentralId> {
+        self.pairing.revoke_peer(peer_id)
+    }
+
+    /// 모든 기기의 인가와 토큰을 폐기한다(전체 언페어링). `CBPeripheralManager`
+    /// 에는 연결된 central 을 강제로 끊는 API 가 없으므로(1단계에서 확인),
+    /// 실제 차단은 "인가가 없으면 notify 하지 않는다" 로 이뤄진다 — 이
+    /// 반환값은 호출자가 저장소를 갱신하거나 로그를 남기는 데 쓴다.
+    pub fn unpair_all(&mut self) -> Vec<CentralId> {
+        self.pairing.revoke_all()
     }
 }
 
@@ -148,6 +245,16 @@ mod tests {
         (BleBridge::new(fake.clone()), fake)
     }
 
+    /// 테스트 편의: 사용자가 페어링 창을 열고(begin_pairing), 그 central 이
+    /// HELLO → 올바른 코드로 인가받는 과정을 흉내낸다. 인가 필터가 들어간
+    /// 뒤로는 on_snapshot 이 이 central 에게 실제로 프레임을 보내려면
+    /// 먼저 이 과정을 거쳐야 한다.
+    fn authorize(b: &mut BleBridge, central: &str, now: SystemTime) {
+        let code = b.begin_pairing(now);
+        b.handle_auth(&CentralId(central.to_string()), b"HELLO", now);
+        b.handle_auth(&CentralId(central.to_string()), format!("CODE:{code}").as_bytes(), now);
+    }
+
     #[test]
     fn does_nothing_while_disabled() {
         let (mut b, fake) = bridge();
@@ -175,7 +282,9 @@ mod tests {
             id: CentralId("A".into()),
             max_notify_len: 185,
         }]);
-        b.on_snapshot(&snap(1.0, 1000), UNIX_EPOCH + Duration::from_secs(1000));
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, "A", now);
+        b.on_snapshot(&snap(1.0, 1000), now);
 
         let frames = fake.taken_frames();
         assert_eq!(frames.len(), 1);
@@ -202,6 +311,7 @@ mod tests {
             max_notify_len: 185,
         }]);
         let t0 = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, "A", t0);
         b.on_snapshot(&snap(1.0, 1000), t0);
         assert_eq!(fake.taken_frames().len(), 1);
 
@@ -222,6 +332,7 @@ mod tests {
             max_notify_len: 185,
         }]);
         let t0 = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, "A", t0);
         b.on_snapshot(&snap(1.0, 1000), t0);
         let a = fake.taken_frames()[0].1[0][0];
         b.on_snapshot(&snap(2.0, 1000), t0 + Duration::from_secs(2));
@@ -247,6 +358,7 @@ mod tests {
             max_notify_len: 185,
         }]);
         let t0 = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, "A", t0);
         let content = snap(1.0, 1000);
         b.on_snapshot(&content, t0);
         assert_eq!(fake.taken_frames().len(), 1);
@@ -287,6 +399,7 @@ mod tests {
             max_notify_len: 4,
         }]);
         let t0 = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, "A", t0);
         let content = big_snap(1.0, 1000);
 
         b.on_snapshot(&content, t0);
@@ -304,5 +417,90 @@ mod tests {
             !fake.taken_frames().is_empty(),
             "실패한 프레임이 게이트를 영구 억제해선 안 된다 — 다음 틱에 재시도되어야 한다"
         );
+    }
+
+    // ---- 인가 필터(3단계) ----
+
+    #[test]
+    fn unauthorized_subscriber_gets_nothing() {
+        let (mut b, fake) = bridge();
+        b.set_enabled(true).unwrap();
+        fake.set_subscribers(vec![Subscriber {
+            id: CentralId("A".into()),
+            max_notify_len: 185,
+        }]);
+        b.on_snapshot(&snap(1.0, 1000), UNIX_EPOCH + Duration::from_secs(1000));
+        assert!(fake.taken_frames().is_empty(),
+                "페어링하지 않은 기기는 한 바이트도 받으면 안 된다");
+    }
+
+    #[test]
+    fn authorized_subscriber_receives_snapshot() {
+        let (mut b, fake) = bridge();
+        b.set_enabled(true).unwrap();
+        fake.set_subscribers(vec![Subscriber {
+            id: CentralId("A".into()),
+            max_notify_len: 185,
+        }]);
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+
+        // 사용자가 창을 연다 → HELLO → 그 코드로 인가
+        authorize(&mut b, "A", now);
+
+        b.on_snapshot(&snap(1.0, 1000), now);
+        assert_eq!(fake.taken_frames().len(), 1, "인가 후에는 받는다");
+    }
+
+    #[test]
+    fn mixed_subscribers_only_authorized_are_targeted() {
+        let (mut b, fake) = bridge();
+        b.set_enabled(true).unwrap();
+        fake.set_subscribers(vec![
+            Subscriber { id: CentralId("A".into()), max_notify_len: 185 },
+            Subscriber { id: CentralId("B".into()), max_notify_len: 23 },
+        ]);
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, "A", now);
+
+        b.on_snapshot(&snap(1.0, 1000), now);
+        let frames = fake.taken_frames();
+        assert_eq!(frames.len(), 1);
+        // 청크 크기는 **인가된** 구독자만 보고 정해야 한다.
+        // 미인가 B(23)를 섞으면 청크가 불필요하게 잘게 쪼개진다.
+        assert!(frames[0].1[0].len() > 23, "미인가 구독자의 MTU 에 끌려가면 안 된다");
+    }
+
+    #[test]
+    fn handle_auth_returns_tokens_to_persist_only_on_grant() {
+        let (mut b, _fake) = bridge();
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        // 창이 없으면 HELLO 도 거부된다(스펙 5.1) — begin_pairing 은 사용자
+        // 제스처에서만 연다. 거부에는 저장할 것이 없다.
+        assert_eq!(b.handle_auth(&CentralId("A".into()), b"HELLO", now), None,
+                   "창이 없으면 저장할 것이 없다");
+
+        let code = b.begin_pairing(now);
+        assert_eq!(b.handle_auth(&CentralId("A".into()), b"HELLO", now), None,
+                   "코드 발급만으로는 저장할 것이 없다");
+        let saved = b.handle_auth(&CentralId("A".into()), format!("CODE:{code}").as_bytes(), now);
+        assert_eq!(saved.map(|v| v.len()), Some(1), "인가되면 토큰 목록을 돌려준다");
+    }
+
+    #[test]
+    fn unpair_all_revokes_everyone() {
+        let (mut b, fake) = bridge();
+        b.set_enabled(true).unwrap();
+        fake.set_subscribers(vec![Subscriber {
+            id: CentralId("A".into()),
+            max_notify_len: 185,
+        }]);
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, "A", now);
+        b.on_snapshot(&snap(1.0, 1000), now);
+        assert_eq!(fake.taken_frames().len(), 1);
+
+        b.unpair_all();
+        b.on_snapshot(&snap(2.0, 1000), now + Duration::from_secs(2));
+        assert!(fake.taken_frames().is_empty(), "해제 후에는 다시 아무것도 못 받는다");
     }
 }
