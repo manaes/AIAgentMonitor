@@ -88,6 +88,15 @@ impl PeerStore {
         let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         let json = serde_json::to_vec_pretty(peers)?;
 
+        // 이름에 우리 pid 가 박혀 있으므로 이 파일이 남아 있다면 반드시
+        // 우리가 앞서 실패하며 흘린 것이다 — 남의 진행 중인 저장이 아니다.
+        // 지우지 않으면 아래 `create_new` 가 계속 AlreadyExists 로 실패해서
+        // 재시작 전까지 저장이 통째로 막힌다. tracing 출력이 버려지는
+        // 상태라(이 파일 상단 참고) 그 실패는 조용히 일어난다.
+        if tmp.exists() {
+            std::fs::remove_file(&tmp)?;
+        }
+
         #[cfg(unix)]
         {
             use std::fs::OpenOptions;
@@ -182,6 +191,28 @@ mod tests {
             .filter(|n| n != "ble-peers.json")
             .collect();
         assert!(leftovers.is_empty(), "임시 파일이 남으면 안 된다: {leftovers:?}");
+    }
+
+    /// 저장이 tmp 생성 뒤 rename 전에 실패하면 tmp 가 남는다. 이름에 우리
+    /// pid 가 박혀 있어 다음 저장도 같은 이름을 노리므로, 지우지 않으면
+    /// `create_new` 가 계속 AlreadyExists 로 실패해 **재시작 전까지 저장이
+    /// 통째로 막힌다.** tracing 이 no-op 이라 조용히 일어나므로, 새 기기를
+    /// 페어링해도 저장되지 않고 재시작하면 사라진다.
+    #[test]
+    fn a_leftover_temp_file_does_not_block_future_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("ble-peers.json");
+
+        // 앞선 저장이 흘리고 간 tmp 를 흉내 낸다 — 이름은 구현과 같은 규칙.
+        let stale = p.with_extension(format!("json.{}.tmp", std::process::id()));
+        std::fs::write(&stale, b"half-written garbage").unwrap();
+
+        let peer = StoredPeer { token: "e".repeat(32), paired_at: 7 };
+        PeerStore::save_to(&p, std::slice::from_ref(&peer))
+            .expect("남은 tmp 가 이후 저장을 막으면 안 된다");
+
+        assert_eq!(PeerStore::load_from(&p), LoadOutcome::Loaded(vec![peer]));
+        assert!(!stale.exists(), "저장 후에는 남은 tmp 도 사라져야 한다");
     }
 
     /// tmp+rename 을 `fs::write(path, ...)` 직접 쓰기로 "단순화"해도
