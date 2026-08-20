@@ -89,11 +89,18 @@ final class AgentCardViewTests: XCTestCase {
         XCTAssertEqual(v.countdownText, "약 1시간 1분 1초 남음")
     }
 
-    /// k 가 알려지지 않은 값(2)이면 AgentKindCode.unknown 이 된다 — Claude/Codex 로
+    func testAntigravityHeader() {
+        let v = AgentCardView()
+        v.configure(agent: Fixture.agent(k: 2), now: now)
+        XCTAssertEqual(v.nameText, "Antigravity")
+        XCTAssertEqual(v.dotColor, Palette.antigravityDot)
+    }
+
+    /// k 가 알려지지 않은 값(99)이면 AgentKindCode.unknown 이 된다 — Claude/Codex/Antigravity 로
     /// 잘못 표시하지 않고 별도 문구·회색 점으로 조용히 나타내는지 확인한다.
     func testUnknownAgentKind() {
         let v = AgentCardView()
-        v.configure(agent: Fixture.agent(k: 2), now: now)
+        v.configure(agent: Fixture.agent(k: 99), now: now)
         XCTAssertEqual(v.nameText, "알 수 없음")
         XCTAssertEqual(v.dotColor, Palette.dormantDot)
     }

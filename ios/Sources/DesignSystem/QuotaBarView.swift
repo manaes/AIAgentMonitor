@@ -47,10 +47,14 @@ public final class QuotaBarView: UIView {
     public func configure(tokens5h: UInt32, autoPct: Float?, weeklyPct: Float?, isReset5h: Bool) {
         let pct = QuotaDisplay.displayPercent(autoPct: autoPct, isReset: isReset5h)
 
-        if let pct {
-            fiveRow.isHidden = false
+        if pct != nil || weeklyPct != nil {
             fallbackLabel.isHidden = true
-            fiveRow.apply(percent: pct)
+            if let pct {
+                fiveRow.isHidden = false
+                fiveRow.apply(percent: pct)
+            } else {
+                fiveRow.isHidden = true
+            }
 
             if let weeklyPct {
                 weeklyRow.isHidden = false

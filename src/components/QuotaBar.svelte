@@ -22,19 +22,30 @@
       : p >= 70 ? "linear-gradient(90deg, #30d158, #ff9f0a)"
       : "linear-gradient(90deg, #30d158, #34c759)";
   }
+
+  function pctColor(p: number): string {
+    return p >= 90 ? "#ff453a" : p >= 70 ? "#ff9f0a" : "#30d158";
+  }
 </script>
 
 <div class="qb">
-  {#if pct !== null}
-    <div class="row">
-      <span class="label">5h</span>
-      <span class="pct">{pct.toFixed(0)}%</span>
-    </div>
-    <div class="bar"><span class="fill" style="width:{pct}%; background:{color(pct)}"></span></div>
+  {#if pct !== null || wpct !== null}
+    {#if pct !== null}
+      <div class="row">
+        <span class="label">5h 한도</span>
+        <span class="pct" style="color:{pctColor(pct)}">{pct.toFixed(0)}% <span class="rem-hint">({(100 - pct).toFixed(0)}% 남음)</span></span>
+      </div>
+      <div class="bar"><span class="fill" style="width:{pct}%; background:{color(pct)}"></span></div>
+    {:else}
+      <div class="row">
+        <span class="label">5h 사용량</span>
+        <span class="subtle">{formatTokensTotal(localUsed)}</span>
+      </div>
+    {/if}
     {#if wpct !== null}
-      <div class="row wk">
-        <span class="label">주간</span>
-        <span class="pct">{wpct.toFixed(0)}%</span>
+      <div class="row" class:wk={pct !== null || localUsed > 0}>
+        <span class="label">주간 한도</span>
+        <span class="pct" style="color:{pctColor(wpct)}">{wpct.toFixed(0)}% <span class="rem-hint">({(100 - wpct).toFixed(0)}% 남음)</span></span>
       </div>
       <div class="bar"><span class="fill" style="width:{wpct}%; background:{color(wpct)}"></span></div>
     {/if}
@@ -52,6 +63,7 @@
   .row.wk { margin-top: 6px; }
   .label { color: #8e8e93; font-size: 10px; }
   .pct { color: #30d158; font-size: 13px; font-weight: 700; }
+  .rem-hint { font-size: 10px; font-weight: 400; color: #8e8e93; }
   .bar { height: 6px; background: #1c1c1e; border-radius: 3px; overflow: hidden; margin-bottom: 2px; }
   .fill { display: block; height: 100%; border-radius: 3px; transition: width 0.4s ease; }
   .subtle { color: #8e8e93; font-size: 10px; }

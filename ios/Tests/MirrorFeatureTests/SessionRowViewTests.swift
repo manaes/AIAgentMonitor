@@ -80,6 +80,14 @@ final class SessionRowViewTests: XCTestCase {
         XCTAssertEqual(v.dotColor, Palette.codexDot)
     }
 
+    func testAntigravityActiveUsesAntigravityColor() {
+        let v = SessionRowView()
+        v.configure(project: project(n: "2_App", m: "gemini-3.7-flash", r: 10, t: 999_999, s: 0),
+                    kind: .antigravity, now: now)
+        XCTAssertEqual(v.leftText, "Antigravity · 2_App gemini-3.7-flash")
+        XCTAssertEqual(v.dotColor, Palette.antigravityDot)
+    }
+
     /// s 가 알려지지 않은 값(3)이면 ActivityStatusCode.unknown 이 된다 — 회색 점은
     /// dormant 와 같이 취급하되, 문구는 "dormant" 로 잘못 표시하지 않고 "unknown" 이어야 한다.
     func testUnknownStatusShowsUnknownWordNotDormant() {

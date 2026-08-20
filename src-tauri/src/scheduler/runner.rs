@@ -19,6 +19,10 @@ pub async fn run_trigger(agent: &str, prompt: &str, working_dir: &str) {
         let mut c = Command::new("codex");
         c.args(["exec", "--skip-git-repo-check", "-C", working_dir, prompt]);
         c
+    } else if agent == "antigravity" {
+        let mut c = Command::new("agy");
+        c.args(["--print", prompt]).current_dir(working_dir);
+        c
     } else {
         let mut c = Command::new("claude");
         c.args(["-p", prompt]).current_dir(working_dir);

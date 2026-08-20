@@ -56,12 +56,15 @@ impl Aggregator {
         let bucket = self.by_agent.entry(ev.agent).or_default();
         bucket.rotating.add(ev.ts, &ev.counts);
         bucket.event_times.push(ev.ts);
+        let is_valid_model = !ev.model.is_empty() && !ev.model.starts_with('<');
         let proj = bucket.projects.entry(ev.project_path.clone()).or_insert_with(|| ProjectState {
-            model: ev.model.clone(),
+            model: if is_valid_model { ev.model.clone() } else { "claude-3.7-sonnet".into() },
             last_event_at: ev.ts,
             rate_ring: EventRing::new(),
         });
-        proj.model = ev.model.clone();
+        if is_valid_model {
+            proj.model = ev.model.clone();
+        }
         proj.last_event_at = ev.ts;
         proj.rate_ring.push(ev.clone());
         bucket.ring.push(ev);
@@ -69,8 +72,8 @@ impl Aggregator {
 
     pub fn snapshot<C: Clock>(&mut self, clock: &C) -> Snapshot {
         let now = clock.now();
-        let mut agents = Vec::with_capacity(2);
-        for kind in [AgentKind::Claude, AgentKind::Codex] {
+        let mut agents = Vec::with_capacity(3);
+        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity] {
             let bucket = self.by_agent.entry(kind).or_default();
             let rate = bucket.ring.rate_tok_per_sec(clock);
             let tokens_5h = bucket.rotating.sum_5h(clock);
@@ -157,11 +160,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_snapshot_has_two_agents() {
+    fn empty_snapshot_has_three_agents() {
         let clock = MockClock::new(1_000_000);
         let mut agg = Aggregator::new();
         let snap = agg.snapshot(&clock);
-        assert_eq!(snap.agents.len(), 2);
+        assert_eq!(snap.agents.len(), 3);
     }
 
     #[test]

@@ -38,7 +38,12 @@ pub fn parse_line(line: &str, project_path: &Path, fallback_session: &str) -> Re
     if outer.kind != "assistant" { return Ok(None); }
     let msg = outer.message.ok_or_else(|| anyhow!("no message"))?;
     let usage = match msg.usage { Some(u) => u, None => return Ok(None) };
-    let model = msg.model.unwrap_or("unknown").to_string();
+    let raw_model = msg.model.unwrap_or("unknown");
+    let model = if raw_model == "<synthetic>" || raw_model.starts_with('<') {
+        "claude-3.7-sonnet".to_string()
+    } else {
+        raw_model.to_string()
+    };
     let session_id = outer.session_id.unwrap_or(fallback_session).to_string();
     let ts = outer.timestamp.and_then(parse_iso8601).unwrap_or_else(SystemTime::now);
     Ok(Some(TokenEvent {

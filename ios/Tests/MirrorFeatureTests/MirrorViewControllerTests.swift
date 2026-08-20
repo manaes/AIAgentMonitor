@@ -50,11 +50,13 @@ final class MirrorViewControllerTests: XCTestCase {
         XCTAssertEqual(vc.visibleAgentCardName(at: 1), "Codex")
     }
 
-    /// `orderedForDisplay` 의 세 번째 갈래(claude/codex 가 아닌 것)까지 덮는다.
+    /// `orderedForDisplay` 의 네 번째 갈래(claude/codex/antigravity 가 아닌 것)까지 덮는다.
+    /// `k:2` 는 Antigravity 추가로 진짜 인식되는 값이 됐으므로, 아직 아무것도 매핑되지
+    /// 않은 `k:3` 을 써야 실제로 "모르는 종류" 경로를 테스트한다.
     func testUnknownKindAgentIsOrderedAfterClaudeAndCodex() {
         let json = #"""
         {"v":1,"t":0,"a":[
-          {"k":2,"r":1,"t5":10,"pj":[]},
+          {"k":3,"r":1,"t5":10,"pj":[]},
           {"k":1,"r":10,"t5":1000,"pj":[]},
           {"k":0,"r":20,"t5":2000,"pj":[]}
         ]}

@@ -118,6 +118,9 @@ public final class AgentCardView: UIView {
         case .codex:
             nameLabel.text = "Codex"
             dot.color = Palette.codexDot
+        case .antigravity:
+            nameLabel.text = "Antigravity"
+            dot.color = Palette.antigravityDot
         case .unknown:
             nameLabel.text = "알 수 없음"
             dot.color = Palette.dormantDot
@@ -132,6 +135,9 @@ public final class AgentCardView: UIView {
         if let resetAt = agent.r5 {
             countdownLabel.isHidden = false
             countdownLabel.text = MirrorFormat.countdown(resetAt: resetAt, now: now)
+        } else if let resetWeeklyAt = agent.rw {
+            countdownLabel.isHidden = false
+            countdownLabel.text = MirrorFormat.weeklyCountdown(resetAt: resetWeeklyAt, now: now)
         } else {
             countdownLabel.isHidden = true
             countdownLabel.text = nil

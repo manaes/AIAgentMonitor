@@ -7,12 +7,14 @@ public let protocolVersion: UInt8 = 1
 public enum AgentKindCode: Equatable, Sendable {
     case claude
     case codex
+    case antigravity
     case unknown
 
     init(code: UInt8) {
         switch code {
         case 0: self = .claude
         case 1: self = .codex
+        case 2: self = .antigravity
         default: self = .unknown
         }
     }

@@ -68,7 +68,7 @@
 
 <style>
   .window-root { display: flex; flex-direction: column; gap: 12px; }
-  .agents { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 8px; }
+  .agents { display: grid; grid-template-columns: repeat(3, minmax(200px, 1fr)); gap: 8px; }
   .agents :global(.card + .card) { margin-top: 0; }
 
   .tab-bar {
@@ -97,7 +97,7 @@
   }
   .triggers { display: flex; flex-direction: column; gap: 0; }
 
-  @media (max-width: 600px) {
+  @media (max-width: 720px) {
     .agents {
       grid-template-columns: 1fr;
     }

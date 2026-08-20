@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AgentKind { Claude, Codex }
+pub enum AgentKind { Claude, Codex, Antigravity }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenCounts {

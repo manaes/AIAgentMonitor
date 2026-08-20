@@ -106,4 +106,15 @@ public enum MirrorFormat {
         let s = rem % 60
         return h > 0 ? "약 \(h)시간 \(m)분 \(s)초 남음" : "약 \(m)분 \(s)초 남음"
     }
+
+    /// 주간 리셋 카운트다운
+    public static func weeklyCountdown(resetAt: UInt64, now: Date) -> String? {
+        let nowSecs = UInt64(max(0, now.timeIntervalSince1970))
+        if resetAt <= nowSecs { return "주간 리셋됨" }
+        let rem = resetAt - nowSecs
+        let d = rem / 86400
+        let h = (rem % 86400) / 3600
+        let m = (rem % 3600) / 60
+        return d > 0 ? "약 \(d)일 \(h)시간 남음" : "약 \(h)시간 \(m)분 남음"
+    }
 }

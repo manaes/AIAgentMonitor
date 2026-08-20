@@ -59,7 +59,7 @@ class SnapshotStore {
   }
 
   async addTrigger(
-    agent: "claude" | "codex",
+    agent: "claude" | "codex" | "antigravity",
     hour: number,
     minute: number,
     working_dir: string,

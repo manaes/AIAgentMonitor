@@ -6,7 +6,7 @@ export type Snapshot = {
   agents: AgentState[];
 };
 
-export type AgentKind = "claude" | "codex";
+export type AgentKind = "claude" | "codex" | "antigravity";
 export type ActivityStatus = "active" | "idle" | "dormant";
 
 export type TokenCounts = {
@@ -46,7 +46,7 @@ export async function listenSnapshot(cb: (s: Snapshot) => void): Promise<Unliste
 
 export type TriggerRule = {
   id: string;
-  agent: "claude" | "codex";
+  agent: "claude" | "codex" | "antigravity";
   cron: string;
   working_dir: string;
   prompt: string;
@@ -59,7 +59,7 @@ export async function listTriggerRules(): Promise<TriggerRule[]> {
 }
 
 export async function addTriggerRule(
-  agent: "claude" | "codex",
+  agent: "claude" | "codex" | "antigravity",
   hour: number,
   minute: number,
   working_dir: string,

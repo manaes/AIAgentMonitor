@@ -24,6 +24,7 @@ final class PaletteTests: XCTestCase {
     func testPaletteMatchesMacOS() {
         XCTAssertTrue(rgb(Palette.claudeDot) == rgb(UIColor(hex: 0x30d158)))
         XCTAssertTrue(rgb(Palette.codexDot) == rgb(UIColor(hex: 0xff9f0a)))
+        XCTAssertTrue(rgb(Palette.antigravityDot) == rgb(UIColor(hex: 0x388bfd)))
         XCTAssertTrue(rgb(Palette.cardBackground) == rgb(UIColor(hex: 0x2c2c2e)))
         XCTAssertTrue(rgb(Palette.barTrack) == rgb(UIColor(hex: 0x1c1c1e)))
         XCTAssertTrue(rgb(Palette.windowBackground) == rgb(UIColor(hex: 0x1c1c1e)))

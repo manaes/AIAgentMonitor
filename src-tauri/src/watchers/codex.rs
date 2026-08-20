@@ -68,6 +68,8 @@ struct Window {
     #[serde(default)]
     used_percent: f64,
     #[serde(default)]
+    window_minutes: Option<i64>,
+    #[serde(default)]
     resets_at: i64,
 }
 
@@ -131,14 +133,29 @@ fn parse_counts(u: &Usage) -> TokenCounts {
     }
 }
 
+fn apply_window(w: &Window, quota: &CodexQuota, is_secondary: bool) {
+    // window_minutes: 10080(7일), 300(5시간).
+    // window_minutes가 명시되어 있지 않은 경우 primary는 5h, secondary는 weekly로 기본 폴백.
+    let is_weekly = match w.window_minutes {
+        Some(m) => m > 360,
+        None => is_secondary,
+    };
+
+    if is_weekly {
+        *quota.used_pct_weekly.lock().unwrap() = Some(w.used_percent as f32);
+        *quota.reset_weekly.lock().unwrap() = epoch(w.resets_at);
+    } else {
+        *quota.used_pct_5h.lock().unwrap() = Some(w.used_percent as f32);
+        *quota.reset_5h.lock().unwrap() = epoch(w.resets_at);
+    }
+}
+
 fn apply_rate_limits(rl: &RateLimits, quota: &CodexQuota) {
     if let Some(p) = &rl.primary {
-        *quota.used_pct_5h.lock().unwrap() = Some(p.used_percent as f32);
-        *quota.reset_5h.lock().unwrap() = epoch(p.resets_at);
+        apply_window(p, quota, false);
     }
     if let Some(s) = &rl.secondary {
-        *quota.used_pct_weekly.lock().unwrap() = Some(s.used_percent as f32);
-        *quota.reset_weekly.lock().unwrap() = epoch(s.resets_at);
+        apply_window(s, quota, true);
     }
 }
 
@@ -263,13 +280,27 @@ mod tests {
     fn rate_limits_populate_quota() {
         let q = CodexQuota::default();
         let rl = RateLimits {
-            primary: Some(Window { used_percent: 31.0, resets_at: 1_780_158_830 }),
-            secondary: Some(Window { used_percent: 60.0, resets_at: 1_780_378_930 }),
+            primary: Some(Window { used_percent: 31.0, window_minutes: Some(300), resets_at: 1_780_158_830 }),
+            secondary: Some(Window { used_percent: 60.0, window_minutes: Some(10080), resets_at: 1_780_378_930 }),
         };
         apply_rate_limits(&rl, &q);
         assert_eq!(*q.used_pct_5h.lock().unwrap(), Some(31.0));
         assert_eq!(*q.used_pct_weekly.lock().unwrap(), Some(60.0));
         assert!(q.reset_5h.lock().unwrap().is_some());
+        assert!(q.reset_weekly.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn rate_limits_primary_weekly_window() {
+        let q = CodexQuota::default();
+        let rl = RateLimits {
+            primary: Some(Window { used_percent: 90.0, window_minutes: Some(10080), resets_at: 1_787_203_953 }),
+            secondary: None,
+        };
+        apply_rate_limits(&rl, &q);
+        assert_eq!(*q.used_pct_5h.lock().unwrap(), None);
+        assert_eq!(*q.used_pct_weekly.lock().unwrap(), Some(90.0));
+        assert!(q.reset_5h.lock().unwrap().is_none());
         assert!(q.reset_weekly.lock().unwrap().is_some());
     }
 }

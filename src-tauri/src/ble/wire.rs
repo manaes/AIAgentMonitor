@@ -81,6 +81,7 @@ impl From<&AgentState> for MirrorAgent {
             k: match a.kind {
                 AgentKind::Claude => 0,
                 AgentKind::Codex => 1,
+                AgentKind::Antigravity => 2,
             },
             r: a.rate_tok_per_sec,
             t5: a

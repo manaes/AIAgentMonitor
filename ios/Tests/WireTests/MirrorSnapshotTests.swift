@@ -53,6 +53,14 @@ final class MirrorSnapshotTests: XCTestCase {
         XCTAssertEqual(agent.r5, 1_755_512_400)
     }
 
+    func testDecodesAntigravityAgent() throws {
+        let json = #"{"v":1,"t":1,"a":[{"k":2,"r":10.5,"t5":1000,"p5":19.0,"pw":3.0,"pj":[]}]}"#
+        let snap = try JSONDecoder().decode(MirrorSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snap.a[0].kind, .antigravity)
+        XCTAssertEqual(snap.a[0].usedPct5h, 19.0)
+        XCTAssertEqual(snap.a[0].usedPctWeekly, 3.0)
+    }
+
     func testDecodesUnknownCodesAsUnknown() throws {
         let json = #"{"v":1,"t":1,"a":[{"k":9,"r":0,"t5":0,"pj":[{"id":1,"n":"x","m":"m","r":0,"t":0,"s":99}]}]}"#
         let snap = try JSONDecoder().decode(MirrorSnapshot.self, from: Data(json.utf8))

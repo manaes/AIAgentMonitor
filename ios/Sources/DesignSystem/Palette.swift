@@ -17,6 +17,7 @@ public extension UIColor {
 public enum Palette {
     public static let claudeDot = UIColor(hex: 0x30d158)
     public static let codexDot = UIColor(hex: 0xff9f0a)
+    public static let antigravityDot = UIColor(hex: 0x388bfd)
     public static let idleDot = UIColor(hex: 0xff9f0a)
     public static let dormantDot = UIColor(hex: 0x636366)
 

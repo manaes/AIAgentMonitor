@@ -433,13 +433,23 @@ pub fn run() {
     quota_state.load_persisted();
     let codex_quota = Arc::new(watchers::codex::CodexQuota::default());
     let codex_quota_ping_running = Arc::new(AtomicBool::new(false));
+    let antigravity_quota = Arc::new(watchers::antigravity::AntigravityQuota::default());
 
-    // Watchers (Claude + Codex). 둘 다 실패해도 앱은 띄움.
+    // Watchers (Claude + Codex + Antigravity). 실패해도 앱은 띄움.
     // Claude Code는 macOS/Windows 모두 ~/.claude/projects 사용 (home()이 OS별 홈 경로 반환)
     let claude_root = home().join(".claude/projects");
     let _ = watchers::claude::ClaudeWatcher::spawn(claude_root, tx.clone());
     let codex_db = home().join(".codex/state_5.sqlite");
     let _ = watchers::codex::CodexWatcher::spawn(codex_db, tx.clone(), codex_quota.clone());
+    let gemini_root = home().join(".gemini/antigravity-cli");
+    let antigravity_conversations = gemini_root.join("conversations");
+    let antigravity_summaries = gemini_root.join("conversation_summaries.db");
+    let _ = watchers::antigravity::AntigravityWatcher::spawn(
+        antigravity_conversations,
+        antigravity_summaries,
+        tx.clone(),
+        antigravity_quota.clone(),
+    );
 
     // quota 프록시 spawn (포트 4319). Claude Code에 ANTHROPIC_BASE_URL 설정 시에만 트래픽이 흐른다.
     {
@@ -558,6 +568,7 @@ pub fn run() {
             let gate = gate.clone();
             let quota_state = quota_state.clone();
             let codex_quota = codex_quota.clone();
+            let antigravity_quota = antigravity_quota.clone();
             move |app| {
                 // Dock 아이콘 숨김 — setup 초반에 호출
                 #[cfg(target_os = "macos")]
@@ -713,6 +724,7 @@ pub fn run() {
                 let gate_for_tick = gate.clone();
                 let quota_for_tick = quota_state.clone();
                 let codex_for_tick = codex_quota.clone();
+                let antigravity_for_tick = antigravity_quota.clone();
                 let ble_for_tick = ble_handle.clone();
                 tauri::async_runtime::spawn(async move {
                     let clock = SystemClock;
@@ -722,7 +734,7 @@ pub fn run() {
                         let mut a = agg_for_tick.lock().await;
                         let mut snap = a.snapshot(&clock);
                         drop(a);
-                        // 실제 quota 주입(있을 때만): Claude=프록시 헤더, Codex=rollout rate_limits
+                        // 실제 quota 주입(있을 때만): Claude=프록시 헤더, Codex=rollout rate_limits, Antigravity=gen_metadata 버킷
                         if let Some(c) =
                             snap.agents.iter_mut().find(|a| a.kind == AgentKind::Claude)
                         {
@@ -751,6 +763,21 @@ pub fn run() {
                                 c.quota_used_pct_weekly = Some(u);
                             }
                             if let Some(r) = *codex_for_tick.reset_weekly.lock().unwrap() {
+                                c.quota_reset_at_weekly = Some(r);
+                            }
+                        }
+                        if let Some(c) = snap.agents.iter_mut().find(|a| a.kind == AgentKind::Antigravity)
+                        {
+                            if let Some(u) = *antigravity_for_tick.used_pct_5h.lock().unwrap() {
+                                c.quota_used_pct = Some(u);
+                            }
+                            if let Some(r) = *antigravity_for_tick.reset_5h.lock().unwrap() {
+                                c.quota_reset_at = Some(r);
+                            }
+                            if let Some(u) = *antigravity_for_tick.used_pct_weekly.lock().unwrap() {
+                                c.quota_used_pct_weekly = Some(u);
+                            }
+                            if let Some(r) = *antigravity_for_tick.reset_weekly.lock().unwrap() {
                                 c.quota_reset_at_weekly = Some(r);
                             }
                         }

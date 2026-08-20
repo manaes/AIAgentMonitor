@@ -128,6 +128,7 @@ public final class SessionRowView: UIView {
         switch kind {
         case .claude: agentName = "Claude"; agentColor = Palette.claudeDot
         case .codex: agentName = "Codex"; agentColor = Palette.codexDot
+        case .antigravity: agentName = "Antigravity"; agentColor = Palette.antigravityDot
         case .unknown: agentName = "?"; agentColor = Palette.dormantDot
         }
 

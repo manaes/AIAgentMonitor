@@ -7,7 +7,13 @@
 
   let { agent }: { agent: AgentState } = $props();
 
-  let dotColor = $derived(agent.kind === "claude" ? "#30d158" : "#ff9f0a");
+  let dotColor = $derived(
+    agent.kind === "claude"
+      ? "#30d158"
+      : agent.kind === "antigravity"
+        ? "#388bfd"
+        : "#ff9f0a"
+  );
   let primaryProj = $derived(
     agent.projects.find((p) => p.status === "active") ?? agent.projects[0]
   );
@@ -19,21 +25,31 @@
     return () => clearInterval(tick);
   });
 
-  // 리셋 시각(epoch secs) — 백엔드가 프록시 실측 또는 첫-메시지 앵커 추정으로 제공
+  // 리셋 시각(epoch secs) — 5h 및 주간
   let resetEpochSecs = $derived(agent.quota_reset_at?.secs_since_epoch ?? null);
+  let resetWeeklyEpochSecs = $derived(agent.quota_reset_at_weekly?.secs_since_epoch ?? null);
 
   // 5h 윈도우 리셋 여부 — 리셋됨이면 백엔드 갱신 전까지 5h 사용률을 0%로 표시
   let isReset5h = $derived(resetEpochSecs !== null && resetEpochSecs - nowSecs <= 0);
 
   let countdown = $derived.by((): string | null => {
-    const r = resetEpochSecs;
-    if (r === null) return null;
-    const rem = r - nowSecs;
-    if (rem <= 0) return "리셋됨";
-    const h = Math.floor(rem / 3600);
-    const m = Math.floor((rem % 3600) / 60);
-    const s = rem % 60;
-    return h > 0 ? `약 ${h}시간 ${m}분 ${s}초 남음` : `약 ${m}분 ${s}초 남음`;
+    if (resetEpochSecs !== null) {
+      const rem = resetEpochSecs - nowSecs;
+      if (rem <= 0) return "5h 리셋됨";
+      const h = Math.floor(rem / 3600);
+      const m = Math.floor((rem % 3600) / 60);
+      const s = rem % 60;
+      return h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`;
+    }
+    if (resetWeeklyEpochSecs !== null) {
+      const rem = resetWeeklyEpochSecs - nowSecs;
+      if (rem <= 0) return "주간 리셋됨";
+      const d = Math.floor(rem / 86400);
+      const h = Math.floor((rem % 86400) / 3600);
+      const m = Math.floor((rem % 3600) / 60);
+      return d > 0 ? `${d}일 ${h}시간 남음` : `${h}시간 ${m}분 남음`;
+    }
+    return null;
   });
 
   // 수동 동기화: claude를 프록시 경유로 1회 핑(이 핑만 프록시를 거침). 값은 스냅샷으로 자동 반영.
@@ -50,7 +66,9 @@
   <div class="top">
     <div class="agent">
       <span class="dot" style="background:{dotColor}"></span>
-      <span class="name">{agent.kind === "claude" ? "Claude Code" : "Codex"}</span>
+      <span class="name">
+        {agent.kind === "claude" ? "Claude Code" : agent.kind === "antigravity" ? "Antigravity" : "Codex"}
+      </span>
     </div>
     <span class="subtle">{primaryProj?.model ?? "—"}</span>
   </div>

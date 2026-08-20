@@ -2,7 +2,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { store } from "../lib/store.svelte";
 
-  let agent = $state<"claude" | "codex">("claude");
+  let agent = $state<"claude" | "codex" | "antigravity">("claude");
   let timeValue = $state("08:00");
   let workingDir = $state("");
   let prompt = $state("");
@@ -58,6 +58,7 @@
     <select class="sel" bind:value={agent}>
       <option value="claude">Claude</option>
       <option value="codex">Codex</option>
+      <option value="antigravity">Antigravity</option>
     </select>
 
     <input

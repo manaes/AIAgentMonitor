@@ -4,7 +4,7 @@
 
   let { snap }: { snap: Snapshot } = $props();
 
-  type Row = ProjectActivity & { agent: "claude" | "codex" };
+  type Row = ProjectActivity & { agent: "claude" | "codex" | "antigravity" };
   let rows = $derived<Row[]>(
     snap.agents
       .flatMap((a) => a.projects.map((p) => ({ ...p, agent: a.kind })))
@@ -14,7 +14,9 @@
   function dotColor(agent: string, status: string) {
     if (status === "dormant") return "#636366";
     if (status === "idle") return "#ff9f0a";
-    return agent === "claude" ? "#30d158" : "#ff9f0a";
+    if (agent === "claude") return "#30d158";
+    if (agent === "antigravity") return "#388bfd";
+    return "#ff9f0a";
   }
 </script>
 
@@ -24,7 +26,7 @@
     <div class="row">
       <span class="left">
         <span class="dot" style="background:{dotColor(row.agent, row.status)}"></span>
-        <strong>{row.agent === "claude" ? "Claude" : "Codex"}</strong>
+        <strong>{row.agent === "claude" ? "Claude" : row.agent === "antigravity" ? "Antigravity" : "Codex"}</strong>
         <span class="proj">· {row.name}</span>
         <span class="model subtle">{row.model}</span>
       </span>
