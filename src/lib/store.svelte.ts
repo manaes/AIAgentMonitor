@@ -7,6 +7,9 @@ import {
   fireTriggerNow,
   bleStatus,
   bleSetEnabled,
+  bleBeginPairing,
+  bleUnpair,
+  bleUnpairAll,
   listenBleStatus,
   type Snapshot,
   type TriggerRule,
@@ -118,6 +121,42 @@ class SnapshotStore {
       this.bleActionError = null;
     } catch (e) {
       this.bleActionError = `BLE 설정을 변경하지 못했습니다: ${e}`;
+    }
+  }
+
+  async beginPairing() {
+    try {
+      await bleBeginPairing();
+      const seq = ++this.#bleReqSeq;
+      const status = await bleStatus();
+      if (seq === this.#bleReqSeq) this.ble = status;
+      this.bleActionError = null;
+    } catch (e) {
+      this.bleActionError = `페어링을 시작하지 못했습니다: ${e}`;
+    }
+  }
+
+  async unpair(peerId: string) {
+    try {
+      await bleUnpair(peerId);
+      const seq = ++this.#bleReqSeq;
+      const status = await bleStatus();
+      if (seq === this.#bleReqSeq) this.ble = status;
+      this.bleActionError = null;
+    } catch (e) {
+      this.bleActionError = `기기를 해제하지 못했습니다: ${e}`;
+    }
+  }
+
+  async unpairAll() {
+    try {
+      await bleUnpairAll();
+      const seq = ++this.#bleReqSeq;
+      const status = await bleStatus();
+      if (seq === this.#bleReqSeq) this.ble = status;
+      this.bleActionError = null;
+    } catch (e) {
+      this.bleActionError = `전체 해제에 실패했습니다: ${e}`;
     }
   }
 }

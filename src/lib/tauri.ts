@@ -94,6 +94,13 @@ export type BleStatus = {
   // 마지막 BLE 오류. 이 앱에는 tracing subscriber 가 없어 tracing::error! 출력이 전부 유실되므로,
   // 블루투스 권한 거부 같은 실패는 이 필드로만 사용자에게 도달한다.
   last_error: string | null;
+  // 페어링 창 상태. UI 가 만료와 시도 소진을 구분해 보여줘야 한다 —
+  // 소진이 보인다는 것이 창에 소유자를 두지 않기로 한 근거의 절반이다(스펙 5.1).
+  pairing_window:
+    | { kind: "open"; code: string; seconds_left: number; attempts_left: number }
+    | { kind: "exhausted" }
+    | { kind: "closed" };
+  paired_peers: { peer_id: string; paired_at: number; connected: boolean }[];
 };
 
 export async function bleStatus(): Promise<BleStatus> {
@@ -102,6 +109,18 @@ export async function bleStatus(): Promise<BleStatus> {
 
 export async function bleSetEnabled(enabled: boolean): Promise<void> {
   return invoke<void>("ble_set_enabled", { enabled });
+}
+
+export async function bleBeginPairing(): Promise<void> {
+  return invoke<void>("ble_begin_pairing");
+}
+
+export async function bleUnpair(peerId: string): Promise<void> {
+  return invoke<void>("ble_unpair", { peerId });
+}
+
+export async function bleUnpairAll(): Promise<void> {
+  return invoke<void>("ble_unpair_all");
 }
 
 export async function listenBleStatus(cb: () => void): Promise<UnlistenFn> {

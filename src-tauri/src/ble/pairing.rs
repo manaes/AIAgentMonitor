@@ -122,7 +122,7 @@ struct PendingNonce {
     issued_at: SystemTime,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PairedPeer {
     pub peer_id: String,
     pub paired_at: u64,
@@ -130,7 +130,8 @@ pub struct PairedPeer {
     pub connected: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub enum PairingWindow {
     /// 창이 열려 있다. UI 는 코드와 남은 초를 그린다.
     Open { code: String, seconds_left: u64, attempts_left: u8 },
@@ -1404,5 +1405,54 @@ mod tests {
         assert_eq!(paired.len(), 1);
         assert_eq!(paired[0].peer_id, PairingManager::peer_id_of(&token));
         assert_eq!(paired[0].paired_at, 1010, "왕복 후에도 페어링 시각이 보존돼야 한다");
+    }
+
+    // ---- Tauri IPC 로 나가는 JSON 모양 (5단계) ----
+
+    /// `#[serde(tag = "kind", rename_all = "lowercase")]` 가 없으면 `Open{..}` 이
+    /// `{"Open":{"code":...}}` 로 나가서 프론트의 `pairing_window.kind === "open"` 이
+    /// 절대 매치하지 못한다 — 컴파일도 되고 다른 테스트도 안 걸리는 종류라 가장
+    /// 놓치기 쉬운 지점이다. 이 테스트가 그 모양을 고정한다.
+    #[test]
+    fn pairing_window_serializes_with_kind_tag() {
+        let open = PairingWindow::Open {
+            code: "123456".to_string(),
+            seconds_left: 90,
+            attempts_left: 5,
+        };
+        let json = serde_json::to_value(&open).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "kind": "open",
+                "code": "123456",
+                "seconds_left": 90,
+                "attempts_left": 5,
+            }),
+            "실제 JSON: {json}"
+        );
+
+        assert_eq!(
+            serde_json::to_value(PairingWindow::Exhausted).unwrap(),
+            serde_json::json!({ "kind": "exhausted" })
+        );
+        assert_eq!(
+            serde_json::to_value(PairingWindow::Closed).unwrap(),
+            serde_json::json!({ "kind": "closed" })
+        );
+    }
+
+    #[test]
+    fn paired_peer_serializes_as_plain_object() {
+        let peer = PairedPeer {
+            peer_id: "deadbeef".to_string(),
+            paired_at: 1234,
+            connected: true,
+        };
+        let json = serde_json::to_value(&peer).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "peer_id": "deadbeef", "paired_at": 1234, "connected": true })
+        );
     }
 }

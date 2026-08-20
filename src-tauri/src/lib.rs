@@ -49,6 +49,10 @@ pub struct BleStatus {
     pub advertising: bool,
     pub peers: Vec<BlePeer>,
     pub last_error: Option<String>,
+    /// 페어링 창 상태. UI 가 만료와 시도 소진을 구분해 보여줘야 한다 — 소진이
+    /// 보인다는 것이 창에 소유자를 두지 않기로 한 근거의 절반이다(스펙 5.1).
+    pub pairing_window: ble::pairing::PairingWindow,
+    pub paired_peers: Vec<ble::pairing::PairedPeer>,
 }
 
 pub struct BleHandle {
@@ -73,13 +77,47 @@ async fn ble_status(state: tauri::State<'_, Arc<BleHandle>>) -> Result<BleStatus
         .collect();
     #[cfg(not(target_os = "macos"))]
     let peers = Vec::new();
+    let now = std::time::SystemTime::now();
     Ok(BleStatus {
         supported: BLE_SUPPORTED,
         enabled: bridge.is_enabled(),
         advertising: state.advertising.load(Ordering::Relaxed),
         peers,
         last_error: state.last_error.lock().unwrap().clone(),
+        pairing_window: bridge.pairing_window(now),
+        paired_peers: bridge.paired_peers(),
     })
+}
+
+/// 사용자가 Devices 탭에서 [페어링 시작] 을 눌렀을 때만 호출한다. 이 버튼이
+/// 없으면 3단계의 보안 근거(스펙 5.1: 코드는 사용자 제스처에서만 발급)가
+/// 성립하지 않는다 — 반환된 코드는 `BleStatus.pairing_window` 로만 화면에
+/// 흐르고, BLE 로는 절대 나가지 않는다.
+#[tauri::command]
+async fn ble_begin_pairing(state: tauri::State<'_, Arc<BleHandle>>) -> Result<(), String> {
+    let mut bridge = state.bridge.lock().await;
+    bridge.begin_pairing(std::time::SystemTime::now());
+    Ok(())
+}
+
+/// 기기 하나만 해제한다(스펙 6장). `peer_id` 는 토큰에서 파생된 8자 hex 이며,
+/// 토큰 자체는 프론트엔드로 나가지 않는다.
+#[tauri::command]
+async fn ble_unpair(peer_id: String, state: tauri::State<'_, Arc<BleHandle>>) -> Result<(), String> {
+    let mut bridge = state.bridge.lock().await;
+    bridge.unpair_peer(&peer_id);
+    let path = ble::peers::PeerStore::path();
+    ble::peers::PeerStore::save_to(&path, &bridge.stored_peers()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn ble_unpair_all(state: tauri::State<'_, Arc<BleHandle>>) -> Result<(), String> {
+    let mut bridge = state.bridge.lock().await;
+    bridge.unpair_all();
+    let path = ble::peers::PeerStore::path();
+    ble::peers::PeerStore::save_to(&path, &[]).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -511,6 +549,9 @@ pub fn run() {
             sync_quota,
             ble_status,
             ble_set_enabled,
+            ble_begin_pairing,
+            ble_unpair,
+            ble_unpair_all,
         ])
         .setup({
             let aggregator = aggregator.clone();
@@ -588,6 +629,24 @@ pub fn run() {
                     app.manage(ble_handle.clone());
                 }
 
+                // 앱 시작 시 이미 페어링한 기기 목록을 복원한다. 파일이 없으면(첫 실행)
+                // 조용히 넘어가고, 손상됐으면(Task 2) tracing 이 전부 버려지는 이
+                // 앱에서 사용자가 알 수 있는 유일한 경로인 last_error 에 싣는다.
+                {
+                    let path = ble::peers::PeerStore::path();
+                    match ble::peers::PeerStore::load_from(&path) {
+                        ble::peers::LoadOutcome::Missing => {}
+                        ble::peers::LoadOutcome::Loaded(peers) => {
+                            ble_handle.bridge.blocking_lock().load_peers(peers);
+                        }
+                        ble::peers::LoadOutcome::Corrupt { detail } => {
+                            ble_handle.last_error.lock().unwrap().replace(format!(
+                                "저장된 페어링 목록이 손상돼 초기화됐습니다: {detail}"
+                            ));
+                        }
+                    }
+                }
+
                 // BLE 이벤트 → 구독자 사본 갱신 + 프론트로 상태 push
                 {
                     let h = ble_handle.clone();
@@ -608,6 +667,19 @@ pub fn run() {
                                     h.advertising.store(false, Ordering::Relaxed);
                                     *h.last_error.lock().unwrap() = Some(e.clone());
                                     tracing::error!("BLE 오류: {e}");
+                                }
+                                ble::peripheral::PeripheralEvent::AuthWrite { central, data } => {
+                                    let now = std::time::SystemTime::now();
+                                    let saved = h.bridge.lock().await.handle_auth(central, data, now);
+                                    if let Some(tokens) = saved {
+                                        let path = ble::peers::PeerStore::path();
+                                        if let Err(e) = ble::peers::PeerStore::save_to(&path, &tokens) {
+                                            tracing::error!(%e, "ble-peers.json 저장 실패");
+                                        }
+                                    }
+                                }
+                                ble::peripheral::PeripheralEvent::Disconnected(central) => {
+                                    h.bridge.lock().await.forget_central(central);
                                 }
                                 _ => {}
                             }
