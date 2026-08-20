@@ -57,7 +57,10 @@ pub trait BlePeripheral: Send + Sync {
     fn start(&self) -> anyhow::Result<()>;
     fn stop(&self);
     /// 프레임을 넘긴다. 실제 전송과 백프레셔는 구현체가 책임진다(fire-and-forget).
-    fn offer_frame(&self, ch: CharId, chunks: Vec<Vec<u8>>);
+    /// `authorized` 는 이 프레임을 받아도 되는 central id 목록이다 — 구현체는
+    /// 실제 notify 를 이 목록으로만 좁혀야 한다. 그 특성을 구독했더라도 이
+    /// 목록에 없는 central 은 받아서는 안 된다(스펙 5.1).
+    fn offer_frame(&self, ch: CharId, chunks: Vec<Vec<u8>>, authorized: &[CentralId]);
     fn subscribers(&self) -> Vec<Subscriber>;
     /// 모든 구독자가 받을 수 있는 최대 청크 크기. 구독자가 없으면 None.
     fn min_notify_len(&self) -> Option<usize> {
@@ -79,7 +82,7 @@ pub trait BlePeripheral: Send + Sync {
 /// 테스트용 구현. 넘어온 프레임을 기록만 한다.
 #[derive(Debug, Default)]
 pub struct FakePeripheral {
-    frames: Mutex<Vec<(CharId, Vec<Vec<u8>>)>>,
+    frames: Mutex<Vec<(CharId, Vec<Vec<u8>>, Vec<CentralId>)>>,
     subs: Mutex<Vec<Subscriber>>,
     started: Mutex<bool>,
     /// Some 이면 start() 가 이 메시지로 실패한다(오류 전파 테스트용).
@@ -95,7 +98,7 @@ impl FakePeripheral {
         *self.subs.lock().unwrap() = subs;
     }
     /// 기록된 프레임을 꺼내고 비운다.
-    pub fn taken_frames(&self) -> Vec<(CharId, Vec<Vec<u8>>)> {
+    pub fn taken_frames(&self) -> Vec<(CharId, Vec<Vec<u8>>, Vec<CentralId>)> {
         std::mem::take(&mut *self.frames.lock().unwrap())
     }
     pub fn is_started(&self) -> bool {
@@ -121,8 +124,8 @@ impl BlePeripheral for FakePeripheral {
     fn stop(&self) {
         *self.started.lock().unwrap() = false;
     }
-    fn offer_frame(&self, ch: CharId, chunks: Vec<Vec<u8>>) {
-        self.frames.lock().unwrap().push((ch, chunks));
+    fn offer_frame(&self, ch: CharId, chunks: Vec<Vec<u8>>, authorized: &[CentralId]) {
+        self.frames.lock().unwrap().push((ch, chunks, authorized.to_vec()));
     }
     fn subscribers(&self) -> Vec<Subscriber> {
         self.subs.lock().unwrap().clone()
@@ -143,11 +146,12 @@ mod tests {
             id: CentralId("A".into()),
             max_notify_len: 20,
         }]);
-        p.offer_frame(CharId::Snapshot, vec![vec![1, 2, 3], vec![4]]);
+        p.offer_frame(CharId::Snapshot, vec![vec![1, 2, 3], vec![4]], &[CentralId("A".into())]);
         let frames = p.taken_frames();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].0, CharId::Snapshot);
         assert_eq!(frames[0].1, vec![vec![1, 2, 3], vec![4]]);
+        assert_eq!(frames[0].2, vec![CentralId("A".into())]);
     }
 
     #[test]

@@ -95,8 +95,9 @@ impl BleBridge {
         let frame_id = self.next_frame_id;
         self.next_frame_id = self.next_frame_id.wrapping_add(1);
 
+        let ids: Vec<CentralId> = authorized.iter().map(|s| s.id.clone()).collect();
         match framing::chunk(frame_id, &json, max_chunk) {
-            Ok(chunks) => self.peripheral.offer_frame(CharId::Snapshot, chunks),
+            Ok(chunks) => self.peripheral.offer_frame(CharId::Snapshot, chunks, &ids),
             Err(e) => {
                 tracing::error!("청킹 실패: {e:?}");
                 self.gate.reset();
@@ -502,5 +503,32 @@ mod tests {
         b.unpair_all();
         b.on_snapshot(&snap(2.0, 1000), now + Duration::from_secs(2));
         assert!(fake.taken_frames().is_empty(), "해제 후에는 다시 아무것도 못 받는다");
+    }
+
+    /// 라운드 2 회귀 테스트: 인가된 central 과 미인가 central 이 **같은
+    /// 특성을 동시에 구독**하는 상황. `on_snapshot` 은 인가된 쪽이 있으니
+    /// 프레임을 만들지만, 그 프레임의 실제 수신 대상 목록에는 미인가
+    /// 구독자가 들어가면 안 된다 — 이게 실기기(macOS `pump()`)에서 도청자가
+    /// 스냅샷을 받지 않게 하는 유일한 방어선이다.
+    #[test]
+    fn unauthorized_subscriber_receives_nothing_even_when_another_is_authorized() {
+        let (mut b, fake) = bridge();
+        b.set_enabled(true).unwrap();
+        fake.set_subscribers(vec![
+            Subscriber { id: CentralId("AUTHORIZED".into()), max_notify_len: 185 },
+            Subscriber { id: CentralId("EAVESDROPPER".into()), max_notify_len: 185 },
+        ]);
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let code = b.begin_pairing(now);
+        b.handle_auth(&CentralId("AUTHORIZED".into()), b"HELLO", now);
+        b.handle_auth(&CentralId("AUTHORIZED".into()), format!("CODE:{code}").as_bytes(), now);
+
+        b.on_snapshot(&snap(1.0, 1000), now);
+
+        let frames = fake.taken_frames();
+        assert_eq!(frames.len(), 1, "인가된 기기가 있으니 프레임은 만들어진다");
+        let (_, _, targets) = &frames[0];
+        assert_eq!(targets, &[CentralId("AUTHORIZED".into())],
+                   "미인가 구독자는 같은 특성을 구독하고 있어도 대상 목록에 들어가면 안 된다");
     }
 }

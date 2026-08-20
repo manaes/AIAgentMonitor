@@ -73,18 +73,31 @@ struct MainState {
     chars: HashMap<&'static str, Retained<CBMutableCharacteristic>>,
     subs: HashMap<String, (Retained<CBCentral>, usize)>,
     queues: HashMap<&'static str, SendQueue>,
+    /// characteristic 별 최근 인가 대상. `pump()` 가 새 프레임이 없을 때도
+    /// (backpressure 해제 재개 콜백 `peripheralManagerIsReadyToUpdateSubscribers:`
+    /// 에서도 다시 불린다) 이 목록을 그대로 쓴다. 채워지기 전에는 빈 벡터 —
+    /// 아무에게도 안 보내는 쪽으로 실패한다(fail-closed, 스펙 5.1).
+    authorized_targets: HashMap<&'static str, Vec<String>>,
     events: UnboundedSender<PeripheralEvent>,
 }
 
 impl MainState {
-    /// 큐에 쌓인 청크를 가능한 만큼 내보낸다.
+    /// 큐에 쌓인 청크를 가능한 만큼 내보낸다. 대상은 `authorized_targets` 로
+    /// 좁힌다 — 같은 특성을 구독했더라도 인가되지 않은 central 은 제외한다
+    /// (스펙 5.1: 인가된 central 에만 notify).
     fn pump(&mut self, ch_uuid: &'static str) {
         let (Some(mgr), Some(ch)) = (self.manager.clone(), self.chars.get(ch_uuid).cloned())
         else {
             return;
         };
-        let centrals: Vec<Retained<CBCentral>> =
-            self.subs.values().map(|(c, _)| c.clone()).collect();
+        let empty = Vec::new();
+        let allowed = self.authorized_targets.get(ch_uuid).unwrap_or(&empty);
+        let centrals: Vec<Retained<CBCentral>> = self
+            .subs
+            .iter()
+            .filter(|(id, _)| allowed.contains(id))
+            .map(|(_, (c, _))| c.clone())
+            .collect();
         if centrals.is_empty() {
             return;
         }
@@ -95,7 +108,7 @@ impl MainState {
         };
         q.pump(|chunk| {
             let data = NSData::with_bytes(chunk);
-            // onSubscribedCentrals 를 명시해 인가 대상만 지정할 수 있게 해둔다(3단계 페어링 대비).
+            // 인가된 central 로 미리 좁혀둔 targets 로만 보낸다(3단계 페어링).
             unsafe {
                 mgr.updateValue_forCharacteristic_onSubscribedCentrals(
                     &data,
@@ -325,6 +338,7 @@ impl BlePeripheral for MacPeripheral {
                     chars: HashMap::new(),
                     subs: HashMap::new(),
                     queues: HashMap::from([(CharId::Snapshot.uuid(), SendQueue::new())]),
+                    authorized_targets: HashMap::new(),
                     events,
                 };
                 let d = Delegate::alloc().set_ivars(RefCell::new(state));
@@ -371,11 +385,13 @@ impl BlePeripheral for MacPeripheral {
         });
     }
 
-    fn offer_frame(&self, ch: CharId, chunks: Vec<Vec<u8>>) {
+    fn offer_frame(&self, ch: CharId, chunks: Vec<Vec<u8>>, authorized: &[CentralId]) {
         let uuid = ch.uuid();
+        let ids: Vec<String> = authorized.iter().map(|c| c.0.clone()).collect();
         with_delegate(&self.app, move |d| {
             {
                 let mut st = d.ivars().borrow_mut();
+                st.authorized_targets.insert(uuid, ids);
                 if let Some(q) = st.queues.get_mut(uuid) {
                     q.offer(chunks);
                 }
