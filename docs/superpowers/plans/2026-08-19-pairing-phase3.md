@@ -1030,29 +1030,52 @@ git commit -m "feat(ble): macOS Auth 특성과 쓰기 콜백 구현"
 
 **Files:**
 - Modify: `src-tauri/src/lib.rs`
+- Modify: `src-tauri/src/ble/pairing.rs`
 - Modify: `src/lib/tauri.ts`
 - Modify: `src/components/DevicePanel.svelte`
+- Modify: `src/lib/store.svelte.ts`
 
 **Interfaces:**
-- Consumes: `BleBridge::{begin_pairing, handle_auth, visible_pairing_code, forget_central, load_tokens, unpair_all}`, `PeerStore`
-- Produces: `BleStatus.pairing_code: Option<String>`, `BleStatus.paired_count: usize`, Tauri commands `ble_begin_pairing()` · `ble_unpair_all()`
+- Consumes: `BleBridge::{begin_pairing, handle_auth, pairing_window, paired_peers, stored_peers, forget_central, load_peers, unpair_peer, unpair_all}`, `pairing::{PairingWindow, PairedPeer}`, `peers::{PeerStore, StoredPeer, LoadOutcome}`
+- Produces: `BleStatus.pairing_window: PairingWindow`, `BleStatus.paired_peers: Vec<PairedPeer>`, Tauri commands `ble_begin_pairing()` · `ble_unpair(peer_id)` · `ble_unpair_all()`
 
+> **개정 (2026-08-19).** 아래 Step 1·3 은 Task 1·2 착수 전에 쓰여서 옛 API(`load_tokens`,
+> `visible_pairing_code`, `pairing_code: Option<String>`, `paired_count: usize`)를 참조합니다.
+> Step 2·4·5 는 이미 정본 API 로 갱신돼 있습니다(`5500769`). Step 1·3 을 정본으로 다시
+> 적어뒀으니 그대로 쓰세요 — 아래 개정판이 이 태스크의 유일한 정본입니다.
+>
 > **코드는 사용자가 [페어링 시작] 을 눌러야만 발급된다.** 이 버튼이 없으면 3단계의 보안 근거가
 > 성립하지 않는다(스펙 §5.1). `ble_begin_pairing` 이 `BleBridge::begin_pairing` 을 호출하고,
-> 반환된 코드는 `BleStatus.pairing_code` 로만 화면에 흐른다 — BLE 로는 절대 나가지 않는다.
+> 반환된 코드는 `BleStatus.pairing_window` 로만 화면에 흐른다 — BLE 로는 절대 나가지 않는다.
 
-- [ ] **Step 1: 시작 시 토큰을 복원한다**
+- [ ] **Step 1: 시작 시 페어링 목록을 복원한다**
+
+`PeerStore::load_from` 은 `Vec<String>` 이 아니라 `LoadOutcome`(`Missing`/`Loaded(Vec<StoredPeer>)`/
+`Corrupt{detail}`) 을 돌려줍니다(Task 2). `Corrupt` 를 조용히 무시하면 안 됩니다 — 이 앱은
+`tracing` 출력이 전부 버려지므로(README 와 달리 subscriber 가 없음), `BleStatus.last_error`
+로 올리는 것이 사용자가 알 수 있는 유일한 경로입니다(Task 2 의 `task-2-rework.md` B5 가 이미
+이 계약을 정해뒀습니다 — 배선이 이 태스크입니다).
 
 `setup` 에서 `BleHandle` 을 만든 직후에:
 ```rust
                 {
-                    let tokens = ble::peers::PeerStore::load_from(&ble::peers::PeerStore::path());
-                    if !tokens.is_empty() {
-                        tracing::info!(count = tokens.len(), "ble-peers.json 로드");
+                    let path = ble::peers::PeerStore::path();
+                    match ble::peers::PeerStore::load_from(&path) {
+                        ble::peers::LoadOutcome::Missing => {}
+                        ble::peers::LoadOutcome::Loaded(peers) => {
+                            ble_handle.bridge.blocking_lock().load_peers(peers);
+                        }
+                        ble::peers::LoadOutcome::Corrupt { detail } => {
+                            ble_handle.last_error.lock().unwrap().replace(format!(
+                                "저장된 페어링 목록이 손상돼 초기화됐습니다: {detail}"
+                            ));
+                        }
                     }
-                    ble_handle.bridge.blocking_lock().load_tokens(tokens);
                 }
 ```
+`BleHandle` 에 `last_error: Mutex<Option<String>>` 필드가 없다면 추가하고, `ble_status` 커맨드가
+이걸 `BleStatus.last_error` 에 실어 보내게 하세요(기존 BLE 권한 오류가 이미 이 필드를 쓰고
+있으니 같은 통로를 공유합니다 — 새 필드를 만들지 마세요).
 
 - [ ] **Step 2: Auth 이벤트를 처리한다**
 
@@ -1075,16 +1098,31 @@ git commit -m "feat(ble): macOS Auth 특성과 쓰기 콜백 구현"
 
 - [ ] **Step 3: `BleStatus` 를 확장한다**
 
+`pairing::PairingWindow` 와 `pairing::PairedPeer` 는 지금 `#[derive(Debug, Clone, PartialEq, Eq)]`
+뿐이라 Tauri IPC 로 못 나갑니다. `src-tauri/src/ble/pairing.rs` 에서 derive 를 바꾸세요:
+
 ```rust
-    /// 지금 화면에 띄울 6자리 코드. 만료되면 None.
-    pub pairing_code: Option<String>,
-    /// 저장된 페어링 토큰 수.
-    pub paired_count: usize,
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PairedPeer { ... }   // 필드는 그대로
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum PairingWindow { ... }  // variant 는 그대로
+```
+`#[serde(tag = "kind", rename_all = "lowercase")]` 가 없으면 `Open{code,...}` 이
+`{"Open":{"code":...}}` 로 나가서 프론트(Step 5 의 `pairing_window.kind === "open"`)가 절대
+매치하지 못합니다 — 이 태스크에서 가장 놓치기 쉬운 지점입니다.
+
+`BleStatus` 에 추가:
+```rust
+    pub pairing_window: pairing::PairingWindow,
+    pub paired_peers: Vec<pairing::PairedPeer>,
 ```
 `ble_status` 에서 채운다:
 ```rust
     let now = std::time::SystemTime::now();
-    let pairing_code = bridge.visible_pairing_code(now);
+    let pairing_window = bridge.pairing_window(now);
+    let paired_peers = bridge.paired_peers();
 ```
 
 - [ ] **Step 4: 해제 명령을 추가한다**
