@@ -440,6 +440,20 @@ impl BlePeripheral for MacPeripheral {
             };
         });
     }
+
+    /// `authorized_targets` 는 `offer_frame` 때만 갱신되므로, 인가 철회가
+    /// 그 경로를 거치지 않고도 즉시 반영되도록 여기서 모든 characteristic 의
+    /// 대상 목록에서 지운다 — 그러지 않으면 스테일한 목록으로 다음 `pump()`
+    /// (backpressure 해제 재개 포함)가 방금 철회된 central 에게 계속 보낸다.
+    fn revoke_targets(&self, ids: &[CentralId]) {
+        let ids: Vec<String> = ids.iter().map(|c| c.0.clone()).collect();
+        with_delegate(&self.app, move |d| {
+            let mut st = d.ivars().borrow_mut();
+            for targets in st.authorized_targets.values_mut() {
+                targets.retain(|id| !ids.contains(id));
+            }
+        });
+    }
 }
 
 #[cfg(test)]

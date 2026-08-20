@@ -69,6 +69,15 @@ pub trait BlePeripheral: Send + Sync {
     /// Auth 특성으로 한 central 에만 응답한다.
     fn notify_auth(&self, central: &CentralId, payload: Vec<u8>);
 
+    /// 인가가 철회된 central 을 이후의 모든 전송 대상에서 즉시 제거한다.
+    /// `authorized_targets` 는 `offer_frame` 때만 갱신되는데, 인가된 구독자가
+    /// 0명이 되면 `on_snapshot` 이 `offer_frame` 호출 전에 조기 반환해 그 뒤로
+    /// 영원히 갱신되지 않는다 — 그 사이 backpressure 가 풀려 `pump()` 가 다시
+    /// 불리면(`peripheralManagerIsReadyToUpdateSubscribers:`) 스테일한 대상
+    /// 목록으로 방금 철회된 central 에게 남은 청크를 계속 보낸다. `forget_central`/
+    /// `unpair_peer`/`unpair_all` 은 그래서 이 호출을 반드시 함께 해야 한다.
+    fn revoke_targets(&self, ids: &[CentralId]);
+
     /// 인가된 구독자만 추린다. 청크 크기 계산도 이 목록으로 해야
     /// 미인가 기기의 작은 MTU 에 끌려가지 않는다.
     fn authorized_subscribers(&self, is_authorized: &dyn Fn(&CentralId) -> bool) -> Vec<Subscriber> {
@@ -88,6 +97,7 @@ pub struct FakePeripheral {
     /// Some 이면 start() 가 이 메시지로 실패한다(오류 전파 테스트용).
     start_error: Mutex<Option<String>>,
     auth_replies: Mutex<Vec<(CentralId, Vec<u8>)>>,
+    revoked: Mutex<Vec<CentralId>>,
 }
 
 impl FakePeripheral {
@@ -111,6 +121,10 @@ impl FakePeripheral {
     pub fn taken_auth_replies(&self) -> Vec<(CentralId, Vec<u8>)> {
         std::mem::take(&mut *self.auth_replies.lock().unwrap())
     }
+    /// `revoke_targets` 로 넘어온 id 를 꺼내고 비운다.
+    pub fn taken_revocations(&self) -> Vec<CentralId> {
+        std::mem::take(&mut *self.revoked.lock().unwrap())
+    }
 }
 
 impl BlePeripheral for FakePeripheral {
@@ -132,6 +146,9 @@ impl BlePeripheral for FakePeripheral {
     }
     fn notify_auth(&self, central: &CentralId, payload: Vec<u8>) {
         self.auth_replies.lock().unwrap().push((central.clone(), payload));
+    }
+    fn revoke_targets(&self, ids: &[CentralId]) {
+        self.revoked.lock().unwrap().extend(ids.iter().cloned());
     }
 }
 

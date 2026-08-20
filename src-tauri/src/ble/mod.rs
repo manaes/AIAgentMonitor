@@ -172,6 +172,7 @@ impl BleBridge {
     /// 재연결하면 즉시 재인가된다.
     pub fn forget_central(&mut self, central: &CentralId) {
         self.pairing.end_session(central);
+        self.peripheral.revoke_targets(std::slice::from_ref(central));
     }
 
     /// 디스크에서 읽은 페어링 목록을 복원한다(앱 시작 시 1회).
@@ -183,7 +184,9 @@ impl BleBridge {
     /// 기기 하나만 골라 해제한다(스펙 6 `ble_unpair`). 내려간 central 을
     /// 돌려준다 — 호출자가 저장소를 갱신하고, 가능하면 실제 연결도 끊는다.
     pub fn unpair_peer(&mut self, peer_id: &str) -> Vec<CentralId> {
-        self.pairing.revoke_peer(peer_id)
+        let dropped = self.pairing.revoke_peer(peer_id);
+        self.peripheral.revoke_targets(&dropped);
+        dropped
     }
 
     /// 모든 기기의 인가와 토큰을 폐기한다(전체 언페어링). `CBPeripheralManager`
@@ -191,7 +194,9 @@ impl BleBridge {
     /// 실제 차단은 "인가가 없으면 notify 하지 않는다" 로 이뤄진다 — 이
     /// 반환값은 호출자가 저장소를 갱신하거나 로그를 남기는 데 쓴다.
     pub fn unpair_all(&mut self) -> Vec<CentralId> {
-        self.pairing.revoke_all()
+        let dropped = self.pairing.revoke_all();
+        self.peripheral.revoke_targets(&dropped);
+        dropped
     }
 }
 
@@ -503,6 +508,54 @@ mod tests {
         b.unpair_all();
         b.on_snapshot(&snap(2.0, 1000), now + Duration::from_secs(2));
         assert!(fake.taken_frames().is_empty(), "해제 후에는 다시 아무것도 못 받는다");
+    }
+
+    /// 리뷰(Task 3 전체 리뷰)가 지적한 잔여 위험: `unpair_*`/`forget_central`
+    /// 은 `pairing.rs` 의 인가 상태만 지우고, macOS 쪽 `authorized_targets`
+    /// (characteristic 별 마지막 전송 대상)는 손대지 않았었다. 인가된
+    /// 구독자가 0명이 되면 `on_snapshot` 이 `offer_frame` 이전에 조기
+    /// 반환하므로 그 뒤로 `authorized_targets` 는 영원히 갱신되지 않고,
+    /// 스테일한 목록을 들고 있다가 backpressure 해제 재개 시 방금 철회된
+    /// central 에게 계속 보낼 수 있었다. `revoke_targets` 가 그 경로 없이도
+    /// 즉시 지운다는 것을 확인한다.
+    #[test]
+    fn forget_central_revokes_stale_pump_targets_immediately() {
+        let (mut b, fake) = bridge();
+        b.set_enabled(true).unwrap();
+        fake.set_subscribers(vec![Subscriber {
+            id: CentralId("A".into()),
+            max_notify_len: 185,
+        }]);
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, "A", now);
+        b.on_snapshot(&snap(1.0, 1000), now); // authorized_targets 에 "A" 가 기록된다
+        fake.taken_frames();
+
+        b.forget_central(&CentralId("A".into()));
+
+        assert_eq!(
+            fake.taken_revocations(),
+            vec![CentralId("A".into())],
+            "on_snapshot 을 다시 부르지 않아도 revoke_targets 로 즉시 반영돼야 한다"
+        );
+    }
+
+    #[test]
+    fn unpair_peer_and_unpair_all_also_revoke_pump_targets() {
+        let (mut b, fake) = bridge();
+        b.set_enabled(true).unwrap();
+        fake.set_subscribers(vec![Subscriber {
+            id: CentralId("A".into()),
+            max_notify_len: 185,
+        }]);
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, "A", now);
+        b.on_snapshot(&snap(1.0, 1000), now);
+        fake.taken_frames();
+
+        b.unpair_all();
+
+        assert_eq!(fake.taken_revocations(), vec![CentralId("A".into())]);
     }
 
     /// 라운드 2 회귀 테스트: 인가된 central 과 미인가 central 이 **같은
