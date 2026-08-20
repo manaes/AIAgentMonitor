@@ -1493,6 +1493,16 @@ git commit -m "feat(ios): 페어링 프로토콜과 Keychain 토큰 보관소 �
 
 ## Task 7: `BLEClient` 인증 흐름과 페어링 화면
 
+> **개정 (2026-08-20).** Step 2 의 원문에 두 가지 문제가 있었습니다. (1) 현재
+> `BLEClient.didUpdateValueFor` 는 `characteristic.uuid == MirrorUUIDs.snapshot` 이 아니면
+> **무조건 조기 반환합니다** — Auth notify 는 이 가드 때문에 아예 도달하지 못합니다. 원문이
+> "Auth notify 를 처리한다" 고만 말하고 이 가드를 어떻게 통과시킬지 쓰지 않았습니다.
+> (2) 원문의 분기 구조가 **`Nonce` 응답을 서명 없이 그냥 토큰을 지우고 처음부터 다시
+> 페어링하는 코드로 잘못 연결**돼 있었습니다 — 주석은 "논스를 받았으면 서명해 답한다" 는데
+> 실제 코드는 서명을 전혀 하지 않았습니다. 그대로 구현하면 **재연결(AUTH→PROOF)이 항상
+> 실패**해 앱을 켤 때마다 사용자가 6자리 코드를 다시 입력해야 합니다 — Task 1 이 챌린지-응답을
+> 만든 이유 자체가 무너집니다. 아래는 다시 쓴 버전입니다.
+
 **Files:**
 - Modify: `ios/Sources/BLETransport/ConnectionState.swift`
 - Modify: `ios/Sources/BLETransport/BLEClient.swift`
@@ -1503,6 +1513,11 @@ git commit -m "feat(ios): 페어링 프로토콜과 Keychain 토큰 보관소 �
 **Interfaces:**
 - Consumes: `PairingClient`, `TokenStore`, `MirrorUUIDs.auth`
 - Produces: `ConnectionState.needsPairing`, `ConnectionState.pairingFailed(left: Int)`, `BLEClient.submitPairingCode(_ code: String)`
+
+> `BLEClient` 의 실제 현재 구조(팀리드가 직접 읽고 확인): `didDiscoverServices` 는 지금
+> `[MirrorUUIDs.snapshot]` 만 검색합니다. `didDiscoverCharacteristicsFor` 는 snapshot 특성을
+> **지역 변수로만** 찾아 즉시 구독하고 저장하지 않습니다. Auth 는 나중에 쓸 특성(쓰기+구독)을
+> 저장해둬야 하므로 인스턴스 프로퍼티가 필요합니다.
 
 - [ ] **Step 1: 상태 2종을 추가한다**
 
@@ -1520,13 +1535,33 @@ git commit -m "feat(ios): 페어링 프로토콜과 Keychain 토큰 보관소 �
 
 - [ ] **Step 2: `BLEClient` 에 인증 단계를 넣는다**
 
-특성 탐색을 Auth 까지 확장한다:
+**2a. 특성을 담을 프로퍼티 두 개를 추가한다** (기존 `private var reassembler` 근처):
+```swift
+    /// 인가 후에야 구독한다 — 그 전에 구독하면 미인가 상태에서도 데이터가 요청되는
+    /// 모양이 되어 스펙 5.1 의 "인가된 central 에만 notify" 전제와 어긋난다.
+    private var snapshotCharacteristic: CBCharacteristic?
+    /// HELLO/CODE/AUTH/PROOF 쓰기와 재연결에 계속 쓴다.
+    private var authCharacteristic: CBCharacteristic?
+```
+
+**2b. `didDiscoverServices` — 특성 탐색을 Auth 까지 확장한다:**
 ```swift
         peripheral.discoverCharacteristics([MirrorUUIDs.snapshot, MirrorUUIDs.auth], for: service)
 ```
 
-Auth 특성을 찾으면 구독하고, **Snapshot 구독은 인가 후로 미룬다.** 저장된 토큰이 있으면 `AUTH` 로 논스를 요청하고, 없으면 `HELLO` 를 보낸 뒤 `.needsPairing` 으로 간다:
+**2c. `didDiscoverCharacteristicsFor` — snapshot 을 즉시 구독하던 것을 걷어내고, 두 특성을
+모두 저장한 뒤 Auth 쪽만 구독 + 인증을 시작한다.** 지금 이 메서드는 snapshot 을 못 찾으면
+연결을 끊는데, 그 자리를 아래로 통째로 바꾼다:
 ```swift
+        guard let snapshotCh = service.characteristics?.first(where: { $0.uuid == MirrorUUIDs.snapshot }),
+              let authCh = service.characteristics?.first(where: { $0.uuid == MirrorUUIDs.auth }) else {
+            stateSubject.send(.disconnected(reason: "필수 특성을 찾지 못함"))
+            central?.cancelPeripheralConnection(peripheral)
+            return
+        }
+        snapshotCharacteristic = snapshotCh
+        authCharacteristic = authCh
+        peripheral.setNotifyValue(true, for: authCh)
         if let token = TokenStore.load() {
             // 토큰 자체는 보내지 않는다. 논스를 받아 서명해 답한다.
             peripheral.writeValue(PairingClient.authFrame(), for: authCh, type: .withResponse)
@@ -1535,29 +1570,78 @@ Auth 특성을 찾으면 구독하고, **Snapshot 구독은 인가 후로 미룬
         }
 ```
 
-Auth notify 를 처리한다:
+**2d. `didUpdateNotificationStateFor` — 지금은 `characteristic.uuid == MirrorUUIDs.snapshot`
+가 아니면 그냥 반환한다(Auth 구독 확인이 무시된다). Auth 갈래를 추가한다** — 실패해도 연결을
+끊을 이유는 아니다(쓰기는 구독과 무관하게 이미 나가 있다), 로그만 남긴다:
 ```swift
-        guard let reply = PairingClient.parse(data) else { return }
-        if reply.ok, let token = reply.token {
+        if characteristic.uuid == MirrorUUIDs.auth {
+            if let error {
+                NSLog("Auth 구독 실패: \(error)")
+            }
+            return
+        }
+        guard characteristic.uuid == MirrorUUIDs.snapshot else { return }
+        // (이하 기존 snapshot 처리 그대로)
+```
+
+**2e. `didUpdateValueFor` — 지금은 `characteristic.uuid == MirrorUUIDs.snapshot` 이 아니면
+무조건 조기 반환해서 Auth notify 가 여기 도달하지 못한다.** 맨 앞에 Auth 갈래를 추가한다:
+```swift
+        if characteristic.uuid == MirrorUUIDs.auth {
+            handleAuthReply(characteristic.value ?? Data())
+            return
+        }
+        // (이하 기존 snapshot 가드 `guard characteristic.uuid == MirrorUUIDs.snapshot ...` 그대로)
+```
+
+**2f. `handleAuthReply` — 새 private 메서드.** 원문의 분기는 **`Nonce` 응답을 서명 없이
+토큰을 지우는 코드로 잘못 연결**돼 있었다(주석은 "서명해 답한다" 인데 실제로는 서명을
+안 함). `reply.nonce` 를 **가장 먼저** 확인해야 한다 — `Nonce` 는 `ok:false` 라서 다른
+`ok:false` 갈래(Denied/Rejected/AwaitingCode)와 섞이면 안 된다. `Authorized`(재인증 성공,
+`ok:true` 인데 `token` 은 없음)와 `Granted`(최초 인가, `ok:true`+`token`)도 서로 다른
+동작이다 — 전자는 이미 있는 토큰을 유지, 후자만 새로 저장한다:
+```swift
+    private func handleAuthReply(_ data: Data) {
+        guard let peripheral, let authCh = authCharacteristic,
+              let snapshotCh = snapshotCharacteristic,
+              let reply = PairingClient.parse(data) else { return }
+
+        if let nonce = reply.nonce {
+            // AUTH 요청에 대한 응답 — 저장된 토큰으로 서명해 되돌린다.
+            guard let token = TokenStore.load(),
+                  let proof = PairingClient.proofFrame(token: token, nonce: nonce) else {
+                TokenStore.clear()
+                stateSubject.send(.needsPairing)
+                peripheral.writeValue(PairingClient.helloFrame(), for: authCh, type: .withResponse)
+                return
+            }
+            peripheral.writeValue(proof, for: authCh, type: .withResponse)
+        } else if reply.ok, let token = reply.token {
+            // 최초 코드 인가 성공.
             TokenStore.save(token)
             peripheral.setNotifyValue(true, for: snapshotCh)   // 여기서 비로소 데이터가 흐른다
+        } else if reply.ok {
+            // 재인증(PROOF) 성공 — 되돌릴 토큰이 없다(스펙 5.1). 이미 Keychain 에 있는 걸 쓴다.
+            peripheral.setNotifyValue(true, for: snapshotCh)
         } else if let left = reply.left {
             stateSubject.send(.pairingFailed(left: left))
         } else if reply.awaiting == "code" {
             stateSubject.send(.needsPairing)
         } else {
-            // 논스를 받았으면 서명해 답한다. 서명이 거부되면 저장된 토큰이 폐기된 것이므로
+            // Rejected — PROOF 가 틀렸다(저장된 토큰이 Mac 에서 폐기됐을 가능성). 토큰을
             // 지우고 코드 페어링으로 되돌아간다.
             TokenStore.clear()
+            stateSubject.send(.needsPairing)
             peripheral.writeValue(PairingClient.helloFrame(), for: authCh, type: .withResponse)
         }
+    }
 ```
 
-`submitPairingCode(_:)` 를 공개한다:
+**2g. `submitPairingCode(_:)` 를 공개한다:**
 ```swift
     public func submitPairingCode(_ code: String) {
-        guard let p = peripheral, let ch = authCharacteristic else { return }
-        p.writeValue(PairingClient.codeFrame(code), for: ch, type: .withResponse)
+        guard let peripheral, let authCh = authCharacteristic else { return }
+        peripheral.writeValue(PairingClient.codeFrame(code), for: authCh, type: .withResponse)
     }
 ```
 
@@ -1588,7 +1672,12 @@ Expected: 전부 통과, BUILD SUCCEEDED
 - Mac Devices 탭에 6자리 코드가 뜨고 120초 뒤 사라진다
 - iPhone 에 코드 입력 화면이 뜨고, 맞으면 화면이 흐르기 시작한다
 - 틀린 코드를 넣으면 남은 횟수가 줄고, 5회 소진 시 다시 시도해야 한다
-- 앱을 껐다 켜도 코드 입력 없이 바로 연결된다
+- **앱을 껐다 켜도 코드 입력 없이 바로 연결된다.** 이 항목이 `TokenStore`(Task 6)의
+  Keychain 왕복을 실제로 검증하는 유일한 경로다 — 시뮬레이터 유닛 테스트는 호스트 앱이
+  없어 `errSecMissingEntitlement` 로 막혀 있고(`testTokenStoreRoundTrip` 은 `XCTSkip`),
+  이 항목이 통과해야 비로소 Keychain 저장·복원이 실기기에서 실제로 동작함이 확인된다.
+- Mac 에서 개별 기기 "해제" 를 누르면 그 iPhone 만 다시 코드를 요구하고, 다른 페어링된
+  기기(있다면)는 계속 연결 상태를 유지한다
 - Mac 에서 "전체 해제" 를 누르면 iPhone 이 다시 코드를 요구한다
 
 - [ ] **Step 6: 커밋한다**
