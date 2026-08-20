@@ -58,8 +58,20 @@ impl BleBridge {
             }
         } else {
             self.peripheral.stop();
+            // peripheral 이 완전히 내려가므로 authorized_targets 스테일 문제는 없지만,
+            // PairingManager.authorized 는 이 호출 없이는 그대로 남는다 — 그러면 다시
+            // 공유를 켰을 때 didUnsubscribeFromCharacteristic 이 온 적 없는 central 이
+            // 여전히 인가된 것으로 표시된다(전체 브랜치 리뷰 I-2).
+            self.pairing.end_all_sessions();
         }
         Ok(())
+    }
+
+    /// 블루투스 전원이 꺼졌을 때 호출한다. `set_enabled(false)` 와 같은 이유로
+    /// 세션 인가를 정리해야 한다 — `PowerOff` 는 `did_unsubscribe` 를 거치지
+    /// 않으므로 그러지 않으면 인가가 실제 연결보다 오래 살아남는다.
+    pub fn end_all_sessions(&mut self) {
+        self.pairing.end_all_sessions();
     }
 
     /// 스냅샷 틱마다 호출한다. 게이트·구독자·직렬화·청킹을 모두 여기서 판단한다.
@@ -262,6 +274,33 @@ mod tests {
     }
 
     #[test]
+    fn set_enabled_false_drops_session_authorization_but_keeps_the_token() {
+        // BleBridge::set_enabled(false) 가 실제로 end_all_sessions 를 부르는지 —
+        // PairingManager 유닛 테스트는 그 함수 자체만 검증하고 이 배선은 안 본다.
+        let (mut b, fake) = bridge();
+        b.set_enabled(true).unwrap();
+        fake.set_subscribers(vec![Subscriber {
+            id: CentralId("A".into()),
+            max_notify_len: 185,
+        }]);
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, "A", now);
+        assert!(b.paired_peers()[0].connected, "인가 직후에는 연결됨이어야 한다");
+
+        b.set_enabled(false).unwrap();
+
+        assert!(
+            !b.paired_peers()[0].connected,
+            "공유를 끄면 didUnsubscribe 없이도 즉시 연결됨 표시가 내려가야 한다(I-2)"
+        );
+        assert_eq!(
+            b.paired_peers().len(),
+            1,
+            "세션 인가만 지워야 한다 — 저장된 페어링(토큰) 자체는 남아야 한다"
+        );
+    }
+
+    #[test]
     fn does_nothing_while_disabled() {
         let (mut b, fake) = bridge();
         fake.set_subscribers(vec![Subscriber {
@@ -370,9 +409,19 @@ mod tests {
         assert_eq!(fake.taken_frames().len(), 1);
 
         // 껐다 켜면 내용이 그대로여도 다시 보내야 한다 — iOS 는 재구독 직후 화면이 비어 있다.
+        // 공유를 끄면 세션 인가도 함께 지워지므로(전체 브랜치 리뷰 I-2 —
+        // end_all_sessions), 다시 켠 뒤에는 재인가가 먼저 필요하다. 실제로는
+        // 저장된 토큰으로 AUTH→PROOF 가 자동으로 일어나지만, 여기서는 코드
+        // 페어링으로 같은 효과(다시 인가됨)를 낸다.
         b.set_enabled(false).unwrap();
         b.set_enabled(true).unwrap();
-        b.on_snapshot(&content, t0 + Duration::from_millis(1100));
+        let t1 = t0 + Duration::from_millis(1100);
+        fake.set_subscribers(vec![Subscriber {
+            id: CentralId("A".into()),
+            max_notify_len: 185,
+        }]);
+        authorize(&mut b, "A", t1);
+        b.on_snapshot(&content, t1);
         assert_eq!(
             fake.taken_frames().len(),
             1,

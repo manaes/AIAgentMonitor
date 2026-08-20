@@ -662,6 +662,11 @@ pub fn run() {
                                 }
                                 ble::peripheral::PeripheralEvent::PoweredOff => {
                                     h.advertising.store(false, Ordering::Relaxed);
+                                    // 전원이 꺼지면 didUnsubscribeFromCharacteristic 이 오지 않아
+                                    // 세션 인가가 실제 연결보다 오래 살아남는다(전체 브랜치
+                                    // 리뷰 I-2) — 기기 목록의 "연결됨" 배지가 계속 거짓말하고,
+                                    // 전원을 반복해서 껐다 켤 때마다 죽은 central id 가 쌓인다.
+                                    h.bridge.lock().await.end_all_sessions();
                                 }
                                 ble::peripheral::PeripheralEvent::Error(e) => {
                                     h.advertising.store(false, Ordering::Relaxed);

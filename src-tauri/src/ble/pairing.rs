@@ -293,6 +293,17 @@ impl PairingManager {
         dropped.into_iter().map(CentralId).collect()
     }
 
+    /// 세션 인가만 전부 지운다 — `revoke_all` 과 달리 저장된 토큰(`tokens`)은
+    /// 남긴다. 공유를 끄거나(`set_enabled(false)`) 블루투스 전원이 꺼지면
+    /// `end_session` 을 부르는 `did_unsubscribe`/`Disconnected` 콜백이 오지
+    /// 않아 `authorized` 가 실제 연결보다 오래 살아남는다 — 기기 목록의
+    /// `연결됨` 배지가 계속 거짓말을 하고, 전원을 반복해서 껐다 켤 때마다
+    /// 죽은 central id 가 쌓인다(전체 브랜치 리뷰 I-2). 재시작 없이 다시
+    /// 공유를 켜면 같은 토큰으로 즉시 재인가되므로 사용자 경험은 그대로다.
+    pub fn end_all_sessions(&mut self) {
+        self.authorized.clear();
+    }
+
     /// 화면에 표시할 코드. 만료됐으면 None — UI 가 따로 만료를 계산하지
     /// 않게 한다.
     pub fn visible_code(&self, now: SystemTime) -> Option<String> {
@@ -883,6 +894,36 @@ mod tests {
         m.revoke_token(&token_a);
         assert!(!m.is_authorized(&id("A")));
         assert!(m.is_authorized(&id("B")), "다른 토큰으로 인가된 세션은 영향받지 않아야 한다");
+    }
+
+    #[test]
+    fn end_all_sessions_drops_authorization_but_keeps_tokens() {
+        let mut m = PairingManager::new();
+        let code_a = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token } = m.handle(&id("A"), AuthRequest::Code(code_a), t(1001))
+        else {
+            panic!()
+        };
+        assert!(m.is_authorized(&id("A")));
+
+        m.end_all_sessions();
+
+        assert!(!m.is_authorized(&id("A")), "공유를 끄면 세션 인가는 즉시 내려가야 한다");
+        assert_eq!(
+            m.issued_peers().len(),
+            1,
+            "저장된 토큰은 남아야 한다 — 다시 공유를 켜면 같은 토큰으로 재인가된다"
+        );
+
+        // 재인가 확인: 저장된 토큰으로 다시 붙으면(AUTH→PROOF) 통과해야 한다.
+        let AuthReply::Nonce { nonce } = m.handle(&id("A"), AuthRequest::Auth, t(1002)) else {
+            panic!()
+        };
+        let proof = compute_proof(&token, &nonce);
+        assert_eq!(
+            m.handle(&id("A"), AuthRequest::Proof(proof), t(1003)),
+            AuthReply::Authorized
+        );
     }
 
     #[test]
