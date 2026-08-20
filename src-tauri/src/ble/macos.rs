@@ -94,6 +94,13 @@ impl MainState {
         sub_ids.filter(|id| allowed.contains(id)).collect()
     }
 
+    /// `revoke_targets` 의 실제 결정 로직. `targets_for` 와 같은 이유로 순수
+    /// 함수로 뽑아둔다 — `authorized_targets` 는 평범한 `Vec<String>` 이라
+    /// CoreBluetooth 객체 없이도 이 필터링 자체를 테스트할 수 있다.
+    fn without_revoked(targets: Vec<String>, revoked: &[String]) -> Vec<String> {
+        targets.into_iter().filter(|id| !revoked.contains(id)).collect()
+    }
+
     /// 큐에 쌓인 청크를 가능한 만큼 내보낸다. 대상은 `authorized_targets` 로
     /// 좁힌다 — 같은 특성을 구독했더라도 인가되지 않은 central 은 제외한다
     /// (스펙 5.1: 인가된 central 에만 notify).
@@ -487,7 +494,7 @@ impl BlePeripheral for MacPeripheral {
         with_delegate(&self.app, move |d| {
             let mut st = d.ivars().borrow_mut();
             for targets in st.authorized_targets.values_mut() {
-                targets.retain(|id| !ids.contains(id));
+                *targets = MainState::without_revoked(std::mem::take(targets), &ids);
             }
         });
     }
@@ -514,6 +521,23 @@ mod targets_for_tests {
         // 아무도 대상이 아니어야 한다 — fail-closed.
         let subs = vec!["A".to_string()];
         assert_eq!(MainState::targets_for(subs.into_iter(), &[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn without_revoked_drops_only_the_given_ids() {
+        let targets = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let revoked = vec!["B".to_string()];
+        assert_eq!(
+            MainState::without_revoked(targets, &revoked),
+            vec!["A".to_string(), "C".to_string()]
+        );
+    }
+
+    #[test]
+    fn without_revoked_is_a_noop_when_nothing_matches() {
+        let targets = vec!["A".to_string()];
+        let revoked = vec!["ZZZ".to_string()];
+        assert_eq!(MainState::without_revoked(targets, &revoked), vec!["A".to_string()]);
     }
 
     #[test]

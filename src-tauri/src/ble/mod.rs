@@ -541,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn unpair_peer_and_unpair_all_also_revoke_pump_targets() {
+    fn unpair_all_also_revokes_pump_targets() {
         let (mut b, fake) = bridge();
         b.set_enabled(true).unwrap();
         fake.set_subscribers(vec![Subscriber {
@@ -554,6 +554,28 @@ mod tests {
         fake.taken_frames();
 
         b.unpair_all();
+
+        assert_eq!(fake.taken_revocations(), vec![CentralId("A".into())]);
+    }
+
+    /// 재검토가 지적했다: 이름은 "unpair_peer 와 unpair_all 둘 다" 였지만
+    /// 본문은 unpair_all 만 불렀다 — unpair_peer 의 revoke_targets 배선은
+    /// 어떤 테스트로도 지켜지지 않고 있었다.
+    #[test]
+    fn unpair_peer_also_revokes_pump_targets() {
+        let (mut b, fake) = bridge();
+        b.set_enabled(true).unwrap();
+        fake.set_subscribers(vec![Subscriber {
+            id: CentralId("A".into()),
+            max_notify_len: 185,
+        }]);
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, "A", now);
+        b.on_snapshot(&snap(1.0, 1000), now);
+        fake.taken_frames();
+
+        let peer_id = b.paired_peers()[0].peer_id.clone();
+        b.unpair_peer(&peer_id);
 
         assert_eq!(fake.taken_revocations(), vec![CentralId("A".into())]);
     }
