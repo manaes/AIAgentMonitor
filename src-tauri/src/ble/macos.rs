@@ -211,7 +211,32 @@ define_class!(
             let id = central_id(central);
             let mut st = self.ivars().borrow_mut();
             st.subs.remove(&id);
-            let _ = st.events.send(PeripheralEvent::Unsubscribed(CentralId(id)));
+            let _ = st.events.send(PeripheralEvent::Unsubscribed(CentralId(id.clone())));
+            // 인가는 연결 단위다 — 링크가 끊기면 그 central 의 인가도 즉시 지워야
+            // 한다(BleBridge.forget_central 이 이 이벤트를 받아 처리한다).
+            let _ = st.events.send(PeripheralEvent::Disconnected(CentralId(id)));
+        }
+
+        #[unsafe(method(peripheralManager:didReceiveWriteRequests:))]
+        fn did_receive_writes(&self, mgr: &CBPeripheralManager, requests: &NSArray<CBATTRequest>) {
+            for i in 0..requests.count() {
+                let req = requests.objectAtIndex(i);
+                let central = unsafe { req.central() };
+                let data = unsafe { req.value() }
+                    .map(|d| d.to_vec())
+                    .unwrap_or_default();
+                let _ = self.ivars().borrow().events.send(PeripheralEvent::AuthWrite {
+                    central: CentralId(central_id(&central)),
+                    data,
+                });
+            }
+            // 응답하지 않으면 iOS 쪽 write 가 타임아웃된다. 해석(코드 검증 등)은
+            // 이 파일의 일이 아니므로, 여기서는 항상 성공으로 응답만 한다.
+            if requests.count() > 0 {
+                unsafe {
+                    mgr.respondToRequest_withResult(&requests.objectAtIndex(0), CBATTError::Success)
+                };
+            }
         }
 
         #[unsafe(method(peripheralManagerIsReadyToUpdateSubscribers:))]
@@ -243,15 +268,27 @@ impl Delegate {
                 CBAttributePermissions::Readable,
             )
         };
+        // Auth 는 central 이 쓰고(Write) Mac 이 답한다(Notify) — HELLO/CODE/AUTH/PROOF 를
+        // 받고, 논스·인가 결과를 그 central 에만 되돌려준다(notify_auth).
+        let auth_ch: Retained<CBMutableCharacteristic> = unsafe {
+            CBMutableCharacteristic::initWithType_properties_value_permissions(
+                CBMutableCharacteristic::alloc(),
+                &uuid(CharId::Auth.uuid()),
+                CBCharacteristicProperties::Write | CBCharacteristicProperties::Notify,
+                None,
+                CBAttributePermissions::Writeable,
+            )
+        };
         let svc: Retained<CBMutableService> = unsafe {
             CBMutableService::initWithType_primary(CBMutableService::alloc(), &uuid(SERVICE_UUID), true)
         };
-        let chars = NSArray::from_slice(&[&*snapshot_ch]);
+        let chars = NSArray::from_slice(&[&*snapshot_ch, &*auth_ch]);
         unsafe { svc.setCharacteristics(Some(&Retained::cast_unchecked(chars))) };
-        self.ivars()
-            .borrow_mut()
-            .chars
-            .insert(CharId::Snapshot.uuid(), snapshot_ch);
+        {
+            let mut st = self.ivars().borrow_mut();
+            st.chars.insert(CharId::Snapshot.uuid(), snapshot_ch);
+            st.chars.insert(CharId::Auth.uuid(), auth_ch);
+        }
         // 전원 재순환(제어 센터 블루투스 off→on)이나 재개 때 동일 SERVICE_UUID 가 GATT DB 에
         // 중복 등록되면 iOS 가 낡은 서비스에 바인딩해 영구히 데이터가 흐르지 않는다.
         // 비어 있어도 무해하므로 무조건 먼저 비운다.
