@@ -674,6 +674,13 @@ pub fn run() {
                                     if let Some(tokens) = saved {
                                         let path = ble::peers::PeerStore::path();
                                         if let Err(e) = ble::peers::PeerStore::save_to(&path, &tokens) {
+                                            // ble_unpair 류는 Result 로 프론트에 실패를 알리지만, 이
+                                            // 경로는 사용자 커맨드가 아니라 이벤트 루프라 그 통로가
+                                            // 없다 — PeripheralEvent::Error 와 같은 방식으로
+                                            // last_error 에 실어야 사용자가 알 수 있다(tracing 출력은
+                                            // 이 앱에서 전부 유실된다).
+                                            *h.last_error.lock().unwrap() =
+                                                Some(format!("페어링 토큰 저장 실패: {e}"));
                                             tracing::error!(%e, "ble-peers.json 저장 실패");
                                         }
                                     }
