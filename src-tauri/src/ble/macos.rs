@@ -82,6 +82,18 @@ struct MainState {
 }
 
 impl MainState {
+    /// `pump()` 이 실제로 보낼 대상만 골라내는 결정 로직. `CBCentral`/
+    /// `CBPeripheralManager` 를 전혀 필요로 하지 않는 순수 함수로 뽑아둔 이유는,
+    /// 이 파일의 나머지는 실제 CoreBluetooth 객체가 있어야만 돌아가서
+    /// `#[cfg(test)]` 로 묶을 수 없기 때문이다 — 라운드 2가 고친 누출(인가
+    /// 필터가 추상화 계층에서만 걸리고 실기기 전송 경로는 구독자 전원에게
+    /// 보내던 문제)이 바로 "실제 동작이 테스트 사각지대" 였다. 대상 선정
+    /// 로직 자체는 문자열 집합 연산일 뿐이므로 이렇게 분리하면 그 사각지대가
+    /// 남지 않는다.
+    fn targets_for(sub_ids: impl Iterator<Item = String>, allowed: &[String]) -> Vec<String> {
+        sub_ids.filter(|id| allowed.contains(id)).collect()
+    }
+
     /// 큐에 쌓인 청크를 가능한 만큼 내보낸다. 대상은 `authorized_targets` 로
     /// 좁힌다 — 같은 특성을 구독했더라도 인가되지 않은 central 은 제외한다
     /// (스펙 5.1: 인가된 central 에만 notify).
@@ -92,11 +104,10 @@ impl MainState {
         };
         let empty = Vec::new();
         let allowed = self.authorized_targets.get(ch_uuid).unwrap_or(&empty);
-        let centrals: Vec<Retained<CBCentral>> = self
-            .subs
+        let target_ids = Self::targets_for(self.subs.keys().cloned(), allowed);
+        let centrals: Vec<Retained<CBCentral>> = target_ids
             .iter()
-            .filter(|(id, _)| allowed.contains(id))
-            .map(|(_, (c, _))| c.clone())
+            .filter_map(|id| self.subs.get(id).map(|(c, _)| c.clone()))
             .collect();
         if centrals.is_empty() {
             return;
@@ -428,5 +439,38 @@ impl BlePeripheral for MacPeripheral {
                 mgr.updateValue_forCharacteristic_onSubscribedCentrals(&data, &ch, Some(&targets))
             };
         });
+    }
+}
+
+#[cfg(test)]
+mod targets_for_tests {
+    use super::MainState;
+
+    #[test]
+    fn excludes_a_subscriber_that_is_not_authorized() {
+        let subs = vec!["AUTHORIZED".to_string(), "EAVESDROPPER".to_string()];
+        let allowed = vec!["AUTHORIZED".to_string()];
+        assert_eq!(
+            MainState::targets_for(subs.into_iter(), &allowed),
+            vec!["AUTHORIZED".to_string()]
+        );
+    }
+
+    #[test]
+    fn sends_to_nobody_when_authorized_targets_is_still_empty() {
+        // authorized_targets 가 아직 한 번도 채워지지 않았을 때(HashMap::get 이
+        // None 을 주고 pump() 는 빈 슬라이스로 대체한다). 구독자가 있어도
+        // 아무도 대상이 아니어야 한다 — fail-closed.
+        let subs = vec!["A".to_string()];
+        assert_eq!(MainState::targets_for(subs.into_iter(), &[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn includes_every_authorized_subscriber() {
+        let subs = vec!["A".to_string(), "B".to_string()];
+        let allowed = vec!["A".to_string(), "B".to_string()];
+        let mut got = MainState::targets_for(subs.into_iter(), &allowed);
+        got.sort();
+        assert_eq!(got, vec!["A".to_string(), "B".to_string()]);
     }
 }
