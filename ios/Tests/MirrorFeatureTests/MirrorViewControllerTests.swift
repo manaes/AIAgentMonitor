@@ -163,4 +163,35 @@ final class MirrorViewControllerTests: XCTestCase {
         XCTAssertNotNil(first)
         XCTAssertNotEqual(first, later, "같은 스냅샷이라도 now 가 흐르면 카운트다운이 줄어야 한다")
     }
+
+    // MARK: - 페어링 시트 present/dismiss 결정 (전체 브랜치 리뷰 I-3)
+
+    /// `present`/`dismiss` 자체(UIKit)는 호스트 없는 로직 테스트 번들에서 신뢰성 있게
+    /// 검증하기 어렵다 — 그래서 `pairingAction(for:)` 을 순수 함수로 뽑아 그 결정만 고정한다.
+    func testPairingSheetPresentsWhenCodeIsNeeded() {
+        XCTAssertEqual(
+            MirrorViewController.pairingAction(for: .needsPairing),
+            .present(attemptsRemaining: nil)
+        )
+        XCTAssertEqual(
+            MirrorViewController.pairingAction(for: .pairingFailed(left: 3)),
+            .present(attemptsRemaining: 3)
+        )
+    }
+
+    /// 시트가 떠 있는 동안 연결이 어떤 이유로든 끊기면 닫혀야 한다 — 안 그러면
+    /// `isModalInPresentation = true` 인 시트 뒤에 상태 라벨이 가려진 채 사용자가
+    /// 이유를 알 방법 없이 갇힌다(전체 브랜치 리뷰 I-3, 실제로 발견된 결함).
+    func testPairingSheetDismissesOnAnyDisconnectionReason() {
+        for state: ConnectionState in [
+            .streaming, .disconnected(reason: "아무 이유"), .bluetoothOff, .idle, .versionMismatch,
+        ] {
+            XCTAssertEqual(MirrorViewController.pairingAction(for: state), .dismiss, "\(state) 는 닫혀야 한다")
+        }
+    }
+
+    func testPairingSheetIgnoresTransientConnectionStates() {
+        XCTAssertEqual(MirrorViewController.pairingAction(for: .scanning), .none)
+        XCTAssertEqual(MirrorViewController.pairingAction(for: .connecting), .none)
+    }
 }

@@ -181,19 +181,42 @@ public final class MirrorViewController: UIViewController {
         return claude + codex + others
     }
 
-    /// 페어링이 필요한 상태(코드 대기·시도 실패)면 화면을 띄우고, 연결이 완성되면
-    /// (streaming) 닫는다. 다른 상태(연결 중·끊김 등)는 이 화면과 무관하므로
-    /// 손대지 않는다 — 예를 들어 연결이 끊겨도 이미 페어링된 기기라면 곧바로
-    /// 재인증(AUTH→PROOF)이 시도되므로 페어링 화면을 다시 띄우면 안 된다.
-    private func updatePairingPresentation(for state: ConnectionState) {
+    /// `updatePairingPresentation` 이 실제로 UIKit 을 부르기 전에 거치는 순수 결정.
+    /// `present`/`dismiss` 는 호스트 없는 로직 테스트 번들에서 신뢰성 있게 검증하기
+    /// 어렵지만(macOS `pump()`/`targets_for` 때와 같은 사각지대), 어떤 상태가 present/
+    /// dismiss/무시로 이어지는지는 CoreBluetooth·UIKit 없이 그대로 테스트할 수 있다.
+    enum PairingPresentationAction: Equatable {
+        case present(attemptsRemaining: Int?)
+        case dismiss
+        case none
+    }
+
+    /// 페어링이 필요한 상태(코드 대기·시도 실패)면 띄우고, 연결이 완성돼도(streaming),
+    /// 그 사이 연결이 끊겨도(연결 끊김·블루투스 꺼짐·대기·버전 불일치) 닫는다 —
+    /// 전체 브랜치 리뷰 I-3: 시트가 떠 있는 동안 Mac 이 공유를 끄거나 범위를
+    /// 벗어나면, 시트는 `isModalInPresentation = true` 라 스와이프로도 못 닫히고
+    /// 뒤에 가려진 상태 라벨도 안 보여서 사용자가 이유를 알 방법이 없었다.
+    /// 재연결되면 필요할 때 다시 뜬다(`.needsPairing`/`.pairingFailed` 재도달).
+    static func pairingAction(for state: ConnectionState) -> PairingPresentationAction {
         switch state {
         case .needsPairing:
-            presentPairingIfNeeded(attemptsRemaining: nil)
+            return .present(attemptsRemaining: nil)
         case .pairingFailed(let left):
-            presentPairingIfNeeded(attemptsRemaining: left)
-        case .streaming:
+            return .present(attemptsRemaining: left)
+        case .streaming, .disconnected, .bluetoothOff, .idle, .versionMismatch:
+            return .dismiss
+        case .scanning, .connecting:
+            return .none
+        }
+    }
+
+    private func updatePairingPresentation(for state: ConnectionState) {
+        switch Self.pairingAction(for: state) {
+        case .present(let attemptsRemaining):
+            presentPairingIfNeeded(attemptsRemaining: attemptsRemaining)
+        case .dismiss:
             dismissPairingIfPresented()
-        default:
+        case .none:
             break
         }
     }

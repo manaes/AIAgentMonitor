@@ -4,7 +4,7 @@ import CryptoKit
 /// Mac 의 `src-tauri/src/ble/pairing.rs` 가 해석하는 형식과 정확히 맞춰야 한다.
 /// 프레임은 평문이고 짧다 — 이 채널로 오가는 것은 코드와 토큰뿐이다.
 ///
-/// 실제로 나가는 다섯 모양(정본, 개정 참고): `{"ok":false,"await":"code"}`,
+/// 실제로 나가는 여섯 모양(정본, 개정 참고): `{"ok":false,"await":"code"}`,
 /// `{"ok":false,"nonce":"<hex>"}`, `{"ok":true}`(재인증 성공, 토큰 없음),
 /// `{"ok":true,"token":"<hex>"}`(최초 인가), `{"ok":false,"left":<n>}`, `{"ok":false}`.
 public struct AuthReplyPayload: Decodable, Equatable, Sendable {

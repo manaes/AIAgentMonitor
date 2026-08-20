@@ -62,7 +62,9 @@ pub enum AuthRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthReply {
-    /// 창이 열려 있고 이 central 에 바인딩됐다는 응답. 코드 자체는 담지
+    /// 창이 열려 있다는 응답. 창에는 소유자가 없다(스펙 5.1) — 이 응답을
+    /// 받았다고 해서 그 central 에 창이 묶이는 것은 아니며, 창이 열려 있는
+    /// 동안에는 어느 central 이든 CODE: 를 제출할 수 있다. 코드 자체는 담지
     /// 않는다 — 코드는 오직 `begin_pairing` 을 통해 로컬(Mac UI)로만 전달된다.
     AwaitingCode,
     /// `CODE:` 성공 시에만 쓴다 — 새로 발급된 토큰을 실제로 전달해야 하는

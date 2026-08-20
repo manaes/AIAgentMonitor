@@ -335,9 +335,15 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
             // AUTH 요청에 대한 응답 — 저장된 토큰으로 서명해 되돌린다.
             guard let token = TokenStore.load(),
                   let proof = PairingClient.proofFrame(token: token, nonce: nonce) else {
+                // 토큰이 없거나 서명을 못 만들었다 — 코드 페어링으로 되돌아간다.
+                // 여기서 HELLO 를 자동으로 다시 쓰지 않는다(전체 브랜치 리뷰 C-1) —
+                // 창이 안 열려 있으면 Mac 은 이것도 Rejected 로 답하고, 아래 else
+                // 갈래가 그걸 또 HELLO 로 되돌리면 연결이 끊길 때까지 멈추지 않는
+                // write/notify 루프가 된다. 사용자가 [확인] 으로 코드를 제출하면
+                // submitPairingCode 가 CODE: 를 직접 쓴다 — HELLO 없이도 통과한다
+                // (pairing.rs: code_without_prior_hello_still_grants).
                 TokenStore.clear()
                 stateSubject.send(.needsPairing)
-                peripheral.writeValue(PairingClient.helloFrame(), for: authCh, type: .withResponse)
                 return
             }
             peripheral.writeValue(proof, for: authCh, type: .withResponse)
@@ -358,11 +364,15 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         } else if reply.awaiting == "code" {
             stateSubject.send(.needsPairing)
         } else {
-            // Rejected — PROOF 가 틀렸다(저장된 토큰이 Mac 에서 폐기됐을 가능성). 토큰을
-            // 지우고 코드 페어링으로 되돌아간다.
+            // Rejected — Mac 은 이 응답 하나로 네 가지 경우를 전부 가리킨다: 창이 안
+            // 열려 있는 HELLO, 시도가 소진된 HELLO/CODE, 또는 PROOF 실패. 어느
+            // 경우든 토큰을 지우고 코드 페어링을 기다린다. **여기서 HELLO 를 자동으로
+            // 다시 쓰지 않는다** — 창이 안 열려 있으면 재전송도 다시 Rejected 를
+            // 받고, 그게 다시 이 갈래로 와서 또 HELLO 를 쓰는 무한 루프가 된다
+            // (전체 브랜치 리뷰 C-1 — 실제로 확인된 결함이었다). 사용자가 코드를
+            // 제출하면 submitPairingCode 가 CODE: 를 직접 쓴다.
             TokenStore.clear()
             stateSubject.send(.needsPairing)
-            peripheral.writeValue(PairingClient.helloFrame(), for: authCh, type: .withResponse)
         }
     }
 }

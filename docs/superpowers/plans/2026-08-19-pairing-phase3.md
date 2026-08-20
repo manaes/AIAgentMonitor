@@ -1233,10 +1233,10 @@ git commit -m "feat(ble): 페어링 코드 표시와 기기 해제 UI 추가"
 ## Task 6: iOS 페어링 프로토콜과 Keychain
 
 > **개정 (2026-08-20).** 이 태스크는 Task 1 의 챌린지-응답 전환(HMAC 재인증) 이전에 쓰였습니다.
-> 실제 `BleBridge::handle_auth`(`src-tauri/src/ble/mod.rs`)가 내보내는 JSON 은 다섯 모양이고,
+> 실제 `BleBridge::handle_auth`(`src-tauri/src/ble/mod.rs`)가 내보내는 JSON 은 여섯 모양이고,
 > 그중 `{"ok":false,"nonce":"<hex>"}` 가 아래 `AuthReplyPayload` 정의에 **빠져 있었습니다** —
 > 이게 없으면 재인증(`AUTH`→`PROOF`) 흐름 자체를 만들 수 없습니다. 아래 Step 1·3 을 고쳤으니
-> 그대로 쓰세요. 실제로 나가는 다섯 모양(정본):
+> 그대로 쓰세요. 실제로 나가는 여섯 모양(정본):
 > - `AwaitingCode` → `{"ok":false,"await":"code"}`
 > - `Nonce{nonce}` → `{"ok":false,"nonce":"<hex>"}` ← **원래 브리프에 없었다**
 > - `Authorized`(재인증 성공, 필드 없음) → `{"ok":true}` ← **원래 브리프에 없었다**
@@ -1374,7 +1374,7 @@ import CryptoKit
 /// Mac 의 `src-tauri/src/ble/pairing.rs` 가 해석하는 형식과 정확히 맞춰야 한다.
 /// 프레임은 평문이고 짧다 — 이 채널로 오가는 것은 코드와 토큰뿐이다.
 ///
-/// 실제로 나가는 다섯 모양(정본, 개정 참고): `{"ok":false,"await":"code"}`,
+/// 실제로 나가는 여섯 모양(정본, 개정 참고): `{"ok":false,"await":"code"}`,
 /// `{"ok":false,"nonce":"<hex>"}`, `{"ok":true}`(재인증 성공, 토큰 없음),
 /// `{"ok":true,"token":"<hex>"}`(최초 인가), `{"ok":false,"left":<n>}`, `{"ok":false}`.
 public struct AuthReplyPayload: Decodable, Equatable, Sendable {
