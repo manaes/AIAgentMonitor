@@ -27,6 +27,10 @@ public final class MirrorViewController: UIViewController {
     private var cancellables = Set<AnyCancellable>()
     private var tick: Timer?
     private var latest: MirrorSnapshot?
+    /// 페어링이 필요한 동안(needsPairing/pairingFailed) modal 로 띄워둔 화면.
+    /// nil 이 아니면 이미 떠 있다는 뜻 — 상태가 반복해서 같은 갈래로 와도 다시
+    /// present 하지 않고 남은 시도 문구만 갱신한다.
+    private weak var pairingViewController: PairingViewController?
 
     private let statusLabel = UILabel()
     private let scrollView = UIScrollView()
@@ -109,7 +113,10 @@ public final class MirrorViewController: UIViewController {
 
         client.state
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.statusLabel.text = $0.label }
+            .sink { [weak self] state in
+                self?.statusLabel.text = state.label
+                self?.updatePairingPresentation(for: state)
+            }
             .store(in: &cancellables)
 
         client.snapshots
@@ -172,5 +179,42 @@ public final class MirrorViewController: UIViewController {
         let codex = agents.filter { $0.kind == .codex }
         let others = agents.filter { $0.kind != .claude && $0.kind != .codex }
         return claude + codex + others
+    }
+
+    /// 페어링이 필요한 상태(코드 대기·시도 실패)면 화면을 띄우고, 연결이 완성되면
+    /// (streaming) 닫는다. 다른 상태(연결 중·끊김 등)는 이 화면과 무관하므로
+    /// 손대지 않는다 — 예를 들어 연결이 끊겨도 이미 페어링된 기기라면 곧바로
+    /// 재인증(AUTH→PROOF)이 시도되므로 페어링 화면을 다시 띄우면 안 된다.
+    private func updatePairingPresentation(for state: ConnectionState) {
+        switch state {
+        case .needsPairing:
+            presentPairingIfNeeded(attemptsRemaining: nil)
+        case .pairingFailed(let left):
+            presentPairingIfNeeded(attemptsRemaining: left)
+        case .streaming:
+            dismissPairingIfPresented()
+        default:
+            break
+        }
+    }
+
+    private func presentPairingIfNeeded(attemptsRemaining: Int?) {
+        if let existing = pairingViewController {
+            existing.setAttemptsRemaining(attemptsRemaining)
+            return
+        }
+        let vc = PairingViewController()
+        vc.setAttemptsRemaining(attemptsRemaining)
+        vc.onSubmit = { [weak client] code in client?.submitPairingCode(code) }
+        vc.modalPresentationStyle = .formSheet
+        vc.isModalInPresentation = true
+        pairingViewController = vc
+        present(vc, animated: true)
+    }
+
+    private func dismissPairingIfPresented() {
+        guard pairingViewController != nil else { return }
+        pairingViewController = nil
+        dismiss(animated: true)
     }
 }

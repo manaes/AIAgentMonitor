@@ -30,4 +30,15 @@ final class ConnectionStateTests: XCTestCase {
     func testVersionMismatchIsDistinctFromDisconnected() {
         XCTAssertEqual(ConnectionState.versionMismatch.label, "앱 업데이트 필요 · 프로토콜 버전 불일치")
     }
+
+    /// 3단계: 페어링 창이 아직 안 열렸거나(HELLO 응답) 저장된 토큰이 거부됐을 때.
+    func testNeedsPairingIsDistinctFromDisconnected() {
+        XCTAssertEqual(ConnectionState.needsPairing.label, "페어링 필요 · Mac 화면의 6자리 코드를 입력하세요")
+    }
+
+    /// 3단계: 코드를 틀렸을 때 남은 시도를 그대로 보여준다 — 창에 소유자가 없다는
+    /// 설계의 방어 근거(스펙 5.1)가 화면에서도 관측 가능해야 한다.
+    func testPairingFailedShowsRemainingAttempts() {
+        XCTAssertEqual(ConnectionState.pairingFailed(left: 3).label, "코드가 틀렸습니다 · 3회 남음")
+    }
 }

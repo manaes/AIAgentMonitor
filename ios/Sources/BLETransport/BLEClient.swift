@@ -12,6 +12,11 @@ public final class BLEClient: NSObject {
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
     private var reassembler = FrameReassembler()
+    /// 인가 후에야 구독한다 — 그 전에 구독하면 미인가 상태에서도 데이터가 요청되는
+    /// 모양이 되어 스펙 5.1 의 "인가된 central 에만 notify" 전제와 어긋난다.
+    private var snapshotCharacteristic: CBCharacteristic?
+    /// HELLO/CODE/AUTH/PROOF 쓰기와 재연결에 계속 쓴다.
+    private var authCharacteristic: CBCharacteristic?
     /// 사용자가 `start()`/`stop()` 중 어느 쪽을 마지막으로 불렀는지. `stop()` 으로 인한
     /// 연쇄 콜백(didDisconnectPeripheral 등)이 다시 스캔을 시작하지 않도록 막는 데 쓴다.
     private var wantsRunning = false
@@ -56,6 +61,14 @@ public final class BLEClient: NSObject {
         }
         peripheral = nil
         stateSubject.send(.idle)
+    }
+
+    /// 사용자가 페어링 화면에서 6자리 코드를 입력하고 확인을 눌렀을 때 호출한다.
+    /// 코드 자체는 이 파일이 만들거나 검증하지 않는다 — 이미 열려 있는 Mac 쪽 창에
+    /// 제출할 뿐이다(창을 여는 것은 여전히 Mac 사용자 제스처 전용이다, 스펙 5.1).
+    public func submitPairingCode(_ code: String) {
+        guard let peripheral, let authCh = authCharacteristic else { return }
+        peripheral.writeValue(PairingClient.codeFrame(code), for: authCh, type: .withResponse)
     }
 
     /// 스캔을 (다시) 시작하는 유일한 경로. 재연결마다 이전 연결에서 시작된
@@ -214,7 +227,7 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
             central?.cancelPeripheralConnection(peripheral)
             return
         }
-        peripheral.discoverCharacteristics([MirrorUUIDs.snapshot], for: service)
+        peripheral.discoverCharacteristics([MirrorUUIDs.snapshot, MirrorUUIDs.auth], for: service)
     }
 
     public func peripheral(
@@ -227,12 +240,21 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
             central?.cancelPeripheralConnection(peripheral)
             return
         }
-        guard let ch = service.characteristics?.first(where: { $0.uuid == MirrorUUIDs.snapshot }) else {
-            stateSubject.send(.disconnected(reason: "Snapshot 특성을 찾지 못함"))
+        guard let snapshotCh = service.characteristics?.first(where: { $0.uuid == MirrorUUIDs.snapshot }),
+              let authCh = service.characteristics?.first(where: { $0.uuid == MirrorUUIDs.auth }) else {
+            stateSubject.send(.disconnected(reason: "필수 특성을 찾지 못함"))
             central?.cancelPeripheralConnection(peripheral)
             return
         }
-        peripheral.setNotifyValue(true, for: ch)
+        snapshotCharacteristic = snapshotCh
+        authCharacteristic = authCh
+        peripheral.setNotifyValue(true, for: authCh)
+        if let token = TokenStore.load() {
+            // 토큰 자체는 보내지 않는다. 논스를 받아 서명해 답한다.
+            peripheral.writeValue(PairingClient.authFrame(), for: authCh, type: .withResponse)
+        } else {
+            peripheral.writeValue(PairingClient.helloFrame(), for: authCh, type: .withResponse)
+        }
     }
 
     public func peripheral(
@@ -240,6 +262,12 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         didUpdateNotificationStateFor characteristic: CBCharacteristic,
         error: Error?
     ) {
+        if characteristic.uuid == MirrorUUIDs.auth {
+            if let error {
+                NSLog("Auth 구독 실패: \(error)")
+            }
+            return
+        }
         guard characteristic.uuid == MirrorUUIDs.snapshot else { return }
         if let error {
             stateSubject.send(.disconnected(reason: "구독 실패 · \(error.localizedDescription)"))
@@ -265,6 +293,10 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         // 버전 불일치로 이미 종료를 결정했다면, 정리 중에 큐에 남아 있던 프레임이
         // 뒤늦게 도착해도 재조립/디코딩을 다시 돌리지 않는다.
         guard stateSubject.value != .versionMismatch else { return }
+        if characteristic.uuid == MirrorUUIDs.auth {
+            handleAuthReply(characteristic.value ?? Data())
+            return
+        }
         guard characteristic.uuid == MirrorUUIDs.snapshot, let data = characteristic.value else { return }
         guard let message = reassembler.push(data) else { return }
 
@@ -287,6 +319,50 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         } catch {
             // 디코딩 실패는 연결을 끊을 사유가 아니다. 다음 프레임에서 회복될 수 있다.
             NSLog("스냅샷 디코딩 실패: \(error)")
+        }
+    }
+
+    /// Auth 특성 notify 를 해석한다. `reply.nonce` 를 가장 먼저 확인해야 한다 —
+    /// `Nonce` 응답은 `ok:false` 라서 다른 `ok:false` 갈래(Denied/Rejected/
+    /// AwaitingCode)와 섞이면 안 된다. `Granted`(최초 인가, 토큰 저장)와
+    /// `Authorized`(재인증 성공, 토큰 없음, 저장 안 함)도 서로 다른 동작이다.
+    private func handleAuthReply(_ data: Data) {
+        guard let peripheral, let authCh = authCharacteristic,
+              let snapshotCh = snapshotCharacteristic,
+              let reply = PairingClient.parse(data) else { return }
+
+        if let nonce = reply.nonce {
+            // AUTH 요청에 대한 응답 — 저장된 토큰으로 서명해 되돌린다.
+            guard let token = TokenStore.load(),
+                  let proof = PairingClient.proofFrame(token: token, nonce: nonce) else {
+                TokenStore.clear()
+                stateSubject.send(.needsPairing)
+                peripheral.writeValue(PairingClient.helloFrame(), for: authCh, type: .withResponse)
+                return
+            }
+            peripheral.writeValue(proof, for: authCh, type: .withResponse)
+        } else if reply.ok, let token = reply.token {
+            // 최초 코드 인가 성공. 저장이 실패해도(디스크 꽉 참 등) 스트리밍은
+            // 계속한다 — 지금 세션은 인가된 상태다. 다만 다음 재연결부터는 저장된
+            // 토큰이 없어 코드를 다시 요구하게 되므로 로그를 남긴다(TokenStore.save
+            // 가 이제 SecItemAdd 결과를 그대로 돌려준다, Task 6 리뷰 반영).
+            if !TokenStore.save(token) {
+                NSLog("페어링 토큰 저장 실패 — 다음 재연결부터 코드를 다시 요구합니다")
+            }
+            peripheral.setNotifyValue(true, for: snapshotCh)   // 여기서 비로소 데이터가 흐른다
+        } else if reply.ok {
+            // 재인증(PROOF) 성공 — 되돌릴 토큰이 없다(스펙 5.1). 이미 Keychain 에 있는 걸 쓴다.
+            peripheral.setNotifyValue(true, for: snapshotCh)
+        } else if let left = reply.left {
+            stateSubject.send(.pairingFailed(left: left))
+        } else if reply.awaiting == "code" {
+            stateSubject.send(.needsPairing)
+        } else {
+            // Rejected — PROOF 가 틀렸다(저장된 토큰이 Mac 에서 폐기됐을 가능성). 토큰을
+            // 지우고 코드 페어링으로 되돌아간다.
+            TokenStore.clear()
+            stateSubject.send(.needsPairing)
+            peripheral.writeValue(PairingClient.helloFrame(), for: authCh, type: .withResponse)
         }
     }
 }
