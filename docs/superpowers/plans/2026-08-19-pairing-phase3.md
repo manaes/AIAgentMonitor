@@ -1617,8 +1617,13 @@ git commit -m "feat(ios): 페어링 프로토콜과 Keychain 토큰 보관소 �
             }
             peripheral.writeValue(proof, for: authCh, type: .withResponse)
         } else if reply.ok, let token = reply.token {
-            // 최초 코드 인가 성공.
-            TokenStore.save(token)
+            // 최초 코드 인가 성공. 저장이 실패해도(디스크 꽉 참 등) 스트리밍은
+            // 계속한다 — 지금 세션은 인가된 상태다. 다만 다음 재연결부터는 저장된
+            // 토큰이 없어 코드를 다시 요구하게 되므로 로그를 남긴다(TokenStore.save
+            // 가 이제 SecItemAdd 결과를 그대로 돌려준다, Task 6 리뷰 반영).
+            if !TokenStore.save(token) {
+                NSLog("페어링 토큰 저장 실패 — 다음 재연결부터 코드를 다시 요구합니다")
+            }
             peripheral.setNotifyValue(true, for: snapshotCh)   // 여기서 비로소 데이터가 흐른다
         } else if reply.ok {
             // 재인증(PROOF) 성공 — 되돌릴 토큰이 없다(스펙 5.1). 이미 Keychain 에 있는 걸 쓴다.
