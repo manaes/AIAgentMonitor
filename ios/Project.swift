@@ -24,7 +24,13 @@ func unitTests(_ name: String, for target: String) -> Target {
         deploymentTargets: iOS,
         sources: ["Tests/\(name)/**"],
         resources: ["../docs/ble-protocol/golden/**"],
-        dependencies: [.target(name: target)]
+        dependencies: [.target(name: target)],
+        // 실기기에서 테스트를 돌리려면 XCTest 번들도 서명이 필요하다 — App 과
+        // 같은 팀으로 맞추지 않으면 기기 빌드가 실패한다.
+        settings: .settings(base: [
+            "DEVELOPMENT_TEAM": "LC8PY3D283",
+            "CODE_SIGN_STYLE": "Automatic",
+        ])
     )
 }
 
@@ -72,7 +78,16 @@ let project = Project(
                 .target(name: "BLETransport"),
                 .target(name: "MirrorFeature"),
                 .external(name: "SnapKit"),
-            ]
+            ],
+            // 실기기 디버그 빌드에 매번 Xcode 에서 Team 을 고르지 않도록 고정한다.
+            // "Juwan Park" 이름으로 로컬에 팀이 두 개 있다(4Z3DSP9QUS / LC8PY3D283).
+            // ktkpsmobile@gmail.com 계정으로 Xcode 에 로그인한 뒤에는 LC8PY3D283 이
+            // Automatic 서명으로 Development 인증서를 즉석에서 발급받아 통과한다 —
+            // 실제로 확인된 쪽은 이 팀이다.
+            settings: .settings(base: [
+                "DEVELOPMENT_TEAM": "LC8PY3D283",
+                "CODE_SIGN_STYLE": "Automatic",
+            ])
         ),
     ],
     schemes: [
