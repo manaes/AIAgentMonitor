@@ -322,55 +322,84 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         }
     }
 
-    /// Auth 특성 notify 를 해석한다. `reply.nonce` 를 가장 먼저 확인해야 한다 —
-    /// `Nonce` 응답은 `ok:false` 라서 다른 `ok:false` 갈래(Denied/Rejected/
-    /// AwaitingCode)와 섞이면 안 된다. `Granted`(최초 인가, 토큰 저장)와
-    /// `Authorized`(재인증 성공, 토큰 없음, 저장 안 함)도 서로 다른 동작이다.
+    /// `handleAuthReply` 가 실제로 무엇을 할지 결정하는 순수 함수. `reply.nonce` 를
+    /// 가장 먼저 확인해야 한다 — `Nonce` 응답은 `ok:false` 라서 다른 `ok:false` 갈래
+    /// (Denied/Rejected/AwaitingCode)와 섞이면 안 된다. `Granted`(최초 인가, 토큰
+    /// 저장)와 `Authorized`(재인증 성공, 토큰 없음, 저장 안 함)도 서로 다른 동작이다.
+    ///
+    /// 이 결정을 `handleAuthReply` 본문에서 분리해둔 이유: 전체 브랜치 리뷰가 찾은
+    /// C-1(Rejected 를 HELLO 자동 재전송으로 잘못 연결해 무한 루프를 만든 버그)이
+    /// 5번의 개별 태스크 리뷰를 전부 통과한 직접 원인이, 이 분기가 `CBPeripheral`/
+    /// `CBCharacteristic` 을 직접 잡고 있어 호스트 없는 로직 테스트로 검증할 수
+    /// 없었다는 것이다(`macos.rs` 의 `targets_for`/`without_revoked` 와 같은 계열의
+    /// 사각지대). 결정만 뽑아내면 CoreBluetooth 없이 6가지 응답 전부를 고정할 수 있다.
+    enum AuthAction: Equatable {
+        /// AUTH 요청에 대한 응답 — 저장된 토큰으로 서명해 되돌려야 한다.
+        case signNonce(nonce: String)
+        /// 최초 코드 인가 성공 — 토큰을 저장하고 스트리밍을 시작한다.
+        case storeTokenAndSubscribe(token: String)
+        /// 재인증(PROOF) 성공 — 되돌릴 토큰이 없다(스펙 5.1). 그대로 스트리밍을 시작한다.
+        case subscribe
+        case failed(left: Int)
+        case awaitCode
+        /// Rejected — Mac 은 이 응답 하나로 네 가지 경우를 전부 가리킨다: 창이 안
+        /// 열려 있는 HELLO, 시도가 소진된 HELLO/CODE, 또는 PROOF 실패. **여기서
+        /// HELLO 를 자동으로 다시 쓰면 안 된다** — 창이 안 열려 있으면 재전송도
+        /// 다시 Rejected 를 받고, 그게 다시 여기로 와서 또 HELLO 를 쓰는 무한
+        /// 루프가 된다(C-1). 사용자가 코드를 제출하면 `submitPairingCode` 가
+        /// CODE: 를 직접 쓴다 — HELLO 없이도 통과한다
+        /// (pairing.rs: code_without_prior_hello_still_grants).
+        case resetAndAwaitCode
+    }
+
+    static func decide(_ reply: AuthReplyPayload) -> AuthAction {
+        if let nonce = reply.nonce {
+            return .signNonce(nonce: nonce)
+        } else if reply.ok, let token = reply.token {
+            return .storeTokenAndSubscribe(token: token)
+        } else if reply.ok {
+            return .subscribe
+        } else if let left = reply.left {
+            return .failed(left: left)
+        } else if reply.awaiting == "code" {
+            return .awaitCode
+        } else {
+            return .resetAndAwaitCode
+        }
+    }
+
     private func handleAuthReply(_ data: Data) {
         guard let peripheral, let authCh = authCharacteristic,
               let snapshotCh = snapshotCharacteristic,
               let reply = PairingClient.parse(data) else { return }
 
-        if let nonce = reply.nonce {
-            // AUTH 요청에 대한 응답 — 저장된 토큰으로 서명해 되돌린다.
+        switch Self.decide(reply) {
+        case .signNonce(let nonce):
             guard let token = TokenStore.load(),
                   let proof = PairingClient.proofFrame(token: token, nonce: nonce) else {
                 // 토큰이 없거나 서명을 못 만들었다 — 코드 페어링으로 되돌아간다.
-                // 여기서 HELLO 를 자동으로 다시 쓰지 않는다(전체 브랜치 리뷰 C-1) —
-                // 창이 안 열려 있으면 Mac 은 이것도 Rejected 로 답하고, 아래 else
-                // 갈래가 그걸 또 HELLO 로 되돌리면 연결이 끊길 때까지 멈추지 않는
-                // write/notify 루프가 된다. 사용자가 [확인] 으로 코드를 제출하면
-                // submitPairingCode 가 CODE: 를 직접 쓴다 — HELLO 없이도 통과한다
-                // (pairing.rs: code_without_prior_hello_still_grants).
+                // resetAndAwaitCode 와 마찬가지로 HELLO 를 자동으로 다시 쓰지 않는다.
                 TokenStore.clear()
                 stateSubject.send(.needsPairing)
                 return
             }
             peripheral.writeValue(proof, for: authCh, type: .withResponse)
-        } else if reply.ok, let token = reply.token {
-            // 최초 코드 인가 성공. 저장이 실패해도(디스크 꽉 참 등) 스트리밍은
-            // 계속한다 — 지금 세션은 인가된 상태다. 다만 다음 재연결부터는 저장된
-            // 토큰이 없어 코드를 다시 요구하게 되므로 로그를 남긴다(TokenStore.save
-            // 가 이제 SecItemAdd 결과를 그대로 돌려준다, Task 6 리뷰 반영).
+        case .storeTokenAndSubscribe(let token):
+            // 저장이 실패해도(디스크 꽉 참 등) 스트리밍은 계속한다 — 지금 세션은
+            // 인가된 상태다. 다만 다음 재연결부터는 저장된 토큰이 없어 코드를
+            // 다시 요구하게 되므로 로그를 남긴다(TokenStore.save 가 이제
+            // SecItemAdd 결과를 그대로 돌려준다, Task 6 리뷰 반영).
             if !TokenStore.save(token) {
                 NSLog("페어링 토큰 저장 실패 — 다음 재연결부터 코드를 다시 요구합니다")
             }
             peripheral.setNotifyValue(true, for: snapshotCh)   // 여기서 비로소 데이터가 흐른다
-        } else if reply.ok {
-            // 재인증(PROOF) 성공 — 되돌릴 토큰이 없다(스펙 5.1). 이미 Keychain 에 있는 걸 쓴다.
+        case .subscribe:
             peripheral.setNotifyValue(true, for: snapshotCh)
-        } else if let left = reply.left {
+        case .failed(let left):
             stateSubject.send(.pairingFailed(left: left))
-        } else if reply.awaiting == "code" {
+        case .awaitCode:
             stateSubject.send(.needsPairing)
-        } else {
-            // Rejected — Mac 은 이 응답 하나로 네 가지 경우를 전부 가리킨다: 창이 안
-            // 열려 있는 HELLO, 시도가 소진된 HELLO/CODE, 또는 PROOF 실패. 어느
-            // 경우든 토큰을 지우고 코드 페어링을 기다린다. **여기서 HELLO 를 자동으로
-            // 다시 쓰지 않는다** — 창이 안 열려 있으면 재전송도 다시 Rejected 를
-            // 받고, 그게 다시 이 갈래로 와서 또 HELLO 를 쓰는 무한 루프가 된다
-            // (전체 브랜치 리뷰 C-1 — 실제로 확인된 결함이었다). 사용자가 코드를
-            // 제출하면 submitPairingCode 가 CODE: 를 직접 쓴다.
+        case .resetAndAwaitCode:
             TokenStore.clear()
             stateSubject.send(.needsPairing)
         }
