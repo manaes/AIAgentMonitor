@@ -6,10 +6,33 @@
     store.initBle();
   });
 
+  // 초 단위 카운트다운 갱신. ble_status 이벤트는 BLE 활동이 있을 때만 발행되므로
+  // (전체 브랜치 리뷰 I-1), 백엔드가 준 절대 만료 시각(expires_at)을 이 로컬
+  // 시계로 재계산해야 근처에 기기가 없어도 카운트다운이 멈추지 않는다.
+  // AgentCard.svelte 의 quota_reset_at 카운트다운과 같은 패턴이다.
+  let nowSecs = $state(Math.floor(Date.now() / 1000));
+  onMount(() => {
+    const tick = setInterval(() => { nowSecs = Math.floor(Date.now() / 1000); }, 1_000);
+    return () => clearInterval(tick);
+  });
+
   let enabled = $derived(store.ble?.enabled ?? false);
   let peers = $derived(store.ble?.peers ?? []);
   let pairedPeers = $derived(store.ble?.paired_peers ?? []);
-  let pairingWindow = $derived(store.ble?.pairing_window ?? { kind: "closed" as const });
+  let backendPairingWindow = $derived(store.ble?.pairing_window ?? { kind: "closed" as const });
+  // 백엔드가 "열림" 이라고 말해도 로컬 시계로 계산한 만료 시각이 지났으면 이미
+  // 닫힌 것으로 취급한다 — 그러지 않으면 다음 BLE 활동이 올 때까지 만료된 코드가
+  // 계속 크게 표시되고 [페어링 시작] 버튼도 다시 나타나지 않는다(I-1).
+  let pairingWindow = $derived.by(() => {
+    const w = backendPairingWindow;
+    if (w.kind === "open" && w.expires_at - nowSecs <= 0) {
+      return { kind: "closed" as const };
+    }
+    return w;
+  });
+  let pairingSecondsLeft = $derived(
+    pairingWindow.kind === "open" ? Math.max(0, pairingWindow.expires_at - nowSecs) : 0
+  );
   // 토글 자체 실패(로컬)를 백엔드 last_error 보다 우선 표시한다 — 둘은 같은 오류 영역을 공유한다
   let shownError = $derived(store.bleActionError ?? store.ble?.last_error ?? null);
 
@@ -48,7 +71,7 @@
 
     {#if pairingWindow.kind === "open"}
       <div class="code-box">
-        <p class="code-label">iPhone 에 아래 6자리를 입력하세요 ({pairingWindow.seconds_left}초 남음)</p>
+        <p class="code-label">iPhone 에 아래 6자리를 입력하세요 ({pairingSecondsLeft}초 남음)</p>
         <p class="code">{pairingWindow.code}</p>
         <p class="subtle">시도 {pairingWindow.attempts_left}회 남음</p>
       </div>

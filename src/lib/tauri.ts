@@ -96,8 +96,11 @@ export type BleStatus = {
   last_error: string | null;
   // 페어링 창 상태. UI 가 만료와 시도 소진을 구분해 보여줘야 한다 —
   // 소진이 보인다는 것이 창에 소유자를 두지 않기로 한 근거의 절반이다(스펙 5.1).
+  // expires_at 은 절대 epoch 초다 — ble_status 이벤트가 BLE 활동이 있을 때만
+  // 발행되므로, 프론트가 이 값을 한 번만 받아 자체 타이머로 카운트다운을
+  // 계산해야 한다(AgentCard 의 quota_reset_at 과 같은 패턴).
   pairing_window:
-    | { kind: "open"; code: string; seconds_left: number; attempts_left: number }
+    | { kind: "open"; code: string; expires_at: number; attempts_left: number }
     | { kind: "exhausted" }
     | { kind: "closed" };
   paired_peers: { peer_id: string; paired_at: number; connected: boolean }[];

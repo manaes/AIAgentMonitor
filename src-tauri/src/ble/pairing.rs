@@ -38,7 +38,7 @@ use crate::ble::peripheral::CentralId;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -135,8 +135,13 @@ pub struct PairedPeer {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum PairingWindow {
-    /// 창이 열려 있다. UI 는 코드와 남은 초를 그린다.
-    Open { code: String, seconds_left: u64, attempts_left: u8 },
+    /// 창이 열려 있다. 만료 시각을 절대 epoch 초로 준다 — 프론트가 이 값을
+    /// 한 번만 받아 자체 타이머로 카운트다운을 계산해야, `ble_status` 이벤트가
+    /// (BLE 활동이 있을 때만 발행되므로) 뜸해도 화면이 멈추지 않는다(전체
+    /// 브랜치 리뷰 I-1 — `seconds_left` 스냅샷은 재계산 없이는 영원히 그
+    /// 값에 멈췄고, 만료돼도 화면이 계속 크게 표시되며 [페어링 시작] 버튼도
+    /// 다시 안 나타났다).
+    Open { code: String, expires_at: u64, attempts_left: u8 },
     /// 시도 5회가 모두 소진돼 닫혔다. 방해일 수 있으므로 만료와 구분해 보여준다.
     Exhausted,
     /// 열린 적 없거나 시간이 지나 닫혔다.
@@ -348,11 +353,13 @@ impl PairingManager {
         if p.attempts_left == 0 {
             return PairingWindow::Exhausted;
         }
-        let elapsed = now.duration_since(p.issued_at).unwrap_or_default();
-        let seconds_left = CODE_TTL.saturating_sub(elapsed).as_secs();
+        let expires_at = (p.issued_at + CODE_TTL)
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         PairingWindow::Open {
             code: p.code.clone(),
-            seconds_left,
+            expires_at,
             attempts_left: p.attempts_left,
         }
     }
@@ -1368,8 +1375,12 @@ mod tests {
             other => panic!("정상 창은 Open 이어야 한다: {other:?}"),
         }
         match m.pairing_window(t(1050)) {
-            PairingWindow::Open { seconds_left, .. } => {
-                assert!(seconds_left < CODE_TTL.as_secs(), "시간이 지나면 남은 초가 줄어야 한다");
+            PairingWindow::Open { expires_at, .. } => {
+                assert_eq!(
+                    expires_at,
+                    1000 + CODE_TTL.as_secs(),
+                    "만료 시각은 발급 시각 기준 절대값이라 조회 시점(now)이 지나도 변하지 않아야 한다"
+                );
             }
             other => panic!("아직 열려 있어야 한다: {other:?}"),
         }
@@ -1419,7 +1430,7 @@ mod tests {
     fn pairing_window_serializes_with_kind_tag() {
         let open = PairingWindow::Open {
             code: "123456".to_string(),
-            seconds_left: 90,
+            expires_at: 1_700_000_090,
             attempts_left: 5,
         };
         let json = serde_json::to_value(&open).unwrap();
@@ -1428,7 +1439,7 @@ mod tests {
             serde_json::json!({
                 "kind": "open",
                 "code": "123456",
-                "seconds_left": 90,
+                "expires_at": 1_700_000_090,
                 "attempts_left": 5,
             }),
             "실제 JSON: {json}"
