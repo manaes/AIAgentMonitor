@@ -1161,7 +1161,7 @@ central 목록은 로그·UI 용이다.
   /// 페어링 창 상태. UI 가 만료와 시도 소진을 구분해 보여줘야 한다 —
   /// 소진이 보인다는 것이 창에 소유자를 두지 않기로 한 근거의 절반이다(스펙 5.1).
   pairing_window:
-    | { kind: "open"; code: string; seconds_left: number; attempts_left: number }
+    | { kind: "open"; code: string; expires_at: number; attempts_left: number }
     | { kind: "exhausted" }
     | { kind: "closed" };
   paired_peers: { peer_id: string; paired_at: number; connected: boolean }[];
@@ -1185,7 +1185,7 @@ export async function bleUnpairAll(): Promise<void> {
 
   {#if store.ble?.pairing_window.kind === "open"}
     <div class="code-box">
-      <p class="code-label">iPhone 에 아래 6자리를 입력하세요 ({store.ble.pairing_window.seconds_left}초 남음)</p>
+      <p class="code-label">iPhone 에 아래 6자리를 입력하세요 ({store.ble.pairing_window.expires_at - Math.floor(Date.now()/1000)}초 남음(로컬에서 재계산, I-1))</p>
       <p class="code">{store.ble.pairing_window.code}</p>
       <p class="subtle">시도 {store.ble.pairing_window.attempts_left}회 남음</p>
     </div>
