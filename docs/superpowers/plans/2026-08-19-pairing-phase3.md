@@ -1232,14 +1232,30 @@ git commit -m "feat(ble): 페어링 코드 표시와 기기 해제 UI 추가"
 
 ## Task 6: iOS 페어링 프로토콜과 Keychain
 
+> **개정 (2026-08-20).** 이 태스크는 Task 1 의 챌린지-응답 전환(HMAC 재인증) 이전에 쓰였습니다.
+> 실제 `BleBridge::handle_auth`(`src-tauri/src/ble/mod.rs`)가 내보내는 JSON 은 다섯 모양이고,
+> 그중 `{"ok":false,"nonce":"<hex>"}` 가 아래 `AuthReplyPayload` 정의에 **빠져 있었습니다** —
+> 이게 없으면 재인증(`AUTH`→`PROOF`) 흐름 자체를 만들 수 없습니다. 아래 Step 1·3 을 고쳤으니
+> 그대로 쓰세요. 실제로 나가는 다섯 모양(정본):
+> - `AwaitingCode` → `{"ok":false,"await":"code"}`
+> - `Nonce{nonce}` → `{"ok":false,"nonce":"<hex>"}` ← **원래 브리프에 없었다**
+> - `Authorized`(재인증 성공, 필드 없음) → `{"ok":true}` ← **원래 브리프에 없었다**
+> - `Granted{token}`(최초 코드 인가 성공) → `{"ok":true,"token":"<hex>"}`
+> - `Denied{left}` → `{"ok":false,"left":<n>}`
+> - `Rejected` → `{"ok":false}`
+>
+> 또한 `PairingClient.swift` 원문 코드가 `CryptoKit` 을 쓰면서 `import CryptoKit` 이 빠져 있었고,
+> `Data(hexString:)` 를 **정의 없이** 참조하고 있었습니다(이 이니셜라이저는 이 코드베이스
+> 어디에도 없습니다 — 지금 확인했습니다). 둘 다 아래에 채워뒀습니다.
+
 **Files:**
 - Create: `ios/Sources/BLETransport/PairingClient.swift`
 - Create: `ios/Sources/BLETransport/TokenStore.swift`
 - Create: `ios/Tests/BLETransportTests/PairingClientTests.swift`
 
 **Interfaces:**
-- Consumes: 없음(순수) · Security.framework
-- Produces: `AuthReplyPayload` (Decodable: `ok: Bool`, `token: String?`, `left: Int?`, `awaiting: String?` ← JSON 키 `await`, `nonce: String?`), `PairingClient.helloFrame() -> Data`, `PairingClient.codeFrame(_ code: String) -> Data`, `PairingClient.authFrame() -> Data`, `PairingClient.proofFrame(token: String, nonce: String) -> Data?`, `PairingClient.parse(_ data: Data) -> AuthReplyPayload?`, `TokenStore.save(_ token: String)`, `TokenStore.load() -> String?`, `TokenStore.clear()`
+- Consumes: 없음(순수) · Security.framework · CryptoKit
+- Produces: `AuthReplyPayload` (Decodable: `ok: Bool`, `token: String?`, `left: Int?`, `awaiting: String?` ← JSON 키 `await`, `nonce: String?`), `PairingClient.helloFrame() -> Data`, `PairingClient.codeFrame(_ code: String) -> Data`, `PairingClient.authFrame() -> Data`, `PairingClient.proofFrame(token: String, nonce: String) -> Data?`, `PairingClient.parse(_ data: Data) -> AuthReplyPayload?`, `TokenStore.save(_ token: String)`, `TokenStore.load() -> String?`, `TokenStore.clear()`, `Data(hexString:)` (내부 헬퍼, `Wire` 또는 `BLETransport` 모듈에 둔다)
 
 > **`proofFrame` 은 HMAC-SHA256(key = 토큰 hex 를 디코드한 원시 바이트, msg = 논스 hex 를 디코드한
 > 원시 바이트) 을 소문자 hex 로 만든다.** hex 문자열의 UTF-8 바이트로 계산하면 안 된다 — 그러면
@@ -1303,6 +1319,39 @@ final class PairingClientTests: XCTestCase {
         TokenStore.clear()
         XCTAssertNil(TokenStore.load())
     }
+
+    /// 개정: 원래 브리프에 없던 케이스. 재인증 흐름의 두 번째 단계(AUTH 에 대한 응답) —
+    /// 이 필드가 없으면 PROOF 를 만들 논스를 얻을 방법이 없다.
+    func testParsesNonceChallenge() {
+        let d = Data(#"{"ok":false,"nonce":"7ac4e19b2d5f8067c3a1e9d4b6f02358"}"#.utf8)
+        let r = PairingClient.parse(d)
+        XCTAssertEqual(r?.ok, false)
+        XCTAssertEqual(r?.nonce, "7ac4e19b2d5f8067c3a1e9d4b6f02358")
+        XCTAssertNil(r?.token)
+    }
+
+    /// 개정: 원래 브리프에 없던 케이스. 재인증(PROOF) 성공 응답 — 최초 코드 인가(Granted)와
+    /// 달리 토큰을 다시 돌려주지 않는다(되돌릴 비밀이 없다, 스펙 5.1).
+    func testParsesReauthSuccessWithNoToken() {
+        let r = PairingClient.parse(Data(#"{"ok":true}"#.utf8))
+        XCTAssertEqual(r?.ok, true)
+        XCTAssertNil(r?.token)
+    }
+
+    /// 개정: Step 1 원문 docstring 이 "이 태스크의 테스트가 hmac-sample.json 을 읽어
+    /// 검증해야 한다" 고 말했지만 정작 그 테스트가 빠져 있었다. Rust 팀리드가 Python 으로
+    /// 독립 재계산해 이 파일의 proof 값과 일치를 확인해뒀다(golden, 94c5af7).
+    func testProofFrameMatchesGoldenVector() throws {
+        struct Golden: Decodable { let token: String; let nonce: String; let proof: String }
+        let url = try XCTUnwrap(
+            Bundle(for: Self.self).url(forResource: "hmac-sample", withExtension: "json"),
+            "골든 벡터가 테스트 번들에 없다"
+        )
+        let golden = try JSONDecoder().decode(Golden.self, from: Data(contentsOf: url))
+        let frame = try XCTUnwrap(PairingClient.proofFrame(token: golden.token, nonce: golden.nonce))
+        let text = try XCTUnwrap(String(data: frame, encoding: .utf8))
+        XCTAssertEqual(text, "PROOF:\(golden.proof)")
+    }
 }
 ```
 
@@ -1312,25 +1361,33 @@ Run:
 ```bash
 cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme BLETransportTests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' 2>&1 | tail -20
 ```
-Expected: FAIL — `cannot find 'PairingClient' in scope`
+Expected: FAIL — `cannot find 'PairingClient' in scope` (컴파일 실패도 이 단계에선 정상 —
+아직 `PairingClient.swift` 자체가 없다)
 
 - [ ] **Step 3: 최소 구현을 쓴다**
 
 `ios/Sources/BLETransport/PairingClient.swift`:
 ```swift
 import Foundation
+import CryptoKit
 
 /// Mac 의 `src-tauri/src/ble/pairing.rs` 가 해석하는 형식과 정확히 맞춰야 한다.
 /// 프레임은 평문이고 짧다 — 이 채널로 오가는 것은 코드와 토큰뿐이다.
+///
+/// 실제로 나가는 다섯 모양(정본, 개정 참고): `{"ok":false,"await":"code"}`,
+/// `{"ok":false,"nonce":"<hex>"}`, `{"ok":true}`(재인증 성공, 토큰 없음),
+/// `{"ok":true,"token":"<hex>"}`(최초 인가), `{"ok":false,"left":<n>}`, `{"ok":false}`.
 public struct AuthReplyPayload: Decodable, Equatable, Sendable {
     public let ok: Bool
     public let token: String?
     public let left: Int?
     /// Rust 가 보내는 키는 `await` 인데 Swift 예약어라 이름을 바꿔 받는다.
     public let awaiting: String?
+    /// 재인증 2단계(AUTH 응답)로 받는 논스. 이 값을 `proofFrame` 에 그대로 넘긴다.
+    public let nonce: String?
 
     private enum CodingKeys: String, CodingKey {
-        case ok, token, left
+        case ok, token, left, nonce
         case awaiting = "await"
     }
 }
@@ -1351,6 +1408,25 @@ public enum PairingClient {
 
     public static func parse(_ data: Data) -> AuthReplyPayload? {
         try? JSONDecoder().decode(AuthReplyPayload.self, from: data)
+    }
+}
+
+extension Data {
+    /// 소문자/대문자 hex 문자열을 원시 바이트로 디코드한다. 길이가 홀수이거나
+    /// hex 가 아닌 문자가 섞이면 nil — 여기서 패닉하면 안 된다(Rust 쪽
+    /// `hex_decode` 가 원격 패닉을 냈던 것과 같은 실수를 반복하지 않는다).
+    init?(hexString: String) {
+        guard hexString.count % 2 == 0 else { return nil }
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(hexString.count / 2)
+        var idx = hexString.startIndex
+        while idx < hexString.endIndex {
+            let next = hexString.index(idx, offsetBy: 2)
+            guard let byte = UInt8(hexString[idx..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            idx = next
+        }
+        self = Data(bytes)
     }
 }
 ```
@@ -1404,7 +1480,7 @@ Run:
 ```bash
 cd ios && tuist generate --no-open && xcodebuild test -workspace AIAgentMonitorMirror.xcworkspace -scheme BLETransportTests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' 2>&1 | grep -E "Executed|TEST"
 ```
-Expected: `Executed 19 tests, with 0 failures` (기존 12 + 7)
+Expected: `Executed 22 tests, with 0 failures` (기존 12 + 신규 10 — 개정으로 3개 늘었다)
 
 - [ ] **Step 5: 커밋한다**
 
