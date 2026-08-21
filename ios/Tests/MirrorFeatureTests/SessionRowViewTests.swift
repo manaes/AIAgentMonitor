@@ -17,7 +17,7 @@ final class SessionRowViewTests: XCTestCase {
                     kind: .claude, now: now)
         XCTAssertEqual(v.leftText, "Claude · foo claude-opus-5")
         XCTAssertEqual(v.rightText, "98 tok/s", "active 면 속도를 보여준다")
-        XCTAssertEqual(v.relativeText, "10s ago")
+        XCTAssertEqual(v.relativeText, "10초 전")
         XCTAssertEqual(v.dotColor, Palette.claudeDot)
     }
 
@@ -25,7 +25,7 @@ final class SessionRowViewTests: XCTestCase {
         let v = SessionRowView()
         v.configure(project: project(n: "bar", m: "m", r: 50, t: 999_900, s: 1),
                     kind: .claude, now: now)
-        XCTAssertEqual(v.rightText, "idle", "active 가 아니면 속도 대신 상태 단어")
+        XCTAssertEqual(v.rightText, "유휴", "active 가 아니면 속도 대신 상태 단어")
         XCTAssertEqual(v.dotColor, Palette.idleDot)
     }
 
@@ -33,7 +33,7 @@ final class SessionRowViewTests: XCTestCase {
         let v = SessionRowView()
         v.configure(project: project(n: "baz", m: "m", r: 0, t: 900_000, s: 2),
                     kind: .codex, now: now)
-        XCTAssertEqual(v.rightText, "dormant")
+        XCTAssertEqual(v.rightText, "휴면")
         XCTAssertEqual(v.dotColor, Palette.dormantDot, "dormant 는 에이전트 색이 아니라 회색")
     }
 
@@ -50,7 +50,7 @@ final class SessionRowViewTests: XCTestCase {
                     kind: .claude, now: now)
         XCTAssertEqual(v.rightFont, Typography.rate, "active 의 속도만 11pt semibold tabular")
 
-        for (status, word) in [(UInt8(1), "idle"), (UInt8(2), "dormant"), (UInt8(3), "unknown")] {
+        for (status, word) in [(UInt8(1), "유휴"), (UInt8(2), "휴면"), (UInt8(3), "알 수 없음")] {
             v.configure(project: project(n: "a", m: "m", r: 0, t: 999_990, s: status),
                         kind: .claude, now: now)
             XCTAssertEqual(v.rightText, word)
@@ -94,7 +94,7 @@ final class SessionRowViewTests: XCTestCase {
         let v = SessionRowView()
         v.configure(project: project(n: "quux", m: "m", r: 0, t: 900_000, s: 3),
                     kind: .claude, now: now)
-        XCTAssertEqual(v.rightText, "unknown", "unknown 을 dormant 로 잘못 표시하면 안 된다")
+        XCTAssertEqual(v.rightText, "알 수 없음", "unknown 을 dormant 로 잘못 표시하면 안 된다")
         XCTAssertEqual(v.dotColor, Palette.dormantDot)
     }
 

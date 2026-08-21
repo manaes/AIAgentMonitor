@@ -63,28 +63,28 @@ final class MirrorFormatTests: XCTestCase {
         XCTAssertEqual(MirrorFormat.tokensTotal(1_255_000), "1.25M")
     }
 
-    // MARK: relativeTime — relativeTime 와 동일 (영문 그대로)
+    // MARK: relativeTime — src/lib/format.ts 와 동일한 한글 표기
 
     func testRelativeTimeBuckets() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         func at(_ agoSecs: UInt64) -> String {
             MirrorFormat.relativeTime(1_000_000 - agoSecs, now: now)
         }
-        XCTAssertEqual(at(0), "just now")
-        XCTAssertEqual(at(4), "just now")
-        XCTAssertEqual(at(5), "5s ago")
-        XCTAssertEqual(at(59), "59s ago")
-        XCTAssertEqual(at(60), "1m ago")
-        XCTAssertEqual(at(3599), "59m ago")
-        XCTAssertEqual(at(3600), "1h ago")
-        XCTAssertEqual(at(7200), "2h ago")
+        XCTAssertEqual(at(0), "방금 전")
+        XCTAssertEqual(at(4), "방금 전")
+        XCTAssertEqual(at(5), "5초 전")
+        XCTAssertEqual(at(59), "59초 전")
+        XCTAssertEqual(at(60), "1분 전")
+        XCTAssertEqual(at(3599), "59분 전")
+        XCTAssertEqual(at(3600), "1시간 전")
+        XCTAssertEqual(at(7200), "2시간 전")
     }
 
     func testRelativeTimeFutureDoesNotUnderflow() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         XCTAssertEqual(
             MirrorFormat.relativeTime(1_000_050, now: now),
-            "just now",
+            "방금 전",
             "미래 시각이 와도 UInt64 언더플로로 크래시하면 안 된다"
         )
     }

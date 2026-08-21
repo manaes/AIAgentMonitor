@@ -22,10 +22,10 @@ export function formatTokensTotal(n: number): string {
 
 export function relativeTime(secsSinceEpoch: number): string {
   const elapsed = Math.floor(Date.now() / 1000) - secsSinceEpoch;
-  if (elapsed < 5) return "just now";
-  if (elapsed < 60) return `${elapsed}s ago`;
-  if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m ago`;
-  return `${Math.floor(elapsed / 3600)}h ago`;
+  if (elapsed < 5) return "방금 전";
+  if (elapsed < 60) return `${elapsed}초 전`;
+  if (elapsed < 3600) return `${Math.floor(elapsed / 60)}분 전`;
+  return `${Math.floor(elapsed / 3600)}시간 전`;
 }
 
 export function formatResetClock(secsSinceEpoch: number): string {

@@ -18,6 +18,12 @@
     if (agent === "antigravity") return "#388bfd";
     return "#ff9f0a";
   }
+
+  function statusLabel(status: string): string {
+    if (status === "idle") return "유휴";
+    if (status === "dormant") return "휴면";
+    return status;
+  }
 </script>
 
 <div class="list">
@@ -34,7 +40,7 @@
         {#if row.status === "active"}
           <span class="rate">{formatTokensPerSec(row.rate_tok_per_sec)} tok/s</span>
         {:else}
-          <span class="subtle">{row.status}</span>
+          <span class="subtle">{statusLabel(row.status)}</span>
         {/if}
         <span class="subtle">{relativeTime(row.last_event_at.secs_since_epoch)}</span>
       </span>

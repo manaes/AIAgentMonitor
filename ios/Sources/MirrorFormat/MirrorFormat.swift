@@ -85,15 +85,15 @@ public enum MirrorFormat {
         return toFixed(Double(n) / 1_000_000, 2) + "M"
     }
 
-    /// relativeTime: 원본이 영문이므로 영문 그대로 둔다(두 화면 일치가 목적).
+    /// relativeTime: `src/lib/format.ts` 와 동일한 한글 표기.
     public static func relativeTime(_ epochSecs: UInt64, now: Date) -> String {
         let nowSecs = UInt64(max(0, now.timeIntervalSince1970))
         // 미래 시각이 오면 UInt64 뺄셈이 언더플로하므로 0 으로 clamp 한다.
         let elapsed = nowSecs > epochSecs ? nowSecs - epochSecs : 0
-        if elapsed < 5 { return "just now" }
-        if elapsed < 60 { return "\(elapsed)s ago" }
-        if elapsed < 3600 { return "\(elapsed / 60)m ago" }
-        return "\(elapsed / 3600)h ago"
+        if elapsed < 5 { return "방금 전" }
+        if elapsed < 60 { return "\(elapsed)초 전" }
+        if elapsed < 3600 { return "\(elapsed / 60)분 전" }
+        return "\(elapsed / 3600)시간 전"
     }
 
     /// AgentCard.svelte 의 countdown 파생과 동일. 리셋 시각이 없으면 호출부가 nil 을 넘기지 않는다.

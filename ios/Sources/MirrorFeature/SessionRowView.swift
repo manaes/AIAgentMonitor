@@ -162,18 +162,18 @@ public final class SessionRowView: UIView {
             rightLabel.font = Typography.rate
             rightLabel.textColor = Palette.rate
         case .idle:
-            rightLabel.text = "idle"
+            rightLabel.text = "유휴"
             rightLabel.font = Typography.body
             rightLabel.textColor = Palette.subtle
         case .dormant:
-            rightLabel.text = "dormant"
+            rightLabel.text = "휴면"
             rightLabel.font = Typography.body
             rightLabel.textColor = Palette.subtle
         case .unknown:
             // Wire.ActivityStatusCode.unknown 은 "미래에 Rust 가 새 코드를 추가했을 때
             // dormant 로 조용히 뭉개지 않기 위한" 값(MirrorSnapshot.swift 주석 참고).
             // 그러니 여기서도 dormant 라고 잘못 표시하지 않고 있는 그대로 알린다.
-            rightLabel.text = "unknown"
+            rightLabel.text = "알 수 없음"
             rightLabel.font = Typography.body
             rightLabel.textColor = Palette.subtle
         }
