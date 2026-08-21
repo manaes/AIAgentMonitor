@@ -61,6 +61,7 @@ let project = Project(
             deploymentTargets: iOS,
             infoPlist: .extendingDefault(with: [
                 "UILaunchScreen": [:],
+                "CFBundleDisplayName": "AI Monitor",
                 "NSBluetoothAlwaysUsageDescription":
                     "Mac 의 AI Agent Monitor 와 연결해 모니터링 화면을 표시합니다.",
                 "UIApplicationSceneManifest": [
@@ -74,6 +75,7 @@ let project = Project(
                 ],
             ]),
             sources: ["Sources/App/**"],
+            resources: ["Sources/App/Resources/**"],
             dependencies: [
                 .target(name: "BLETransport"),
                 .target(name: "MirrorFeature"),
@@ -87,6 +89,7 @@ let project = Project(
             settings: .settings(base: [
                 "DEVELOPMENT_TEAM": "LC8PY3D283",
                 "CODE_SIGN_STYLE": "Automatic",
+                "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
             ])
         ),
     ],

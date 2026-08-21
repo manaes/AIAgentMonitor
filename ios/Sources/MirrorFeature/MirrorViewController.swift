@@ -11,11 +11,11 @@ import Wire
 /// **맥에는 있지만 여기에 의도적으로 옮기지 않은 것** (2단계 범위 밖 — 3단계에서
 /// "왜 빠졌지"를 다시 판단하지 않도록 여기에 적어 둔다):
 ///
-/// - **탭 바 (Sessions / Triggers / Devices)** — `Detail.svelte:36-48`. 맥은 에이전트
-///   카드와 세션 목록 사이에 탭 바를 그리지만 미러에는 없다. Triggers 는 BLE 전송
-///   경로 자체가 아직 없고(3단계), Devices 는 맥 전용 설정(BLE 공유 토글·권한)이라
-///   미러할 대상이 아니다. 남는 탭이 Sessions 하나뿐이면 탭 바는 아무 일도 하지
-///   않는 장식이 되므로 탭 바째로 생략하고 세션 목록만 직접 그린다.
+/// - **탭 바 (Sessions / Devices)** — `Detail.svelte:36-47`. 맥은 에이전트
+///   카드와 세션 목록 사이에 탭 바를 그리지만 미러에는 없다. Devices 는 맥 전용
+///   설정(BLE 공유 토글·권한)이라 미러할 대상이 아니다. 남는 탭이 Sessions
+///   하나뿐이면 탭 바는 아무 일도 하지 않는 장식이 되므로 탭 바째로 생략하고
+///   세션 목록만 직접 그린다.
 /// - **🔄 동기화 버튼** — `AgentCard.svelte:73-79`. 미러는 읽기 전용이라 맥의 상태를
 ///   바꾸는 조작을 두지 않는다.
 ///
@@ -75,13 +75,17 @@ public final class MirrorViewController: UIViewController {
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        title = "AI Agent Monitor"
-        // app.css:17 `.window-root { background: #1c1c1e }`.
-        view.backgroundColor = Palette.windowBackground
+        // 이 화면 하나뿐이라 네비게이션바(뒤로가기·타이틀 모두 안 씀)는 그냥 공간만
+        // 차지하는 장식이다 — 통째로 숨기고, 연결 상태는 예전처럼 화면 좌상단에
+        // 작은 라벨로 직접 그린다.
+        navigationController?.setNavigationBarHidden(true, animated: false)
 
         statusLabel.font = Typography.body
         statusLabel.textColor = Palette.subtle
         statusLabel.text = ConnectionState.idle.label
+
+        // app.css:17 `.window-root { background: #1c1c1e }`.
+        view.backgroundColor = Palette.windowBackground
 
         // Detail.svelte:70 `.window-root { gap: 12px }` — 에이전트 블록과 세션 목록
         // 사이 간격. 카드끼리의 간격(agentsStack)은 Detail.svelte:71 `.agents { gap: 8px }`
@@ -99,11 +103,11 @@ public final class MirrorViewController: UIViewController {
 
         statusLabel.snp.makeConstraints { make in
             make.top.equalTo(view.safeAreaLayoutGuide).offset(12)
-            make.leading.trailing.equalToSuperview().inset(16)
+            make.leading.equalTo(view.safeAreaLayoutGuide).offset(16)
         }
         scrollView.snp.makeConstraints { make in
             make.top.equalTo(statusLabel.snp.bottom).offset(12)
-            make.leading.trailing.equalToSuperview()
+            make.leading.trailing.equalTo(view.safeAreaLayoutGuide)
             make.bottom.equalTo(view.safeAreaLayoutGuide)
         }
         contentStack.snp.makeConstraints { make in
@@ -137,6 +141,24 @@ public final class MirrorViewController: UIViewController {
 
     deinit {
         tick?.invalidate()
+    }
+
+    public override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        updateAgentsLayout(for: view.bounds.size)
+    }
+
+    /// 가로모드에서는 카드 3개(Claude/Codex/Antigravity)가 한 줄에 나란히 보이도록
+    /// `agentsStack` 을 가로 축으로 바꾼다 — 세로모드처럼 쌓으면 화면 높이가 좁아진
+    /// 가로모드에서 스크롤 없이는 첫 카드조차 다 안 보인다. `scrollView` 가 이미
+    /// safeAreaLayoutGuide 에 물려 있어(노치·홈 인디케이터) 세 칸으로 나뉜 카드도
+    /// safe area 를 벗어나지 않는다.
+    private func updateAgentsLayout(for size: CGSize) {
+        let isLandscape = size.width > size.height
+        let axis: NSLayoutConstraint.Axis = isLandscape ? .horizontal : .vertical
+        guard agentsStack.axis != axis else { return }
+        agentsStack.axis = axis
+        agentsStack.distribution = isLandscape ? .fillEqually : .fill
     }
 
     /// 스냅샷 하나를 화면에 반영한다. 하위 세 뷰(`AgentCardView`·`SessionRowView`·
