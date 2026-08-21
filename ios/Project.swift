@@ -1,7 +1,10 @@
 import ProjectDescription
 
 let bundlePrefix = "com.dgitx.aiagentmonitor.mirror"
-let iOS: DeploymentTargets = .iOS("17.0")
+// iroh-ffi(IrohLib) SwiftPM 매니페스트가 iOS 17.5+ 를 요구해서 전체 배포
+// 타깃을 17.5로 올렸다(기존 17.0). 네트워크 전송 추가 이전에는 17.0으로
+// 충분했다 — IrohSpike 사전 스파이크에서 이 제약이 처음 드러났다.
+let iOS: DeploymentTargets = .iOS("17.5")
 
 func framework(_ name: String, deps: [TargetDependency] = []) -> Target {
     .target(
@@ -48,11 +51,14 @@ let project = Project(
         unitTests("DesignSystemTests", for: "DesignSystem"),
         framework("MirrorFeature", deps: [
             .target(name: "BLETransport"),
+            .target(name: "NetworkTransport"),
             .target(name: "DesignSystem"),
             .target(name: "MirrorFormat"),
             .external(name: "SnapKit"),
         ]),
         unitTests("MirrorFeatureTests", for: "MirrorFeature"),
+        framework("NetworkTransport", deps: [.target(name: "Wire"), .target(name: "BLETransport"), .external(name: "IrohLib")]),
+        unitTests("NetworkTransportTests", for: "NetworkTransport"),
         .target(
             name: "App",
             destinations: .iOS,
@@ -64,6 +70,8 @@ let project = Project(
                 "CFBundleDisplayName": "AI Monitor",
                 "NSBluetoothAlwaysUsageDescription":
                     "Mac 의 AI Agent Monitor 와 연결해 모니터링 화면을 표시합니다.",
+                "NSCameraUsageDescription":
+                    "Mac 화면에 뜬 페어링 QR 코드를 스캔해 네트워크로 연결합니다.",
                 "UIApplicationSceneManifest": [
                     "UIApplicationSupportsMultipleScenes": false,
                     "UISceneConfigurations": [
@@ -78,6 +86,7 @@ let project = Project(
             resources: ["Sources/App/Resources/**"],
             dependencies: [
                 .target(name: "BLETransport"),
+                .target(name: "NetworkTransport"),
                 .target(name: "MirrorFeature"),
                 .external(name: "SnapKit"),
             ],
@@ -121,6 +130,11 @@ let project = Project(
             name: "MirrorFeatureTests",
             buildAction: .buildAction(targets: [.target("MirrorFeatureTests")]),
             testAction: .targets([.testableTarget(target: .target("MirrorFeatureTests"))])
+        ),
+        .scheme(
+            name: "NetworkTransportTests",
+            buildAction: .buildAction(targets: [.target("NetworkTransportTests")]),
+            testAction: .targets([.testableTarget(target: .target("NetworkTransportTests"))])
         ),
     ]
 )

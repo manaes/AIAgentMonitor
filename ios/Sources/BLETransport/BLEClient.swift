@@ -333,7 +333,9 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
     /// `CBCharacteristic` 을 직접 잡고 있어 호스트 없는 로직 테스트로 검증할 수
     /// 없었다는 것이다(`macos.rs` 의 `targets_for`/`without_revoked` 와 같은 계열의
     /// 사각지대). 결정만 뽑아내면 CoreBluetooth 없이 6가지 응답 전부를 고정할 수 있다.
-    enum AuthAction: Equatable {
+    /// `NetworkClient`(다른 전송)도 같은 인증 상태 기계를 재사용한다 — 이 결정
+    /// 자체는 CoreBluetooth 와 무관하므로 `public`으로 노출해 모듈 경계를 넘긴다.
+    public enum AuthAction: Equatable {
         /// AUTH 요청에 대한 응답 — 저장된 토큰으로 서명해 되돌려야 한다.
         case signNonce(nonce: String)
         /// 최초 코드 인가 성공 — 토큰을 저장하고 스트리밍을 시작한다.
@@ -352,7 +354,7 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         case resetAndAwaitCode
     }
 
-    static func decide(_ reply: AuthReplyPayload) -> AuthAction {
+    public static func decide(_ reply: AuthReplyPayload) -> AuthAction {
         if let nonce = reply.nonce {
             return .signNonce(nonce: nonce)
         } else if reply.ok, let token = reply.token {

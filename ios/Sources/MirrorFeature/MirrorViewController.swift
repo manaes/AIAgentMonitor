@@ -1,6 +1,7 @@
 import BLETransport
 import Combine
 import DesignSystem
+import NetworkTransport
 import SnapKit
 import UIKit
 import Wire
@@ -23,16 +24,34 @@ import Wire
 @MainActor
 public final class MirrorViewController: UIViewController {
 
-    private let client: BLEClient
+    /// 연결 방식. 우상단 설정 버튼에서 사용자가 고른다 — 켜는 순간 BLE/네트워크
+    /// 중 하나를 고르는 macOS `DevicePanel` 의 "공유" 토글과 대칭이다.
+    public enum TransportKind: Equatable {
+        case ble
+        case network
+    }
+
+    private let bleClient: BLEClient
+    private let networkClient: NetworkClient
+    private var activeKind: TransportKind
+    private var client: any MirrorTransport {
+        switch activeKind {
+        case .ble: return bleClient
+        case .network: return networkClient
+        }
+    }
     private var cancellables = Set<AnyCancellable>()
     private var tick: Timer?
     private var latest: MirrorSnapshot?
     /// 페어링이 필요한 동안(needsPairing/pairingFailed) modal 로 띄워둔 화면.
     /// nil 이 아니면 이미 떠 있다는 뜻 — 상태가 반복해서 같은 갈래로 와도 다시
-    /// present 하지 않고 남은 시도 문구만 갱신한다.
+    /// present 하지 않고 남은 시도 문구만 갱신한다. 전송마다 다른 화면을 띄우므로
+    /// (BLE=코드 입력, 네트워크=QR 스캔) 각각 따로 추적한다.
     private weak var pairingViewController: PairingViewController?
+    private weak var qrScannerViewController: QRScannerViewController?
 
     private let statusLabel = UILabel()
+    private let settingsButton = UIButton(type: .system)
     private let scrollView = UIScrollView()
     private let contentStack = UIStackView()
     /// 카드 개수는 스냅샷에 실린 에이전트 수만큼이라 고정이 아니다. 세션 목록과
@@ -65,8 +84,10 @@ public final class MirrorViewController: UIViewController {
     public var sessionRowCount: Int { sessionList.rowCount }
     public func sessionRowText(at index: Int) -> String? { sessionList.rowText(at: index) }
 
-    public init(client: BLEClient) {
-        self.client = client
+    public init(bleClient: BLEClient, networkClient: NetworkClient, initialTransport: TransportKind = .ble) {
+        self.bleClient = bleClient
+        self.networkClient = networkClient
+        self.activeKind = initialTransport
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -84,6 +105,10 @@ public final class MirrorViewController: UIViewController {
         statusLabel.textColor = Palette.subtle
         statusLabel.text = ConnectionState.idle.label
 
+        settingsButton.setImage(UIImage(systemName: "gearshape"), for: .normal)
+        settingsButton.tintColor = Palette.subtle
+        settingsButton.addTarget(self, action: #selector(settingsTapped), for: .touchUpInside)
+
         // app.css:17 `.window-root { background: #1c1c1e }`.
         view.backgroundColor = Palette.windowBackground
 
@@ -97,6 +122,7 @@ public final class MirrorViewController: UIViewController {
         agentsStack.spacing = 8
 
         view.addSubview(statusLabel)
+        view.addSubview(settingsButton)
         view.addSubview(scrollView)
         scrollView.addSubview(contentStack)
         [agentsStack, sessionList].forEach(contentStack.addArrangedSubview)
@@ -104,6 +130,10 @@ public final class MirrorViewController: UIViewController {
         statusLabel.snp.makeConstraints { make in
             make.top.equalTo(view.safeAreaLayoutGuide).offset(12)
             make.leading.equalTo(view.safeAreaLayoutGuide).offset(16)
+        }
+        settingsButton.snp.makeConstraints { make in
+            make.centerY.equalTo(statusLabel)
+            make.trailing.equalTo(view.safeAreaLayoutGuide).offset(-16)
         }
         scrollView.snp.makeConstraints { make in
             make.top.equalTo(statusLabel.snp.bottom).offset(12)
@@ -115,20 +145,7 @@ public final class MirrorViewController: UIViewController {
             make.width.equalTo(scrollView).offset(-32)
         }
 
-        client.state
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] state in
-                self?.statusLabel.text = state.label
-                self?.updatePairingPresentation(for: state)
-            }
-            .store(in: &cancellables)
-
-        client.snapshots
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] snap in
-                self?.configure(snapshot: snap, now: Date())
-            }
-            .store(in: &cancellables)
+        bind(to: client)
 
         // 카운트다운과 상대 시각은 클라이언트가 계산하므로 추가 전송 없이 1초마다 다시 그린다.
         // 클로저가 self 를 약하게만 잡으므로 타이머가 컨트롤러의 수명을 늘리지 않는다.
@@ -141,6 +158,51 @@ public final class MirrorViewController: UIViewController {
 
     deinit {
         tick?.invalidate()
+    }
+
+    /// 현재 활성 전송의 퍼블리셔를 구독한다. 전송을 바꿀 때(`switchTransport`)
+    /// 이전 구독을 전부 걷어내고 다시 부른다 — `cancellables` 를 비우지 않으면
+    /// 옛 전송의 콜백이 새 전송과 함께 계속 화면을 건드린다.
+    private func bind(to transport: any MirrorTransport) {
+        cancellables.removeAll()
+        transport.state
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                self?.statusLabel.text = state.label
+                self?.updatePairingPresentation(for: state)
+            }
+            .store(in: &cancellables)
+
+        transport.snapshots
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] snap in
+                self?.configure(snapshot: snap, now: Date())
+            }
+            .store(in: &cancellables)
+    }
+
+    @objc private func settingsTapped() {
+        let sheet = UIAlertController(title: "연결 방식", message: nil, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "BLE" + (activeKind == .ble ? " ✓" : ""), style: .default) { [weak self] _ in
+            self?.switchTransport(to: .ble)
+        })
+        sheet.addAction(UIAlertAction(title: "네트워크" + (activeKind == .network ? " ✓" : ""), style: .default) { [weak self] _ in
+            self?.switchTransport(to: .network)
+        })
+        sheet.addAction(UIAlertAction(title: "취소", style: .cancel))
+        // iPad 는 액션시트를 팝오버로 띄우므로 앵커가 없으면 그 자리에서 크래시한다.
+        sheet.popoverPresentationController?.sourceView = settingsButton
+        sheet.popoverPresentationController?.sourceRect = settingsButton.bounds
+        present(sheet, animated: true)
+    }
+
+    private func switchTransport(to kind: TransportKind) {
+        guard kind != activeKind else { return }
+        client.stop()
+        dismissPairingIfPresented()
+        activeKind = kind
+        bind(to: client)
+        client.start()
     }
 
     public override func viewDidLayoutSubviews() {
@@ -244,22 +306,41 @@ public final class MirrorViewController: UIViewController {
     }
 
     private func presentPairingIfNeeded(attemptsRemaining: Int?) {
-        if let existing = pairingViewController {
-            existing.setAttemptsRemaining(attemptsRemaining)
-            return
+        switch activeKind {
+        case .ble:
+            if let existing = pairingViewController {
+                existing.setAttemptsRemaining(attemptsRemaining)
+                return
+            }
+            guard qrScannerViewController == nil else { return }
+            let vc = PairingViewController()
+            vc.setAttemptsRemaining(attemptsRemaining)
+            vc.onSubmit = { [weak bleClient] code in bleClient?.submitPairingCode(code) }
+            vc.modalPresentationStyle = .formSheet
+            vc.isModalInPresentation = true
+            pairingViewController = vc
+            present(vc, animated: true)
+        case .network:
+            // QR 은 스캔 한 번으로 코드까지 자동 제출하므로(NetworkClient.pair),
+            // 시도 소진(attemptsRemaining)이 와도 새 QR 을 다시 스캔하는 것 외에
+            // 화면에서 딱히 더 보여줄 게 없다 — 스캐너를 다시 띄운다.
+            guard pairingViewController == nil, qrScannerViewController == nil else { return }
+            let vc = QRScannerViewController()
+            vc.onScan = { [weak networkClient] payload in networkClient?.pair(qrPayload: payload) }
+            vc.modalPresentationStyle = .fullScreen
+            qrScannerViewController = vc
+            present(vc, animated: true)
         }
-        let vc = PairingViewController()
-        vc.setAttemptsRemaining(attemptsRemaining)
-        vc.onSubmit = { [weak client] code in client?.submitPairingCode(code) }
-        vc.modalPresentationStyle = .formSheet
-        vc.isModalInPresentation = true
-        pairingViewController = vc
-        present(vc, animated: true)
     }
 
     private func dismissPairingIfPresented() {
-        guard pairingViewController != nil else { return }
-        pairingViewController = nil
-        dismiss(animated: true)
+        if pairingViewController != nil {
+            pairingViewController = nil
+            dismiss(animated: true)
+        }
+        if qrScannerViewController != nil {
+            qrScannerViewController = nil
+            dismiss(animated: true)
+        }
     }
 }

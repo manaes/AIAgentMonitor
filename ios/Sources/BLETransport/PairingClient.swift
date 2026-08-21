@@ -41,10 +41,12 @@ public enum PairingClient {
     }
 }
 
-extension Data {
+public extension Data {
     /// 소문자/대문자 hex 문자열을 원시 바이트로 디코드한다. 길이가 홀수이거나
     /// hex 가 아닌 문자가 섞이면 nil — 여기서 패닉하면 안 된다(Rust 쪽
     /// `hex_decode` 가 원격 패닉을 냈던 것과 같은 실수를 반복하지 않는다).
+    /// `NetworkClient`(다른 모듈)도 QR 로 받은 EndpointId hex 를 디코드하는 데
+    /// 이걸 재사용한다.
     init?(hexString: String) {
         guard hexString.count % 2 == 0 else { return nil }
         var bytes = [UInt8]()

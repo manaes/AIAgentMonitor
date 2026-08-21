@@ -1,4 +1,5 @@
 import BLETransport
+import NetworkTransport
 import UIKit
 import Wire
 import XCTest
@@ -18,7 +19,7 @@ final class MirrorViewControllerTests: XCTestCase {
     }
 
     private func loaded() -> MirrorViewController {
-        let vc = MirrorViewController(client: BLEClient())
+        let vc = MirrorViewController(bleClient: BLEClient(), networkClient: NetworkClient())
         vc.loadViewIfNeeded()
         return vc
     }
