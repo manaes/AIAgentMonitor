@@ -8,14 +8,12 @@ pub const SERVICE_UUID: &str = "07A98A35-16C7-4BBA-A296-E28B78B7E683";
 pub const INFO_UUID: &str = "F494FC3B-ED50-4561-AADE-1A310C5732E6";
 pub const AUTH_UUID: &str = "1403603A-4C78-4899-A2B8-FDA198101900";
 pub const SNAPSHOT_UUID: &str = "0AE789AA-EF38-4A35-9E72-A7CD7AD995D5";
-pub const TRIGGERS_UUID: &str = "4F60A8C2-F181-4717-AEE3-07C4D7846597";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CharId {
     Info,
     Auth,
     Snapshot,
-    Triggers,
 }
 
 impl CharId {
@@ -24,7 +22,6 @@ impl CharId {
             CharId::Info => INFO_UUID,
             CharId::Auth => AUTH_UUID,
             CharId::Snapshot => SNAPSHOT_UUID,
-            CharId::Triggers => TRIGGERS_UUID,
         }
     }
 }
@@ -195,7 +192,6 @@ mod tests {
     fn uuids_match_spec() {
         assert_eq!(SERVICE_UUID, "07A98A35-16C7-4BBA-A296-E28B78B7E683");
         assert_eq!(SNAPSHOT_UUID, "0AE789AA-EF38-4A35-9E72-A7CD7AD995D5");
-        assert_eq!(TRIGGERS_UUID, "4F60A8C2-F181-4717-AEE3-07C4D7846597");
         assert_eq!(AUTH_UUID, "1403603A-4C78-4899-A2B8-FDA198101900");
         assert_eq!(INFO_UUID, "F494FC3B-ED50-4561-AADE-1A310C5732E6");
     }

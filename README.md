@@ -29,11 +29,6 @@
 - **Claude Code**: 앱 시작 시 및 10분마다 자동으로 `claude -p "ping"`을 내부 프록시(포트 4319) 경유로 실행해 Anthropic 서버가 응답 헤더로 보내는 5h/주간 사용률과 리셋 시각을 캡처합니다. 수동 동기화 버튼도 제공.
 - **Codex**: 세션 rollout JSONL의 `rate_limits` 필드에서 5h/주간 사용률과 리셋 시각을 자동으로 읽습니다.
 
-### ⏰ Anchor Trigger
-정해진 시각에 자동으로 가벼운 프롬프트를 발사해 5h quota window의 reset 타이밍을 생활 패턴(점심/퇴근)에 고정합니다.
-
-예) 08:00에 ping → 13:00/18:00에 reset
-
 ---
 
 ## 설치
@@ -57,7 +52,7 @@
 ### 기본 사용
 
 1. 앱 실행 → 상단 상태 바에 아이콘 표시
-2. **아이콘 클릭** → Detail 창 열기 (Sessions / Triggers 탭)
+2. **아이콘 클릭** → Detail 창 열기 (Sessions / Devices 탭)
 3. **우클릭** → Open Log Folder / Quit
 
 ### 사용량 자동 동기화
@@ -65,13 +60,6 @@
 앱이 시작되면 5초 후 자동으로 사용량을 동기화합니다. 이후 Claude를 사용하는 동안 10분마다 자동 갱신됩니다.
 
 즉시 갱신하려면 Detail 창 에이전트 카드의 **🔄 동기화** 버튼을 클릭하세요.
-
-### Anchor Trigger 사용
-
-1. Detail 창 → **Triggers** 탭
-2. **새 트리거 추가**: 에이전트 / 실행 시각(HH:MM) / 작업 디렉토리 / 프롬프트 입력
-3. 📁 버튼으로 폴더 선택 가능
-4. **▶ 지금 실행** 버튼으로 즉시 테스트
 
 ---
 
@@ -89,7 +77,7 @@
 
 ## 동작 원리 (아키텍처)
 
-**Tech Stack**: Tauri 2 · Rust (tokio, notify, rusqlite, axum, tokio-cron-scheduler) · Svelte 5 · TypeScript
+**Tech Stack**: Tauri 2 · Rust (tokio, notify, rusqlite, axum) · Svelte 5 · TypeScript
 
 ### 1. 시스템 토폴로지
 
@@ -107,10 +95,10 @@ graph TD
             Watch["수집<br/>watchers/claude.rs · codex.rs<br/>quota_proxy.rs (:4319)"]
             Agg["집계 aggregator/<br/>ring(10s EMA) + rotating(60×5분=5h)"]
             Emit["emitter.rs<br/>EmitGate (500ms · 해시 변경시만)"]
-            Sched["scheduler/ (cron 트리거)<br/>tray.rs · clock.rs"]
+            Tray["tray.rs · clock.rs"]
         end
         subgraph FE["Svelte 프론트 (src)"]
-            App["App.svelte (라우터)<br/>Popover / Detail<br/>AgentCard · QuotaBar · SessionList<br/>TriggerList · AddTriggerForm"]
+            App["App.svelte (라우터)<br/>Popover / Detail<br/>AgentCard · QuotaBar · SessionList"]
             Lib["lib/store.svelte.ts<br/>lib/tauri.ts (invoke/listen) · format.ts"]
         end
     end
@@ -122,7 +110,6 @@ graph TD
     Agg -->|"250ms tick"| Emit
     Emit -->|"emit snapshot"| Lib
     Lib --> App
-    App -->|"command invoke"| Sched
 ```
 
 ### 2. 데이터 흐름 (단방향)
@@ -166,43 +153,12 @@ flowchart LR
 |---|---|---|
 | 백→프 | event | `snapshot` (250ms 생성·500ms 게이트) |
 | 프→백 | command | `open_detail_window` · `sync_quota` |
-| 프→백 | command | `list_trigger_rules` · `add_trigger_rule` · `remove_trigger_rule` · `toggle_trigger_rule` · `fire_trigger_now` |
 
-### 4. Anchor Trigger 실행 경로
-
-`scheduler/mod.rs` 가 `tokio_cron_scheduler` 로 `"0 MM HH * * *"`(매일 HH:MM) 잡을 등록하고 규칙을 `~/.config/ai-agent-monitor/triggers.json` 에 영속화한다. 발화 시 `scheduler/runner.rs` 가 작업 디렉토리에서 에이전트 바이너리를 spawn 후 detach 한다.
-
-```mermaid
-sequenceDiagram
-    participant UI as AddTriggerForm
-    participant Cmd as Tauri command
-    participant Sch as scheduler/mod.rs
-    participant Cron as tokio_cron_scheduler
-    participant Run as scheduler/runner.rs
-    participant Agent as claude / codex
-
-    UI->>Cmd: add_trigger_rule(agent, HH, MM, wd, prompt)
-    Cmd->>Sch: expand_tilde + 경로 검증
-    Sch->>Sch: triggers.json 저장
-    Sch->>Cron: "0 MM HH * * *" 잡 등록 (enabled만)
-    Note over Cron: 매일 HH:MM 발화
-    Cron->>Run: run_trigger(agent, prompt, wd)
-    alt Claude
-        Run->>Agent: claude -p [prompt] (프록시 :4319 경유 → quota 헤더 갱신)
-    else Codex
-        Run->>Agent: codex exec --skip-git-repo-check -C [wd] [prompt]
-    end
-    Note over Run,Agent: spawn 후 detach (결과 수집 안 함)
-```
-
-`▶ 지금 실행`(`fire_trigger_now`)도 같은 `run_trigger` 경로를 즉시 호출한다.
-
-### 5. 영속화 / 로그
+### 4. 영속화 / 로그
 
 | 대상 | 위치 | 시점 |
 |---|---|---|
 | Claude quota 캐시 | `~/.config/ai-agent-monitor/claude-quota.json` | quota 헤더 관찰 시 |
-| 트리거 규칙 | `~/.config/ai-agent-monitor/triggers.json` | 규칙 추가/삭제/토글 시 |
 | 로그 | `~/Library/Logs/AIMonitor/app.log` (macOS) | 상시(tracing) |
 
 > Aggregator 의 ring/rotating 과 Codex quota 는 인메모리라 앱 재시작 시 초기화된다(Claude quota 는 위 캐시에서 콜드스타트 복원).
@@ -228,7 +184,7 @@ pnpm tauri build
 
 ## 알려진 한계
 
-- 앱이 실행 중일 때만 동기화 및 Trigger가 동작합니다.
+- 앱이 실행 중일 때만 동기화가 동작합니다.
 - Codex: rollout JSONL이 기록되는 활성 세션에서만 사용률이 갱신됩니다.
 
 ---

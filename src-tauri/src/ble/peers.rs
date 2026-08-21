@@ -1,4 +1,4 @@
-//! 페어링 토큰 영속화. 기존 `triggers.json` 과 같은 디렉토리 규약을 따른다.
+//! 페어링 토큰 영속화. 앱 설정 디렉토리(`config_dir()`) 규약을 따른다.
 //!
 //! 저장은 임시 파일에 쓴 뒤 rename 한다. 쓰는 도중 앱이 죽어도 기존 파일이
 //! 반쯤 덮인 채로 남지 않게 하기 위함이다 — 토큰이 깨지면 이미 페어링한
@@ -68,7 +68,7 @@ impl PeerStore {
 
     /// 임시 파일에 0600 으로 쓴 뒤 rename 한다. 부모 디렉토리가 없으면
     /// 0700 으로 새로 만들되, 이미 있으면 권한을 건드리지 않는다 — 같은
-    /// 디렉토리에 사는 기존 `triggers.json` 소유의 디렉토리 권한을 남이
+    /// 디렉토리에 사는 다른 설정 파일 소유의 디렉토리 권한을 남이
     /// 바꾸게 되기 때문이다.
     pub fn save_to(path: &Path, peers: &[StoredPeer]) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
@@ -129,7 +129,7 @@ mod tests {
     fn path_follows_existing_config_convention() {
         let p = PeerStore::path();
         assert!(p.ends_with("ai-agent-monitor/ble-peers.json"),
-                "triggers.json 과 같은 디렉토리여야 한다: {p:?}");
+                "앱 설정 디렉토리 아래여야 한다: {p:?}");
     }
 
     #[test]

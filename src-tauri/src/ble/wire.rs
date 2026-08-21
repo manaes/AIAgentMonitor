@@ -141,7 +141,6 @@ mod tests {
                     last_event_at: UNIX_EPOCH + Duration::from_secs(1_755_499_987),
                     status: ActivityStatus::Active,
                 }],
-                triggered_by: None,
             }],
         }
     }

@@ -65,7 +65,6 @@ pub struct AgentState {
     pub quota_reset_at_weekly: Option<SystemTime>,
     pub quota_used_pct_weekly: Option<f32>,   // 주간(7d) 사용률(%)
     pub projects: Vec<ProjectActivity>,
-    pub triggered_by: Option<String>,  // v1.1 자리, v1에는 항상 None
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

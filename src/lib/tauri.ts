@@ -35,50 +35,10 @@ export type AgentState = {
   quota_reset_at_weekly: { secs_since_epoch: number } | null;
   quota_used_pct_weekly: number | null;
   projects: ProjectActivity[];
-  triggered_by: string | null;
 };
 
 export async function listenSnapshot(cb: (s: Snapshot) => void): Promise<UnlistenFn> {
   return listen<Snapshot>("snapshot", (e) => cb(e.payload));
-}
-
-// ── Anchor Trigger ──────────────────────────────────────────────
-
-export type TriggerRule = {
-  id: string;
-  agent: "claude" | "codex" | "antigravity";
-  cron: string;
-  working_dir: string;
-  prompt: string;
-  enabled: boolean;
-  created_at: number;
-};
-
-export async function listTriggerRules(): Promise<TriggerRule[]> {
-  return invoke<TriggerRule[]>("list_trigger_rules");
-}
-
-export async function addTriggerRule(
-  agent: "claude" | "codex" | "antigravity",
-  hour: number,
-  minute: number,
-  working_dir: string,
-  prompt: string
-): Promise<TriggerRule> {
-  // Tauri 2는 Rust snake_case → JS camelCase 자동 변환: working_dir → workingDir
-  return invoke<TriggerRule>("add_trigger_rule", { agent, hour, minute, workingDir: working_dir, prompt });
-}
-
-export async function removeTriggerRule(id: string): Promise<void> {
-  return invoke<void>("remove_trigger_rule", { id });
-}
-
-export async function toggleTriggerRule(id: string): Promise<TriggerRule> {
-  return invoke<TriggerRule>("toggle_trigger_rule", { id });
-}
-
-export async function fireTriggerNow(id: string): Promise<void> {
-  return invoke<void>("fire_trigger_now", { id });
 }
 
 // ── BLE 미러 ────────────────────────────────────────────────

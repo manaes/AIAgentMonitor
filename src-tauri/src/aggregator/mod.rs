@@ -115,7 +115,6 @@ impl Aggregator {
                 quota_reset_at_weekly: None,
                 quota_used_pct_weekly: None,
                 projects,
-                triggered_by: None,
             });
         }
         Snapshot { emitted_at: now, agents }

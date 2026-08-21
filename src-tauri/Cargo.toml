@@ -31,7 +31,6 @@ thiserror = "2"
 dirs-next = "2"
 axum = { version = "0.7", features = ["json"] }
 tower = "0.4"
-tokio-cron-scheduler = "0.13"
 uuid = { version = "1", features = ["v4", "serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 tauri-plugin-updater = "2"

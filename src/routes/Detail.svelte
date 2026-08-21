@@ -3,14 +3,11 @@
   import { store } from "../lib/store.svelte";
   import AgentCard from "../components/AgentCard.svelte";
   import SessionList from "../components/SessionList.svelte";
-  import TriggerList from "../components/TriggerList.svelte";
-  import AddTriggerForm from "../components/AddTriggerForm.svelte";
   import DevicePanel from "../components/DevicePanel.svelte";
 
-  let activeTab = $state<"sessions" | "triggers" | "devices">("sessions");
+  let activeTab = $state<"sessions" | "devices">("sessions");
 
   onMount(() => {
-    store.loadTriggers();
     // Devices 탭 노출 여부가 ble.supported 에 달려 있으므로 패널을 열기 전에 상태를 받아둔다.
     // initBle 은 멱등하므로 DevicePanel 의 onMount 와 중복 호출되어도 안전하다.
     store.initBle();
@@ -37,9 +34,6 @@
     <button class="tab" class:active={activeTab === "sessions"} onclick={() => (activeTab = "sessions")}>
       Sessions
     </button>
-    <button class="tab" class:active={activeTab === "triggers"} onclick={() => (activeTab = "triggers")}>
-      Triggers
-    </button>
     {#if bleSupported}
       <button class="tab" class:active={activeTab === "devices"} onclick={() => (activeTab = "devices")}>
         Devices
@@ -47,12 +41,7 @@
     {/if}
   </div>
 
-  {#if activeTab === "triggers"}
-    <div class="triggers">
-      <TriggerList />
-      <AddTriggerForm />
-    </div>
-  {:else if activeTab === "devices" && bleSupported}
+  {#if activeTab === "devices" && bleSupported}
     <DevicePanel />
   {:else}
     <!-- 탭이 감춰진 뒤에도 devices 가 남아 있을 수 있으므로 sessions 를 폴백으로 둔다 -->
@@ -95,8 +84,6 @@
   .tab:hover:not(.active) {
     color: #c7c7cc;
   }
-  .triggers { display: flex; flex-direction: column; gap: 0; }
-
   @media (max-width: 720px) {
     .agents {
       grid-template-columns: 1fr;
