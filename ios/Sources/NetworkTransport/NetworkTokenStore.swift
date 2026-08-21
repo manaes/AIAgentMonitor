@@ -11,6 +11,11 @@ public enum NetworkTokenStore {
     /// 비밀이 아니지만(공개키), 페어링 여부를 기기 밖으로 흘리지 않기 위해 같은
     /// Keychain 항목에 둔다.
     private static let endpointAccount = "network-pairing-endpoint"
+    /// QR 에서 함께 받은 relay URL/direct 주소. EndpointId 만으로는 discovery 가
+    /// 우리 쪽에 등록돼 있지 않아 dial 이 안 된다(실기기에서 `no addressing
+    /// information` 로 확인) — 재스캔 없이 재연결하려면 이 값들도 같이 저장해야 한다.
+    private static let relayAccount = "network-pairing-relay"
+    private static let addressesAccount = "network-pairing-addresses"
 
     private static func baseQuery(account: String) -> [String: Any] {
         [
@@ -52,4 +57,24 @@ public enum NetworkTokenStore {
     public static func saveEndpointIdHex(_ hex: String) -> Bool { save(hex, account: endpointAccount) }
     public static func loadEndpointIdHex() -> String? { load(account: endpointAccount) }
     public static func clearEndpointIdHex() { clear(account: endpointAccount) }
+
+    @discardableResult
+    public static func saveRelayUrl(_ url: String?) -> Bool {
+        guard let url else {
+            clear(account: relayAccount)
+            return true
+        }
+        return save(url, account: relayAccount)
+    }
+    public static func loadRelayUrl() -> String? { load(account: relayAccount) }
+
+    /// 쉼표로 구분해 저장한다 — 주소 문자열 자체에 쉼표가 나올 일이 없다(IP:port).
+    @discardableResult
+    public static func saveAddresses(_ addresses: [String]) -> Bool {
+        save(addresses.joined(separator: ","), account: addressesAccount)
+    }
+    public static func loadAddresses() -> [String] {
+        guard let joined = load(account: addressesAccount), !joined.isEmpty else { return [] }
+        return joined.split(separator: ",").map(String.init)
+    }
 }

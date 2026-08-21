@@ -187,6 +187,30 @@ async fn network_status(state: tauri::State<'_, Arc<NetworkHandle>>) -> Result<N
     })
 }
 
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `EndpointId`(공개키, raw 32바이트) 하나만 QR 에 실으면 iOS 는 discovery 로만
+/// Mac 을 찾아야 하는데, 실기기에서 확인된 대로 그것만으로는
+/// `IrohError: no addressing information` 로 실패한다 — discovery 서비스에
+/// 우리 주소를 등록하는 절차를 따로 두지 않았기 때문이다(Builder 를 명시적
+/// 체인으로 구성해서 preset 의 discovery-publish 를 안 탄다). 그래서 QR 에
+/// relay URL 과 direct 주소까지 직접 실어 discovery 없이도 dial 되게 한다.
+///
+/// bind 직후에는 `endpoint.addr()` 가 비어 있을 수 있어(Phase 0 스파이크에서도
+/// 확인) 주소가 채워질 때까지 짧게 폴링한다.
+async fn wait_for_addr(ep: &iroh::Endpoint) -> iroh::EndpointAddr {
+    for _ in 0..60 {
+        let addr = ep.addr();
+        if !addr.addrs.is_empty() {
+            return addr;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    ep.addr()
+}
+
 /// BLE `ble_begin_pairing` 과 같은 제약 — 사용자가 명시적으로 페어링을
 /// 시작할 때만 호출한다.
 #[tauri::command]
@@ -195,17 +219,29 @@ async fn network_begin_pairing(
 ) -> Result<NetworkPairingInfo, String> {
     let mut bridge = state.bridge.lock().await;
     let code = bridge.begin_pairing(std::time::SystemTime::now());
+    drop(bridge);
+
     // iOS 의 EndpointId 는 raw 32바이트로만 만들 수 있어(fromBytes) hex 로
     // 인코딩한다 — iroh 의 z32 Display 포맷을 Swift 쪽에서 다시 파싱할 필요가
     // 없어지고, 기존 PairingClient.swift 의 Data(hexString:) 를 그대로 재사용한다.
-    let endpoint_id_hex = state
-        .endpoint
-        .id()
-        .as_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    let qr_payload = format!("aim://pair?endpoint={endpoint_id_hex}&code={code}");
+    // relay URL/주소 문자열도 같은 이유로 전부 hex 로 실어 퍼센트 인코딩을
+    // 아예 피한다.
+    let endpoint_id_hex = hex_encode(state.endpoint.id().as_bytes());
+
+    let addr = wait_for_addr(&state.endpoint).await;
+    let mut params = vec![format!("endpoint={endpoint_id_hex}"), format!("code={code}")];
+    for a in &addr.addrs {
+        match a {
+            iroh::TransportAddr::Relay(url) => {
+                params.push(format!("relay={}", hex_encode(url.to_string().as_bytes())));
+            }
+            iroh::TransportAddr::Ip(sock) => {
+                params.push(format!("addr={}", hex_encode(sock.to_string().as_bytes())));
+            }
+            _ => {}
+        }
+    }
+    let qr_payload = format!("aim://pair?{}", params.join("&"));
     Ok(NetworkPairingInfo { code, qr_payload })
 }
 

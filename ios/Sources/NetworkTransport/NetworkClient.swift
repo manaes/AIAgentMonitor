@@ -37,7 +37,9 @@ public final class NetworkClient: NSObject {
             stateSubject.send(.needsPairing)
             return
         }
-        beginConnecting(endpointIdHex: endpointHex, code: nil)
+        let relayUrl = NetworkTokenStore.loadRelayUrl()
+        let addresses = NetworkTokenStore.loadAddresses()
+        beginConnecting(endpointIdHex: endpointHex, relayUrl: relayUrl, addresses: addresses, code: nil)
     }
 
     public func stop() {
@@ -47,7 +49,8 @@ public final class NetworkClient: NSObject {
         stateSubject.send(.idle)
     }
 
-    /// QR 스캐너가 디코딩한 문자열(`aim://pair?endpoint=<hex>&code=<code>`)을 넘긴다.
+    /// QR 스캐너가 디코딩한 문자열
+    /// (`aim://pair?endpoint=<hex>&code=<code>&relay=<hex>&addr=<hex>...`)을 넘긴다.
     /// 스캔 한 번으로 dial 과 `CODE:` 제출이 자동으로 끝난다 — 사용자가 코드를 따로
     /// 입력할 필요가 없다(설계 결정, 계획 문서 참고).
     public func pair(qrPayload: String) {
@@ -56,10 +59,19 @@ public final class NetworkClient: NSObject {
             return
         }
         NetworkTokenStore.saveEndpointIdHex(parsed.endpointIdHex)
-        beginConnecting(endpointIdHex: parsed.endpointIdHex, code: parsed.code)
+        NetworkTokenStore.saveRelayUrl(parsed.relayUrl)
+        NetworkTokenStore.saveAddresses(parsed.addresses)
+        beginConnecting(
+            endpointIdHex: parsed.endpointIdHex,
+            relayUrl: parsed.relayUrl,
+            addresses: parsed.addresses,
+            code: parsed.code
+        )
     }
 
-    nonisolated static func parseQrPayload(_ payload: String) -> (endpointIdHex: String, code: String)? {
+    nonisolated static func parseQrPayload(
+        _ payload: String
+    ) -> (endpointIdHex: String, code: String, relayUrl: String?, addresses: [String])? {
         guard let components = URLComponents(string: payload),
               components.scheme == "aim", components.host == "pair",
               let items = components.queryItems,
@@ -67,18 +79,28 @@ public final class NetworkClient: NSObject {
               let code = items.first(where: { $0.name == "code" })?.value else {
             return nil
         }
-        return (endpointIdHex, code)
+        // relay/addr 는 Rust 쪽에서 URL 인코딩을 피하려고 hex 로 실어 보낸다
+        // (Data(hexString:) 는 이 파일이 이미 BLE 쪽에서 재사용하고 있다).
+        func decodeHex(_ value: String?) -> String? {
+            guard let value, let data = Data(hexString: value) else { return nil }
+            return String(data: data, encoding: .utf8)
+        }
+        let relayUrl = decodeHex(items.first(where: { $0.name == "relay" })?.value)
+        let addresses = items
+            .filter { $0.name == "addr" }
+            .compactMap { decodeHex($0.value) }
+        return (endpointIdHex, code, relayUrl, addresses)
     }
 
-    private func beginConnecting(endpointIdHex: String, code: String?) {
+    private func beginConnecting(endpointIdHex: String, relayUrl: String?, addresses: [String], code: String?) {
         wantsRunning = true
         runTask?.cancel()
         runTask = Task { [weak self] in
-            await self?.runConnection(endpointIdHex: endpointIdHex, code: code)
+            await self?.runConnection(endpointIdHex: endpointIdHex, relayUrl: relayUrl, addresses: addresses, code: code)
         }
     }
 
-    private func runConnection(endpointIdHex: String, code: String?) async {
+    private func runConnection(endpointIdHex: String, relayUrl: String?, addresses: [String], code: String?) async {
         stateSubject.send(.connecting)
         do {
             guard let idBytes = Data(hexString: endpointIdHex) else {
@@ -86,9 +108,10 @@ public final class NetworkClient: NSObject {
                 return
             }
             let endpointId = try EndpointId.fromBytes(bytes: idBytes)
-            // QR 은 EndpointId 만 담는다 — 주소/relay 는 n0 디스커버리(applyN0)가
-            // 연결 시점에 알아낸다("dial by key, not IP"), 계획 문서에서 확인됨.
-            let addr = EndpointAddr(id: endpointId, relayUrl: nil, addresses: [])
+            // EndpointId 만으로는 discovery 에 Mac 이 등록돼 있지 않아 dial 이 안 된다
+            // (실기기에서 `IrohError: no addressing information` 로 확인) — QR 에
+            // 같이 실려온 relay/direct 주소를 그대로 넣어준다.
+            let addr = EndpointAddr(id: endpointId, relayUrl: relayUrl, addresses: addresses)
 
             let builder = EndpointBuilder()
             builder.applyN0()
@@ -107,7 +130,7 @@ public final class NetworkClient: NSObject {
             // EndpointId 로 재연결을 시도한다(사용자가 QR 을 또 스캔할 필요 없음).
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             guard wantsRunning else { return }
-            beginConnecting(endpointIdHex: endpointIdHex, code: nil)
+            beginConnecting(endpointIdHex: endpointIdHex, relayUrl: relayUrl, addresses: addresses, code: nil)
         }
     }
 
