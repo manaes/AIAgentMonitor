@@ -46,3 +46,13 @@ objc2-core-bluetooth = { version = "0.3", features = ["CBPeripheralManager", "CB
 
 [dev-dependencies]
 tempfile = "3"
+
+# iroh → netwatch(Windows 네트워크 변경 감지) → wmi 가 windows/windows-core 를
+# 넓은 범위(>=0.59,<0.63)로 열어둬서, tauri/wry 계열(^0.61)과 netwatch 자체(0.62.2)가
+# 그래프에 함께 있을 때 Cargo 가 wmi 의 두 엣지(windows/windows-core)를 서로 다른
+# 메이저 라인으로 따로 배정해버린다 — wmi 컴파일 자체가
+# "IWbemObjectSink(0.61) 가 Interface(0.62) 를 구현 안 함" 으로 깨진다(Windows CI 확인).
+# 벤더링한 wmi 에서 windows/windows-core 를 =0.61.3/=0.61.2 로 고정해 이미 그래프에
+# 있는 자기일관적인 짝을 강제한다. 자세한 내용은 vendor/README.md 참고.
+[patch.crates-io]
+wmi = { path = "vendor/wmi-0.18.4" }
