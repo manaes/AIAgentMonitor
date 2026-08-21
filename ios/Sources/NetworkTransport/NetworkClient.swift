@@ -42,6 +42,17 @@ public final class NetworkClient: NSObject {
         beginConnecting(endpointIdHex: endpointHex, relayUrl: relayUrl, addresses: addresses, code: nil)
     }
 
+    /// 저장된 페어링 정보를 지우고 QR 스캐너가 다시 뜨게 한다. 설정에서
+    /// "네트워크"를 고를 때마다 호출한다 — `start()` 처럼 이전 연결 정보로
+    /// 조용히 재연결을 시도하면 카메라 화면이 아예 안 뜬다(사용자 확인).
+    public func resetPairing() {
+        wantsRunning = false
+        runTask?.cancel()
+        runTask = nil
+        NetworkTokenStore.clearAll()
+        stateSubject.send(.needsPairing)
+    }
+
     public func stop() {
         wantsRunning = false
         runTask?.cancel()

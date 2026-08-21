@@ -77,4 +77,13 @@ public enum NetworkTokenStore {
         guard let joined = load(account: addressesAccount), !joined.isEmpty else { return [] }
         return joined.split(separator: ",").map(String.init)
     }
+
+    /// 저장된 페어링 정보를 전부 지운다 — 설정에서 "네트워크"를 고를 때마다
+    /// 이전 연결 정보로 조용히 재연결하지 않고 QR 을 다시 스캔하게 하는 데 쓴다.
+    public static func clearAll() {
+        clearToken()
+        clearEndpointIdHex()
+        clear(account: relayAccount)
+        clear(account: addressesAccount)
+    }
 }

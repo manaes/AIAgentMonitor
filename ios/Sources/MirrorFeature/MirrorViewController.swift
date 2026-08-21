@@ -202,7 +202,16 @@ public final class MirrorViewController: UIViewController {
         dismissPairingIfPresented()
         activeKind = kind
         bind(to: client)
-        client.start()
+        switch kind {
+        case .ble:
+            bleClient.start()
+        case .network:
+            // start() 는 저장된 페어링 정보로 조용히 재연결을 시도해 카메라
+            // 화면이 아예 안 뜰 수 있다 — 설정에서 명시적으로 "네트워크" 를
+            // 고르는 건 항상 새로 페어링하겠다는 뜻이므로 정보를 지우고
+            // QR 스캐너를 다시 띄운다(사용자 확인).
+            networkClient.resetPairing()
+        }
     }
 
     public override func viewDidLayoutSubviews() {
