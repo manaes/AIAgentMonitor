@@ -13,7 +13,11 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     ) {
         guard let windowScene = scene as? UIWindowScene else { return }
         let w = UIWindow(windowScene: windowScene)
-        let root = MirrorViewController(bleClient: BLEClient(), networkClient: NetworkClient())
+        let root = MirrorViewController(
+            bleClient: BLEClient(),
+            networkClient: NetworkClient(),
+            initialTransport: MirrorViewController.preferredTransport
+        )
         w.rootViewController = UINavigationController(rootViewController: root)
         w.makeKeyAndVisible()
         window = w

@@ -31,6 +31,20 @@ public final class MirrorViewController: UIViewController {
         case network
     }
 
+    /// 마지막으로 고른 전송 방식. 비밀이 아니라 UI 선호도일 뿐이라 Keychain 이
+    /// 아니라 UserDefaults 에 둔다. 앱을 재시작해도 이전에 네트워크로
+    /// 페어링했다면 다시 네트워크로 시작해 저장된 정보로 재연결을 시도하게 한다
+    /// (사용자 확인 — 기본값 BLE 로 고정돼 있으면 재시도 자체가 안 됨).
+    private static let transportPreferenceKey = "mirror.transport.preference"
+
+    public static var preferredTransport: TransportKind {
+        UserDefaults.standard.string(forKey: transportPreferenceKey) == "network" ? .network : .ble
+    }
+
+    private static func persistTransportPreference(_ kind: TransportKind) {
+        UserDefaults.standard.set(kind == .network ? "network" : "ble", forKey: transportPreferenceKey)
+    }
+
     private let bleClient: BLEClient
     private let networkClient: NetworkClient
     private var activeKind: TransportKind
@@ -201,6 +215,7 @@ public final class MirrorViewController: UIViewController {
         client.stop()
         dismissPairingIfPresented()
         activeKind = kind
+        Self.persistTransportPreference(kind)
         bind(to: client)
         switch kind {
         case .ble:
