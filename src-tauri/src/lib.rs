@@ -2,6 +2,7 @@ mod aggregator;
 mod ble;
 mod clock;
 mod emitter;
+mod network;
 mod quota_proxy;
 mod tray;
 mod types;
@@ -122,7 +123,11 @@ async fn ble_unpair_all(state: tauri::State<'_, Arc<BleHandle>>) -> Result<(), S
 async fn ble_set_enabled(
     enabled: bool,
     state: tauri::State<'_, Arc<BleHandle>>,
+    network_state: tauri::State<'_, Arc<NetworkHandle>>,
 ) -> Result<(), String> {
+    if enabled && network_state.bridge.lock().await.is_enabled() {
+        return Err("네트워크 공유가 켜져 있습니다. 먼저 꺼주세요.".to_string());
+    }
     let result = state.bridge.lock().await.set_enabled(enabled);
     if !enabled {
         state.advertising.store(false, Ordering::Relaxed);
@@ -134,6 +139,112 @@ async fn ble_set_enabled(
         state.advertising.store(false, Ordering::Relaxed);
         *state.last_error.lock().unwrap() = Some(msg.clone());
         return Err(msg);
+    }
+    Ok(())
+}
+
+/// BLE와 달리 iroh는 크로스플랫폼이라 macOS/Windows 모두 항상 `true` — 프론트가
+/// OS를 추측하지 않고 이 값으로 "네트워크" 옵션 노출 여부를 결정한다(BLE의
+/// `supported` 필드와 같은 규약).
+const NETWORK_SUPPORTED: bool = true;
+
+#[derive(Clone, serde::Serialize)]
+pub struct NetworkStatus {
+    pub supported: bool,
+    pub enabled: bool,
+    /// 이 Mac의 iroh EndpointId(공개키). QR 없이도 디버그용으로 노출한다.
+    pub endpoint_id: String,
+    pub last_error: Option<String>,
+    pub pairing_window: ble::pairing::PairingWindow,
+    pub paired_peers: Vec<ble::pairing::PairedPeer>,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct NetworkPairingInfo {
+    pub code: String,
+    /// iOS가 스캔해 파싱할 페이로드 — EndpointId와 그 순간의 페어링 코드를
+    /// 함께 담아, 스캔 한 번으로 dial과 CODE: 제출이 자동으로 끝나게 한다.
+    pub qr_payload: String,
+}
+
+pub struct NetworkHandle {
+    pub bridge: Mutex<network::NetworkBridge>,
+    pub endpoint: iroh::Endpoint,
+    pub last_error: std::sync::Mutex<Option<String>>,
+}
+
+#[tauri::command]
+async fn network_status(state: tauri::State<'_, Arc<NetworkHandle>>) -> Result<NetworkStatus, String> {
+    let bridge = state.bridge.lock().await;
+    let now = std::time::SystemTime::now();
+    Ok(NetworkStatus {
+        supported: NETWORK_SUPPORTED,
+        enabled: bridge.is_enabled(),
+        endpoint_id: state.endpoint.id().to_string(),
+        last_error: state.last_error.lock().unwrap().clone(),
+        pairing_window: bridge.pairing_window(now),
+        paired_peers: bridge.paired_peers(),
+    })
+}
+
+/// BLE `ble_begin_pairing` 과 같은 제약 — 사용자가 명시적으로 페어링을
+/// 시작할 때만 호출한다.
+#[tauri::command]
+async fn network_begin_pairing(
+    state: tauri::State<'_, Arc<NetworkHandle>>,
+) -> Result<NetworkPairingInfo, String> {
+    let mut bridge = state.bridge.lock().await;
+    let code = bridge.begin_pairing(std::time::SystemTime::now());
+    // iOS 의 EndpointId 는 raw 32바이트로만 만들 수 있어(fromBytes) hex 로
+    // 인코딩한다 — iroh 의 z32 Display 포맷을 Swift 쪽에서 다시 파싱할 필요가
+    // 없어지고, 기존 PairingClient.swift 의 Data(hexString:) 를 그대로 재사용한다.
+    let endpoint_id_hex = state
+        .endpoint
+        .id()
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let qr_payload = format!("aim://pair?endpoint={endpoint_id_hex}&code={code}");
+    Ok(NetworkPairingInfo { code, qr_payload })
+}
+
+#[tauri::command]
+async fn network_unpair(
+    peer_id: String,
+    state: tauri::State<'_, Arc<NetworkHandle>>,
+) -> Result<(), String> {
+    let mut bridge = state.bridge.lock().await;
+    bridge.unpair_peer(&peer_id);
+    let path = network::peers::path();
+    network::peers::PeerStore::save_to(&path, &bridge.stored_peers()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn network_unpair_all(state: tauri::State<'_, Arc<NetworkHandle>>) -> Result<(), String> {
+    let mut bridge = state.bridge.lock().await;
+    bridge.unpair_all();
+    let path = network::peers::path();
+    network::peers::PeerStore::save_to(&path, &[]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// "공유"는 BLE/네트워크 중 하나만 켤 수 있다 — 둘 다 동시에 켜지면 사용자가
+/// 어느 쪽으로 페어링했는지 헷갈리고, 페어링 창(코드)이 두 화면에 따로
+/// 떠서 스펙 5.1의 "창은 하나" 전제가 전송별로 두 개가 된다.
+#[tauri::command]
+async fn network_set_enabled(
+    enabled: bool,
+    network_state: tauri::State<'_, Arc<NetworkHandle>>,
+    ble_state: tauri::State<'_, Arc<BleHandle>>,
+) -> Result<(), String> {
+    if enabled && ble_state.bridge.lock().await.is_enabled() {
+        return Err("BLE 공유가 켜져 있습니다. 먼저 꺼주세요.".to_string());
+    }
+    network_state.bridge.lock().await.set_enabled(enabled);
+    if !enabled {
+        *network_state.last_error.lock().unwrap() = None;
     }
     Ok(())
 }
@@ -478,6 +589,11 @@ pub fn run() {
             ble_begin_pairing,
             ble_unpair,
             ble_unpair_all,
+            network_status,
+            network_set_enabled,
+            network_begin_pairing,
+            network_unpair,
+            network_unpair_all,
         ])
         .setup({
             let aggregator = aggregator.clone();
@@ -574,6 +690,116 @@ pub fn run() {
                     }
                 }
 
+                // 네트워크(iroh) Endpoint 는 앱 시작 시 한 번만 bind 한다 — BLE 의
+                // advertise on/off 와 달리 iroh 소켓 자체를 껐다 켜는 개념이 없고,
+                // "공유"가 꺼져 있는 동안은 아래 accept 루프가 들어오는 연결을
+                // 즉시 닫는 것으로 충분하다.
+                let network_secret = network::identity::load_or_create(&network::identity::path())
+                    .expect("네트워크 신원 로드/생성 실패");
+                let network_endpoint = tauri::async_runtime::block_on(async {
+                    iroh::endpoint::Builder::empty()
+                        .secret_key(network_secret)
+                        .alpns(vec![network::ALPN.to_vec()])
+                        .relay_mode(iroh::endpoint::RelayMode::Default)
+                        .crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                        .bind()
+                        .await
+                        .expect("iroh Endpoint bind 실패")
+                });
+                let network_handle = Arc::new(NetworkHandle {
+                    bridge: Mutex::new(network::NetworkBridge::new()),
+                    endpoint: network_endpoint,
+                    last_error: std::sync::Mutex::new(None),
+                });
+                {
+                    use tauri::Manager;
+                    app.manage(network_handle.clone());
+                }
+
+                // 앱 시작 시 이미 페어링한 기기 목록을 복원한다(BLE와 같은 규약, 별도 파일).
+                {
+                    let path = network::peers::path();
+                    match network::peers::PeerStore::load_from(&path) {
+                        network::peers::LoadOutcome::Missing => {}
+                        network::peers::LoadOutcome::Loaded(peers) => {
+                            network_handle.bridge.blocking_lock().load_peers(peers);
+                        }
+                        network::peers::LoadOutcome::Corrupt { detail } => {
+                            network_handle.last_error.lock().unwrap().replace(format!(
+                                "저장된 네트워크 페어링 목록이 손상돼 초기화됐습니다: {detail}"
+                            ));
+                        }
+                    }
+                }
+
+                // 연결 accept 루프 — BLE 의 CoreBluetooth 델리게이트 콜백에 대응하지만,
+                // iroh 는 콜백이 아니라 직접 도는 루프다. 연결 하나당 태스크를 spawn 해
+                // 그 안에서 control 메시지(HELLO/CODE/AUTH/PROOF)를 bi-stream 하나당
+                // 하나씩 처리하고, 인가되면 스냅샷 uni-stream 을 연다.
+                {
+                    let h = network_handle.clone();
+                    let app_for_net = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        loop {
+                            let Some(incoming) = h.endpoint.accept().await else {
+                                break;
+                            };
+                            let h = h.clone();
+                            let app_for_net = app_for_net.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let conn = match incoming.await {
+                                    Ok(c) => c,
+                                    Err(_) => return,
+                                };
+                                if !h.bridge.lock().await.is_enabled() {
+                                    conn.close(0u32.into(), b"sharing disabled");
+                                    return;
+                                }
+                                let central =
+                                    ble::peripheral::CentralId(conn.remote_id().to_string());
+                                loop {
+                                    let (mut send, mut recv) = match conn.accept_bi().await {
+                                        Ok(s) => s,
+                                        Err(_) => break,
+                                    };
+                                    let req = match recv.read_to_end(4096).await {
+                                        Ok(r) => r,
+                                        Err(_) => break,
+                                    };
+                                    let now = std::time::SystemTime::now();
+                                    let outcome =
+                                        h.bridge.lock().await.handle_auth(&central, &req, now);
+                                    let _ = send.write_all(&outcome.payload).await;
+                                    let _ = send.finish();
+
+                                    if let Some(peers) = outcome.persist {
+                                        let path = network::peers::path();
+                                        if let Err(e) =
+                                            network::peers::PeerStore::save_to(&path, &peers)
+                                        {
+                                            *h.last_error.lock().unwrap() =
+                                                Some(format!("네트워크 페어링 토큰 저장 실패: {e}"));
+                                        }
+                                    }
+                                    if outcome.now_authorized
+                                        && !h.bridge.lock().await.has_snapshot_sender(&central)
+                                    {
+                                        if let Ok(snap_send) = conn.open_uni().await {
+                                            h.bridge.lock().await.register_snapshot_sender(
+                                                central.clone(),
+                                                snap_send,
+                                            );
+                                        }
+                                    }
+                                    let _ = app_for_net.emit("network_status", ());
+                                }
+                                h.bridge.lock().await.forget_central(&central);
+                                let _ = app_for_net.emit("network_status", ());
+                            });
+                        }
+                    });
+                }
+
                 // BLE 이벤트 → 구독자 사본 갱신 + 프론트로 상태 push
                 {
                     let h = ble_handle.clone();
@@ -642,6 +868,7 @@ pub fn run() {
                 let codex_for_tick = codex_quota.clone();
                 let antigravity_for_tick = antigravity_quota.clone();
                 let ble_for_tick = ble_handle.clone();
+                let network_for_tick = network_handle.clone();
                 tauri::async_runtime::spawn(async move {
                     let clock = SystemClock;
                     let mut ticker = tokio::time::interval(Duration::from_millis(250));
@@ -705,6 +932,7 @@ pub fn run() {
                         drop(g);
                         // BLE 미러는 자체 게이트(1Hz)를 가지며, 꺼져 있거나 구독자가 없으면 즉시 반환한다.
                         ble_for_tick.bridge.lock().await.on_snapshot(&snap, now);
+                        network_for_tick.bridge.lock().await.on_snapshot(&snap, now).await;
                     }
                 });
 

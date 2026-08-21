@@ -155,21 +155,7 @@ impl BleBridge {
     ) -> Option<Vec<peers::StoredPeer>> {
         let req = pairing::parse_auth_request(data);
         let reply = self.pairing.handle(central, req, now);
-        let payload = match &reply {
-            // 코드는 Mac 화면에만 보여준다 — central 에게 보내면 페어링이 무의미해진다.
-            pairing::AuthReply::AwaitingCode => br#"{"ok":false,"await":"code"}"#.to_vec(),
-            pairing::AuthReply::Nonce { nonce } => {
-                format!(r#"{{"ok":false,"nonce":"{nonce}"}}"#).into_bytes()
-            }
-            pairing::AuthReply::Authorized => br#"{"ok":true}"#.to_vec(),
-            pairing::AuthReply::Granted { token } => {
-                format!(r#"{{"ok":true,"token":"{token}"}}"#).into_bytes()
-            }
-            pairing::AuthReply::Denied { left } => {
-                format!(r#"{{"ok":false,"left":{left}}}"#).into_bytes()
-            }
-            pairing::AuthReply::Rejected => br#"{"ok":false}"#.to_vec(),
-        };
+        let payload = reply.to_json_bytes();
         self.peripheral.notify_auth(central, payload);
 
         match reply {

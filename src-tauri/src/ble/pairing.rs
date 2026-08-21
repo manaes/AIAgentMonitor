@@ -80,6 +80,28 @@ pub enum AuthReply {
     Authorized,
 }
 
+impl AuthReply {
+    /// 전송 계층(BLE Auth 특성 notify, 네트워크 제어 스트림)에 그대로 실어
+    /// 보낼 JSON 바이트. 두 전송 모두 같은 인증 프로토콜을 쓰므로 응답
+    /// 포맷도 여기 한 곳에서만 정의한다 — 하나만 고치고 다른 쪽을 잊는
+    /// 드리프트를 막는다.
+    pub fn to_json_bytes(&self) -> Vec<u8> {
+        match self {
+            // 코드는 Mac 화면에만 보여준다 — central 에게 보내면 페어링이 무의미해진다.
+            AuthReply::AwaitingCode => br#"{"ok":false,"await":"code"}"#.to_vec(),
+            AuthReply::Nonce { nonce } => {
+                format!(r#"{{"ok":false,"nonce":"{nonce}"}}"#).into_bytes()
+            }
+            AuthReply::Authorized => br#"{"ok":true}"#.to_vec(),
+            AuthReply::Granted { token } => {
+                format!(r#"{{"ok":true,"token":"{token}"}}"#).into_bytes()
+            }
+            AuthReply::Denied { left } => format!(r#"{{"ok":false,"left":{left}}}"#).into_bytes(),
+            AuthReply::Rejected => br#"{"ok":false}"#.to_vec(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthState {
     Unauthorized,
