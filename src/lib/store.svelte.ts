@@ -6,8 +6,15 @@ import {
   bleUnpair,
   bleUnpairAll,
   listenBleStatus,
+  networkStatus,
+  networkSetEnabled,
+  networkBeginPairing,
+  networkUnpair,
+  networkUnpairAll,
+  listenNetworkStatus,
   type Snapshot,
   type BleStatus,
+  type NetworkStatus,
 } from "./tauri";
 
 class SnapshotStore {
@@ -43,6 +50,9 @@ class SnapshotStore {
     this.#bleUnlisten?.();
     this.#bleUnlisten = null;
     this.#bleInitialized = false;
+    this.#networkUnlisten?.();
+    this.#networkUnlisten = null;
+    this.#networkInitialized = false;
   }
 
   ble = $state<BleStatus | null>(null);
@@ -119,6 +129,83 @@ class SnapshotStore {
       this.bleActionError = null;
     } catch (e) {
       this.bleActionError = `전체 해제에 실패했습니다: ${e}`;
+    }
+  }
+
+  // ── 네트워크(iroh) — BLE와 같은 패턴(멱등 init, 순번 기반 재조회 경합 방지) ──
+
+  network = $state<NetworkStatus | null>(null);
+  networkActionError = $state<string | null>(null);
+  // begin_pairing 이 돌려준 QR 페이로드. pairing_window 가 "open" 이 아니게
+  // 되면(만료/소진/닫힘) DevicePanel 이 이 값을 무시하고 숨긴다.
+  networkQrPayload = $state<string | null>(null);
+  #networkInitialized = false;
+  #networkUnlisten: (() => void) | null = null;
+  #networkReqSeq = 0;
+
+  async initNetwork() {
+    if (this.#networkInitialized) return;
+    this.#networkInitialized = true;
+    const seq = ++this.#networkReqSeq;
+    const status = await networkStatus();
+    if (seq === this.#networkReqSeq) this.network = status;
+    this.#networkUnlisten = await listenNetworkStatus(async () => {
+      const seq = ++this.#networkReqSeq;
+      const status = await networkStatus();
+      if (seq !== this.#networkReqSeq) return;
+      this.network = status;
+      this.networkActionError = null;
+    });
+  }
+
+  async setNetworkEnabled(on: boolean) {
+    try {
+      await networkSetEnabled(on);
+      const seq = ++this.#networkReqSeq;
+      const status = await networkStatus();
+      if (seq === this.#networkReqSeq) this.network = status;
+      if (!on) this.networkQrPayload = null;
+      this.networkActionError = null;
+    } catch (e) {
+      this.networkActionError = `네트워크 설정을 변경하지 못했습니다: ${e}`;
+    }
+  }
+
+  async beginNetworkPairing() {
+    try {
+      const info = await networkBeginPairing();
+      this.networkQrPayload = info.qr_payload;
+      const seq = ++this.#networkReqSeq;
+      const status = await networkStatus();
+      if (seq === this.#networkReqSeq) this.network = status;
+      this.networkActionError = null;
+    } catch (e) {
+      this.networkActionError = `페어링을 시작하지 못했습니다: ${e}`;
+    }
+  }
+
+  async unpairNetwork(peerId: string) {
+    try {
+      await networkUnpair(peerId);
+      const seq = ++this.#networkReqSeq;
+      const status = await networkStatus();
+      if (seq === this.#networkReqSeq) this.network = status;
+      this.networkActionError = null;
+    } catch (e) {
+      this.networkActionError = `기기를 해제하지 못했습니다: ${e}`;
+    }
+  }
+
+  async unpairAllNetwork() {
+    try {
+      await networkUnpairAll();
+      const seq = ++this.#networkReqSeq;
+      const status = await networkStatus();
+      if (seq === this.#networkReqSeq) this.network = status;
+      this.networkQrPayload = null;
+      this.networkActionError = null;
+    } catch (e) {
+      this.networkActionError = `전체 해제에 실패했습니다: ${e}`;
     }
   }
 }

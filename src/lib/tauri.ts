@@ -89,3 +89,54 @@ export async function bleUnpairAll(): Promise<void> {
 export async function listenBleStatus(cb: () => void): Promise<UnlistenFn> {
   return listen("ble_status", () => cb());
 }
+
+// ── 네트워크(iroh) 미러 ─────────────────────────────────────
+//
+// BLE와 같은 페어링 인증 프로토콜(6자리 코드, nonce+HMAC 재인증)을 그대로
+// 쓰므로 pairing_window/paired_peers 모양은 BleStatus와 동일하다 — 백엔드가
+// 같은 Rust 타입(ble::pairing::PairingWindow/PairedPeer)을 직렬화한다.
+
+export type NetworkStatus = {
+  // iroh는 크로스플랫폼이라 이 값은 항상 true — BLE의 supported와 대칭되는
+  // "백엔드가 선언하는 능력" 규약을 그대로 따른다.
+  supported: boolean;
+  enabled: boolean;
+  endpoint_id: string;
+  last_error: string | null;
+  pairing_window:
+    | { kind: "open"; code: string; expires_at: number; attempts_left: number }
+    | { kind: "exhausted" }
+    | { kind: "closed" };
+  paired_peers: { peer_id: string; paired_at: number; connected: boolean }[];
+};
+
+export type NetworkPairingInfo = {
+  code: string;
+  // iOS가 QR로 스캔할 페이로드(EndpointId + 코드) — 스캔 한 번으로 dial과
+  // CODE: 제출이 자동으로 끝난다.
+  qr_payload: string;
+};
+
+export async function networkStatus(): Promise<NetworkStatus> {
+  return invoke<NetworkStatus>("network_status");
+}
+
+export async function networkSetEnabled(enabled: boolean): Promise<void> {
+  return invoke<void>("network_set_enabled", { enabled });
+}
+
+export async function networkBeginPairing(): Promise<NetworkPairingInfo> {
+  return invoke<NetworkPairingInfo>("network_begin_pairing");
+}
+
+export async function networkUnpair(peerId: string): Promise<void> {
+  return invoke<void>("network_unpair", { peerId });
+}
+
+export async function networkUnpairAll(): Promise<void> {
+  return invoke<void>("network_unpair_all");
+}
+
+export async function listenNetworkStatus(cb: () => void): Promise<UnlistenFn> {
+  return listen("network_status", () => cb());
+}
