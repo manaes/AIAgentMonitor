@@ -35,11 +35,11 @@
   let countdown = $derived.by((): string | null => {
     if (resetEpochSecs !== null) {
       const rem = resetEpochSecs - nowSecs;
-      if (rem <= 0) return "5h 리셋됨";
+      if (rem <= 0) return "리셋됨";
       const h = Math.floor(rem / 3600);
       const m = Math.floor((rem % 3600) / 60);
       const s = rem % 60;
-      return h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`;
+      return h > 0 ? `약 ${h}시간 ${m}분 ${s}초 남음` : `약 ${m}분 ${s}초 남음`;
     }
     if (resetWeeklyEpochSecs !== null) {
       const rem = resetWeeklyEpochSecs - nowSecs;
@@ -47,7 +47,7 @@
       const d = Math.floor(rem / 86400);
       const h = Math.floor((rem % 86400) / 3600);
       const m = Math.floor((rem % 3600) / 60);
-      return d > 0 ? `${d}일 ${h}시간 남음` : `${h}시간 ${m}분 남음`;
+      return d > 0 ? `약 ${d}일 ${h}시간 남음` : `약 ${h}시간 ${m}분 남음`;
     }
     return null;
   });
