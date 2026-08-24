@@ -1,7 +1,15 @@
 import BLETransport
 import Combine
 import DesignSystem
+// NetworkTransport(IrohLib)는 17.5+ 전용이다. 이 파일은 두 타깃(MirrorFeature=
+// 전체지원, MirrorFeatureBLE=BLE 전용)이 같은 소스로 컴파일하는데, MirrorFeatureBLE
+// 는 NETWORK_TRANSPORT 플래그가 꺼져 있어 이 import 자체가 빠진다 — Swift 는 모듈의
+// 최소 배포 타깃이 임포트하는 쪽보다 높으면 import 문 자체를 거부하므로
+// (`@available`/`@_weakLinked` 로는 못 돌아간다), 플래그로 아예 컴파일에서 빼는 게
+// 유일한 방법이다(Project.swift 상단 주석 참고).
+#if NETWORK_TRANSPORT
 import NetworkTransport
+#endif
 import SnapKit
 import UIKit
 import Wire
@@ -26,9 +34,12 @@ public final class MirrorViewController: UIViewController {
 
     /// 연결 방식. 우상단 설정 버튼에서 사용자가 고른다 — 켜는 순간 BLE/네트워크
     /// 중 하나를 고르는 macOS `DevicePanel` 의 "공유" 토글과 대칭이다.
+    /// BLE 전용 빌드(MirrorFeatureBLE)에는 `.network` 케이스 자체가 없다.
     public enum TransportKind: Equatable {
         case ble
+        #if NETWORK_TRANSPORT
         case network
+        #endif
     }
 
     /// 마지막으로 고른 전송 방식. 비밀이 아니라 UI 선호도일 뿐이라 Keychain 이
@@ -38,20 +49,32 @@ public final class MirrorViewController: UIViewController {
     private static let transportPreferenceKey = "mirror.transport.preference"
 
     public static var preferredTransport: TransportKind {
+        #if NETWORK_TRANSPORT
         UserDefaults.standard.string(forKey: transportPreferenceKey) == "network" ? .network : .ble
+        #else
+        .ble
+        #endif
     }
 
     private static func persistTransportPreference(_ kind: TransportKind) {
+        #if NETWORK_TRANSPORT
         UserDefaults.standard.set(kind == .network ? "network" : "ble", forKey: transportPreferenceKey)
+        #else
+        UserDefaults.standard.set("ble", forKey: transportPreferenceKey)
+        #endif
     }
 
     private let bleClient: BLEClient
+    #if NETWORK_TRANSPORT
     private let networkClient: NetworkClient
+    #endif
     private var activeKind: TransportKind
     private var client: any MirrorTransport {
         switch activeKind {
         case .ble: return bleClient
+        #if NETWORK_TRANSPORT
         case .network: return networkClient
+        #endif
         }
     }
     private var cancellables = Set<AnyCancellable>()
@@ -98,12 +121,20 @@ public final class MirrorViewController: UIViewController {
     public var sessionRowCount: Int { sessionList.rowCount }
     public func sessionRowText(at index: Int) -> String? { sessionList.rowText(at: index) }
 
+    #if NETWORK_TRANSPORT
     public init(bleClient: BLEClient, networkClient: NetworkClient, initialTransport: TransportKind = .ble) {
         self.bleClient = bleClient
         self.networkClient = networkClient
         self.activeKind = initialTransport
         super.init(nibName: nil, bundle: nil)
     }
+    #else
+    public init(bleClient: BLEClient, initialTransport: TransportKind = .ble) {
+        self.bleClient = bleClient
+        self.activeKind = initialTransport
+        super.init(nibName: nil, bundle: nil)
+    }
+    #endif
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) 는 쓰지 않는다") }
@@ -200,9 +231,11 @@ public final class MirrorViewController: UIViewController {
         sheet.addAction(UIAlertAction(title: "BLE" + (activeKind == .ble ? " ✓" : ""), style: .default) { [weak self] _ in
             self?.switchTransport(to: .ble)
         })
+        #if NETWORK_TRANSPORT
         sheet.addAction(UIAlertAction(title: "네트워크" + (activeKind == .network ? " ✓" : ""), style: .default) { [weak self] _ in
             self?.switchTransport(to: .network)
         })
+        #endif
         sheet.addAction(UIAlertAction(title: "취소", style: .cancel))
         // iPad 는 액션시트를 팝오버로 띄우므로 앵커가 없으면 그 자리에서 크래시한다.
         sheet.popoverPresentationController?.sourceView = settingsButton
@@ -220,12 +253,14 @@ public final class MirrorViewController: UIViewController {
         switch kind {
         case .ble:
             bleClient.start()
+        #if NETWORK_TRANSPORT
         case .network:
             // start() 는 저장된 페어링 정보로 조용히 재연결을 시도해 카메라
             // 화면이 아예 안 뜰 수 있다 — 설정에서 명시적으로 "네트워크" 를
             // 고르는 건 항상 새로 페어링하겠다는 뜻이므로 정보를 지우고
             // QR 스캐너를 다시 띄운다(사용자 확인).
             networkClient.resetPairing()
+        #endif
         }
     }
 
@@ -344,6 +379,7 @@ public final class MirrorViewController: UIViewController {
             vc.isModalInPresentation = true
             pairingViewController = vc
             present(vc, animated: true)
+        #if NETWORK_TRANSPORT
         case .network:
             // QR 은 스캔 한 번으로 코드까지 자동 제출하므로(NetworkClient.pair),
             // 시도 소진(attemptsRemaining)이 와도 새 QR 을 다시 스캔하는 것 외에
@@ -354,6 +390,7 @@ public final class MirrorViewController: UIViewController {
             vc.modalPresentationStyle = .fullScreen
             qrScannerViewController = vc
             present(vc, animated: true)
+        #endif
         }
     }
 
