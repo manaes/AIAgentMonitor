@@ -269,11 +269,14 @@ public final class MirrorViewController: UIViewController {
         updateAgentsLayout(for: view.bounds.size)
     }
 
-    /// 가로모드에서는 카드 3개(Claude/Codex/Antigravity)가 한 줄에 나란히 보이도록
-    /// `agentsStack` 을 가로 축으로 바꾼다 — 세로모드처럼 쌓으면 화면 높이가 좁아진
-    /// 가로모드에서 스크롤 없이는 첫 카드조차 다 안 보인다. `scrollView` 가 이미
-    /// safeAreaLayoutGuide 에 물려 있어(노치·홈 인디케이터) 세 칸으로 나뉜 카드도
-    /// safe area 를 벗어나지 않는다.
+    /// 가로모드에서는 카드가 한 줄에 나란히 보이도록 `agentsStack` 을 가로 축으로
+    /// 바꾼다 — 세로모드처럼 쌓으면 화면 높이가 좁아진 가로모드에서 스크롤 없이는
+    /// 첫 카드조차 다 안 보인다. `scrollView` 가 이미 safeAreaLayoutGuide 에 물려
+    /// 있어(노치·홈 인디케이터) 나뉜 카드도 safe area 를 벗어나지 않는다.
+    ///
+    /// 카드 수는 고정이 아니다 — 맥의 설정 탭에서 표시할 에이전트를 고르면 스냅샷에
+    /// 그만큼만 실려 온다. `.fillEqually` 는 숨겨진 arranged subview 를 레이아웃에서
+    /// 제외하므로 보이는 카드끼리만 폭을 나눠 갖는다(오른쪽 여백이 남지 않는다).
     private func updateAgentsLayout(for size: CGSize) {
         let isLandscape = size.width > size.height
         let axis: NSLayoutConstraint.Axis = isLandscape ? .horizontal : .vertical

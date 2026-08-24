@@ -68,7 +68,10 @@
 
 <style>
   .window-root { display: flex; flex-direction: column; gap: 12px; }
-  .agents { display: grid; grid-template-columns: repeat(3, minmax(200px, 1fr)); gap: 8px; }
+  /* 칸 수를 3으로 고정하면 설정 탭에서 에이전트를 2개만 켰을 때 세 번째 칸이
+     빈 여백으로 남는다. auto-fit 은 실제 카드 수만큼만 칸을 만들어 남는 폭을
+     카드들이 나눠 갖는다. */
+  .agents { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
   .agents :global(.card + .card) { margin-top: 0; }
 
   .tab-bar {
