@@ -140,3 +140,20 @@ export async function networkUnpairAll(): Promise<void> {
 export async function listenNetworkStatus(cb: () => void): Promise<UnlistenFn> {
   return listen("network_status", () => cb());
 }
+
+// ── 표시 설정(에이전트 선택) ──────────────────────────────
+// 워처는 이 설정과 무관하게 계속 돈다 — 백엔드가 매 틱마다 Snapshot 을 이
+// 목록으로 걸러서 내보낼 뿐이다. BLE/네트워크 미러 페이로드도 같은 Snapshot
+// 에서 만들어지므로 iOS 쪽도 자동으로 같은 필터를 반영한다.
+
+export type AppSettings = {
+  enabled_agents: AgentKind[];
+};
+
+export async function getSettings(): Promise<AppSettings> {
+  return invoke<AppSettings>("get_settings");
+}
+
+export async function setEnabledAgents(agents: AgentKind[]): Promise<void> {
+  return invoke<void>("set_enabled_agents", { agents });
+}

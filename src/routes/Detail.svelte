@@ -4,8 +4,9 @@
   import AgentCard from "../components/AgentCard.svelte";
   import SessionList from "../components/SessionList.svelte";
   import DevicePanel from "../components/DevicePanel.svelte";
+  import SettingsPanel from "../components/SettingsPanel.svelte";
 
-  let activeTab = $state<"sessions" | "devices">("sessions");
+  let activeTab = $state<"sessions" | "devices" | "settings">("sessions");
 
   onMount(() => {
     // Devices 탭 노출 여부가 ble/network 의 supported 에 달려 있으므로 패널을 열기
@@ -44,10 +45,15 @@
         Devices
       </button>
     {/if}
+    <button class="tab" class:active={activeTab === "settings"} onclick={() => (activeTab = "settings")}>
+      설정
+    </button>
   </div>
 
   {#if activeTab === "devices" && devicesTabSupported}
     <DevicePanel />
+  {:else if activeTab === "settings"}
+    <SettingsPanel />
   {:else}
     <!-- 탭이 감춰진 뒤에도 devices 가 남아 있을 수 있으므로 sessions 를 폴백으로 둔다 -->
     {#if store.snap}

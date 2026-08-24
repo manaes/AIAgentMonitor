@@ -12,9 +12,13 @@ import {
   networkUnpair,
   networkUnpairAll,
   listenNetworkStatus,
+  getSettings,
+  setEnabledAgents,
   type Snapshot,
   type BleStatus,
   type NetworkStatus,
+  type AppSettings,
+  type AgentKind,
 } from "./tauri";
 
 class SnapshotStore {
@@ -206,6 +210,30 @@ class SnapshotStore {
       this.networkActionError = null;
     } catch (e) {
       this.networkActionError = `전체 해제에 실패했습니다: ${e}`;
+    }
+  }
+
+  // ── 표시 설정(에이전트 선택) ──────────────────────────
+  // 다른 기기가 설정을 바꿀 일이 없어(로컬 전용) ble/network 처럼 이벤트를
+  // 구독하지 않는다 — 이 앱 안에서 사용자가 SettingsPanel 로 직접 바꿀 때만
+  // 값이 바뀐다.
+  settings = $state<AppSettings | null>(null);
+  settingsActionError = $state<string | null>(null);
+  #settingsInitialized = false;
+
+  async initSettings() {
+    if (this.#settingsInitialized) return;
+    this.#settingsInitialized = true;
+    this.settings = await getSettings();
+  }
+
+  async setEnabledAgents(agents: AgentKind[]) {
+    try {
+      await setEnabledAgents(agents);
+      this.settings = { enabled_agents: agents };
+      this.settingsActionError = null;
+    } catch (e) {
+      this.settingsActionError = `설정을 저장하지 못했습니다: ${e}`;
     }
   }
 }

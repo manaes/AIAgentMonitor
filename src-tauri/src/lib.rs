@@ -4,6 +4,7 @@ mod clock;
 mod emitter;
 mod network;
 mod quota_proxy;
+mod settings;
 mod tray;
 mod types;
 mod watchers;
@@ -285,6 +286,27 @@ async fn network_set_enabled(
     Ok(())
 }
 
+#[tauri::command]
+async fn get_settings(
+    state: tauri::State<'_, Arc<Mutex<settings::AppSettings>>>,
+) -> Result<settings::AppSettings, String> {
+    Ok(state.lock().await.clone())
+}
+
+/// 워처는 계속 돈다 — 여기서 켜고 끄는 건 다음 틱부터 화면(과 iOS 미러)에
+/// 무엇을 내보낼지일 뿐이다. 그래서 다시 켜도 데이터가 끊김 없이 바로 보인다.
+#[tauri::command]
+async fn set_enabled_agents(
+    agents: Vec<AgentKind>,
+    state: tauri::State<'_, Arc<Mutex<settings::AppSettings>>>,
+) -> Result<(), String> {
+    let updated = settings::AppSettings { enabled_agents: agents.into_iter().collect() };
+    settings::SettingsStore::save_to(&settings::SettingsStore::path(), &updated)
+        .map_err(|e| e.to_string())?;
+    *state.lock().await = updated;
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 fn hide_console_window(cmd: &mut Command) -> &mut Command {
     use std::os::windows::process::CommandExt;
@@ -547,6 +569,14 @@ pub fn run() {
     drop(tx); // 모든 producer 등록 완료 후 원본 drop
 
     let aggregator = Arc::new(Mutex::new(Aggregator::new()));
+    // 사용자가 설정 탭에서 고른, 화면에 표시할 에이전트 종류. 워처는 선택과
+    // 무관하게 계속 돈다 — 매 틱마다 스냅샷을 이 목록으로 걸러낼 뿐이다
+    // (간단함 우선, 사용자 확인). BLE/네트워크 미러 페이로드가 이 필터링된
+    // Snapshot 에서 만들어지므로 iOS 쪽도 자동으로 같은 필터를 반영한다 —
+    // 그쪽 코드는 한 줄도 안 건드린다.
+    let settings_state = Arc::new(Mutex::new(
+        settings::SettingsStore::load_from(&settings::SettingsStore::path()),
+    ));
 
     // 앱 시작 시 즉시 한 번 핑 (persisted 캐시가 낡았을 수 있으므로)
     tauri::async_runtime::spawn(async move {
@@ -630,6 +660,8 @@ pub fn run() {
             network_begin_pairing,
             network_unpair,
             network_unpair_all,
+            get_settings,
+            set_enabled_agents,
         ])
         .setup({
             let aggregator = aggregator.clone();
@@ -637,7 +669,10 @@ pub fn run() {
             let quota_state = quota_state.clone();
             let codex_quota = codex_quota.clone();
             let antigravity_quota = antigravity_quota.clone();
+            let settings_state = settings_state.clone();
             move |app| {
+                use tauri::Manager;
+                app.manage(settings_state.clone());
                 // Dock 아이콘 숨김 — setup 초반에 호출
                 #[cfg(target_os = "macos")]
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -905,6 +940,7 @@ pub fn run() {
                 let antigravity_for_tick = antigravity_quota.clone();
                 let ble_for_tick = ble_handle.clone();
                 let network_for_tick = network_handle.clone();
+                let settings_for_tick = settings_state.clone();
                 tauri::async_runtime::spawn(async move {
                     let clock = SystemClock;
                     let mut ticker = tokio::time::interval(Duration::from_millis(250));
@@ -913,6 +949,14 @@ pub fn run() {
                         let mut a = agg_for_tick.lock().await;
                         let mut snap = a.snapshot(&clock);
                         drop(a);
+                        // 사용자가 설정 탭에서 고른 종류만 남긴다. 워처는 선택과 무관하게
+                        // 계속 돌므로 다시 켜도 데이터가 끊김 없이 바로 보인다. BLE/네트워크
+                        // 미러 페이로드가 이 Snapshot 에서 만들어지므로 iOS 쪽도 자동으로
+                        // 같은 필터를 반영한다.
+                        {
+                            let enabled = settings_for_tick.lock().await;
+                            snap.agents.retain(|ag| enabled.enabled_agents.contains(&ag.kind));
+                        }
                         // 실제 quota 주입(있을 때만): Claude=프록시 헤더, Codex=rollout rate_limits, Antigravity=gen_metadata 버킷
                         if let Some(c) =
                             snap.agents.iter_mut().find(|a| a.kind == AgentKind::Claude)
