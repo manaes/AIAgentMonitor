@@ -41,45 +41,6 @@ final class NetworkClientTests: XCTestCase {
         XCTAssertNil(NetworkClient.parseQrPayload("not a url at all"))
     }
 
-    // MARK: - 첫 프레임 선택 (QR 스캔 vs 저장된 토큰)
-
-    /// QR 을 방금 스캔했다는 건 "새로 페어링하겠다" 는 명시적 의사다. 그런데
-    /// 초안은 저장된 토큰이 있으면 그걸 **우선**해 AUTH 를 보냈다 — Mac 에서
-    /// 전체 해제로 토큰이 폐기된 뒤엔 그 재인증이 반드시 거부되고,
-    /// needsPairing 으로 떨어지면서 방금 스캔한 코드는 쓰이지도 못했다.
-    func testAFreshlyScannedCodeWinsOverAStoredToken() {
-        XCTAssertEqual(
-            NetworkClient.initialFrame(hasToken: true, code: "123456"),
-            PairingClient.codeFrame("123456"),
-            "코드를 들고 있으면 저장된 토큰이 있어도 그 코드를 쓴다"
-        )
-    }
-
-    /// 코드 없이 재연결하는 평소 경로 — 저장된 토큰으로 조용히 재인증한다.
-    func testStoredTokenIsUsedWhenReconnectingWithoutACode() {
-        XCTAssertEqual(
-            NetworkClient.initialFrame(hasToken: true, code: nil),
-            PairingClient.authFrame()
-        )
-    }
-
-    /// 토큰도 코드도 없으면 HELLO 로 시작해 창이 열려 있는지 물어본다.
-    func testHelloWhenThereIsNeitherTokenNorCode() {
-        XCTAssertEqual(
-            NetworkClient.initialFrame(hasToken: false, code: nil),
-            PairingClient.helloFrame()
-        )
-    }
-
-    /// 토큰이 없고 코드만 있으면(첫 페어링) 바로 코드를 낸다 — Mac 은 HELLO
-    /// 없이 온 CODE: 도 받는다(pairing.rs: code_without_prior_hello_still_grants).
-    func testCodeIsSentDirectlyOnFirstPairing() {
-        XCTAssertEqual(
-            NetworkClient.initialFrame(hasToken: false, code: "654321"),
-            PairingClient.codeFrame("654321")
-        )
-    }
-
     // MARK: - v2 첫 프레임
 
     private let clientPub = Data(repeating: 1, count: 32)

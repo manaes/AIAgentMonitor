@@ -155,23 +155,6 @@ public final class NetworkClient: NSObject {
         }
     }
 
-    /// 인증을 어떤 프레임으로 시작할지 고른다.
-    ///
-    /// **코드가 있으면 저장된 토큰보다 코드를 우선한다.** QR 을 방금 스캔했다는
-    /// 것은 "새로 페어링하겠다" 는 명시적 의사이기 때문이다. 초안은 토큰을
-    /// 우선했는데, Mac 에서 전체 해제로 토큰이 폐기된 뒤에는 그 재인증이 반드시
-    /// 거부되어(`Rejected` → `resetAndAwaitCode`) 방금 스캔한 코드가 쓰이지도
-    /// 못한 채 `needsPairing` 으로 떨어졌다.
-    ///
-    /// 코드가 있으면 `HELLO` 를 건너뛰고 바로 `CODE:` 를 낸다 — Mac 은 HELLO
-    /// 없이 온 CODE: 도 받는다(`pairing.rs: code_without_prior_hello_still_grants`).
-    nonisolated static func initialFrame(hasToken: Bool, code: String?) -> Data {
-        if let code {
-            return PairingClient.codeFrame(code)
-        }
-        return hasToken ? PairingClient.authFrame() : PairingClient.helloFrame()
-    }
-
     /// `BLEClient.decideV2` 와 동일한 결정을 그대로 쓴다 — 전송만 다를 뿐 상태
     /// 기계는 하나다. QR 로 코드를 이미 받았으므로 `AwaitingCode2` 에서 사용자
     /// 입력을 기다리지 않고 즉시 바인딩을 낸다(재연결 경로에서는 `code` 가 nil

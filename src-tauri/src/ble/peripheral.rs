@@ -66,14 +66,6 @@ pub trait BlePeripheral: Send + Sync {
     /// 부르는 것이 곧 스펙 5.1 의 "인가된 central 에만 notify" 다.
     fn offer_frame_to(&self, ch: CharId, central: &CentralId, chunks: Vec<Vec<u8>>);
     fn subscribers(&self) -> Vec<Subscriber>;
-    /// 모든 구독자가 받을 수 있는 최대 청크 크기. 구독자가 없으면 None.
-    ///
-    /// **프레이밍에는 쓰지 않는다.** 청크 크기는 `offer_frame_to` 를 부르는
-    /// 쪽이 그 central 의 `max_notify_len` 으로 정한다 — 여기로 되돌아가면
-    /// MTU 가 작은 기기 하나가 모두의 청크를 잘게 만드는 결함이 되살아난다.
-    fn min_notify_len(&self) -> Option<usize> {
-        self.subscribers().iter().map(|s| s.max_notify_len).min()
-    }
     /// Auth 특성으로 한 central 에만 응답한다.
     fn notify_auth(&self, central: &CentralId, payload: Vec<u8>);
 
@@ -191,26 +183,6 @@ mod tests {
         assert_eq!(frames[0].0, CharId::Snapshot);
         assert_eq!(frames[0].1, vec![vec![1, 2, 3], vec![4]]);
         assert_eq!(frames[0].2, vec![CentralId("A".into())]);
-    }
-
-    #[test]
-    fn fake_reports_smallest_subscriber_mtu() {
-        let p = FakePeripheral::new();
-        p.set_subscribers(vec![
-            Subscriber { id: CentralId("A".into()), max_notify_len: 185 },
-            Subscriber { id: CentralId("B".into()), max_notify_len: 23 },
-        ]);
-        assert_eq!(
-            p.min_notify_len(),
-            Some(23),
-            "가장 작은 구독자에 맞춰야 모두가 받을 수 있다"
-        );
-    }
-
-    #[test]
-    fn min_notify_len_is_none_without_subscribers() {
-        let p = FakePeripheral::new();
-        assert_eq!(p.min_notify_len(), None);
     }
 
     #[test]

@@ -4,12 +4,6 @@ import XCTest
 
 final class PairingClientTests: XCTestCase {
 
-    func testFrameEncodingMatchesRustParser() {
-        XCTAssertEqual(String(data: PairingClient.helloFrame(), encoding: .utf8), "HELLO")
-        XCTAssertEqual(String(data: PairingClient.codeFrame("123456"), encoding: .utf8), "CODE:123456")
-        XCTAssertEqual(String(data: PairingClient.authFrame(), encoding: .utf8), "AUTH")
-    }
-
     func testParsesGrant() {
         let d = Data(#"{"ok":true,"token":"deadbeef"}"#.utf8)
         let r = PairingClient.parse(d)
@@ -78,21 +72,6 @@ final class PairingClientTests: XCTestCase {
         let r = PairingClient.parse(Data(#"{"ok":true}"#.utf8))
         XCTAssertEqual(r?.ok, true)
         XCTAssertNil(r?.token)
-    }
-
-    /// 개정: Step 1 원문 docstring 이 "이 태스크의 테스트가 hmac-sample.json 을 읽어
-    /// 검증해야 한다" 고 말했지만 정작 그 테스트가 빠져 있었다. Rust 팀리드가 Python 으로
-    /// 독립 재계산해 이 파일의 proof 값과 일치를 확인해뒀다(golden, 94c5af7).
-    func testProofFrameMatchesGoldenVector() throws {
-        struct Golden: Decodable { let token: String; let nonce: String; let proof: String }
-        let url = try XCTUnwrap(
-            Bundle(for: Self.self).url(forResource: "hmac-sample", withExtension: "json"),
-            "골든 벡터가 테스트 번들에 없다"
-        )
-        let golden = try JSONDecoder().decode(Golden.self, from: Data(contentsOf: url))
-        let frame = try XCTUnwrap(PairingClient.proofFrame(token: golden.token, nonce: golden.nonce))
-        let text = try XCTUnwrap(String(data: frame, encoding: .utf8))
-        XCTAssertEqual(text, "PROOF:\(golden.proof)")
     }
 
     // MARK: - v2

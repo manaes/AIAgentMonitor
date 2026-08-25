@@ -720,7 +720,8 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
               let snapshotCh = snapshotCharacteristic,
               let handshake, let sentVerb = v2.sent else { return }
         guard let reply = PairingClient.parse(data) else {
-            // v2 응답은 v1 보다 훨씬 길다(`AwaitingCode2` 가 148바이트). Auth 특성은
+            // v2 응답은 v1 보다 훨씬 길다(`AwaitingCode2` 가 149바이트, `Granted2` 는
+            // 165바이트 — 표는 `docs/ble-protocol/DEVICE-TEST.md §7-1`). Auth 특성은
             // 청킹 없이 notify 한 장으로 나가므로 MTU 협상이 낮게 끝나면 여기서
             // 잘린 JSON 이 도착한다 — 조용히 return 하면 화면이 이유 없이 멈춘다.
             NSLog("Auth 응답을 해석하지 못했습니다(\(data.count)바이트)")

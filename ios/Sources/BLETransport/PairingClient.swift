@@ -21,8 +21,8 @@ public struct AuthReplyPayload: Decodable, Equatable, Sendable {
     public let left: Int?
     /// Rust 가 보내는 키는 `await` 인데 Swift 예약어라 이름을 바꿔 받는다.
     public let awaiting: String?
-    /// 재인증 2단계(AUTH/AUTH2 응답)로 받는 논스. v1 은 `proofFrame` 의 메시지이고,
-    /// v2 는 세션 키 파생의 salt 이자 proof 메시지의 앞부분이다.
+    /// 재인증 2단계(AUTH/AUTH2 응답)로 받는 논스. v2 에서는 세션 키 파생의 salt
+    /// 이자 proof 메시지의 앞부분이다(v1 에서는 서명 대상 그 자체였다).
     public let nonce: String?
     /// 프로토콜 세대. v2 응답에만 `2` 로 실린다.
     public let v: Int?
@@ -37,20 +37,18 @@ public struct AuthReplyPayload: Decodable, Equatable, Sendable {
     }
 }
 
+/// **v1 요청 프레임(`HELLO`/`CODE:`/`AUTH`/`PROOF:`)을 만드는 함수는 여기 없다.**
+/// 지우고 나서 다시 만들지 않기 위해 이유를 남긴다: 클라이언트는 v2 만 말하고
+/// 다운그레이드하지 않는다(스펙 8장). 맥이 전환기 동안 v1 을 계속 **받아 준다**는
+/// 사실은 우리가 v1 을 **말할** 이유가 되지 못한다 — 구버전 맥을 만나면 거절당하는
+/// 것이 의도된 동작이다. 반대로 응답을 **읽는** 쪽(`parse`, `BLEClient.decide`)은
+/// 맥이 지금도 v1 응답을 만들기 때문에 남아 있다. 이 비대칭이 요점이다.
+///
+/// `CODE:` 는 6자리 코드를 평문으로 링크에 싣던 유일한 함수였고, 코드가 어느
+/// 방향으로도 링크를 건너지 않게 만드는 것이 v2 의 존재 이유다. 첫 프레임 선택
+/// 규칙("방금 받은 코드가 저장된 토큰을 이긴다")은 살아 있고, `BLEClient.initialSend`
+/// 한 곳이 v2 동사로 그 규칙을 들고 있다.
 public enum PairingClient {
-    public static func helloFrame() -> Data { Data("HELLO".utf8) }
-    public static func codeFrame(_ code: String) -> Data { Data("CODE:\(code)".utf8) }
-    public static func authFrame() -> Data { Data("AUTH".utf8) }
-
-    /// 논스에 대한 서명. **hex 문자열이 아니라 디코드한 원시 바이트**로 계산한다 —
-    /// 이 계약은 docs/ble-protocol/golden/hmac-sample.json 이 고정한다.
-    public static func proofFrame(token: String, nonce: String) -> Data? {
-        guard let key = Data(hexString: token), let msg = Data(hexString: nonce) else { return nil }
-        let mac = HMAC<SHA256>.authenticationCode(for: msg, using: SymmetricKey(data: key))
-        let hex = mac.map { String(format: "%02x", $0) }.joined()
-        return Data("PROOF:\(hex)".utf8)
-    }
-
     public static func parse(_ data: Data) -> AuthReplyPayload? {
         try? JSONDecoder().decode(AuthReplyPayload.self, from: data)
     }
@@ -156,7 +154,8 @@ public final class V2Handshake: V2Handshaking {
     }
 
     /// `PROOF2:` 에 실을 재연결 증명. 토큰은 hex 문자열이 아니라 **디코드한 원시
-    /// 바이트**를 키로 쓴다(v1 `proofFrame` 과 같은 계약).
+    /// 바이트**를 키로 쓴다 — v1 `PROOF:` 부터 이어지는 계약이고, 지금은
+    /// `docs/ble-protocol/golden/e2ee-v2-sample.json` 의 `session_proof` 가 고정한다.
     public func sessionProof(tokenHex: String) -> Data? {
         guard let transcript, let nonce, let token = Data(hexString: tokenHex) else { return nil }
         return CryptoV2.sessionProof(token: token, nonce: nonce, transcript: transcript)
