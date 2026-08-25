@@ -914,8 +914,84 @@ impl PairingManager {
 
 /// 모듈 수준 hex 인코더. 기존 `hex_encode` 는 `mod tests` 안에만 있어
 /// 프로덕션 코드에서 쓸 수 없다.
-fn hex_encode_bytes(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 테스트 전용 v2 클라이언트. 이 파일의 `mod tests` 안에 있던 것을 형제
+/// 모듈에서도 볼 수 있게 끌어올렸다 — 전송 배선(`ble::mod`, `network::mod`)
+/// 테스트도 **진짜** 핸드셰이크를 밟아야 봉인 여부를 확인할 수 있는데, 셋이
+/// 각자 베껴 두면 스펙이 바뀔 때 한 곳만 고치고 나머지를 잊는다.
+#[cfg(test)]
+pub(crate) mod test_client {
+    use super::*;
+    use crate::crypto;
+
+    pub(crate) fn hex_encode(bytes: &[u8]) -> String {
+        hex_encode_bytes(bytes)
+    }
+
+    /// 테스트에서 "v2 클라이언트" 역할을 한다.
+    pub(crate) struct V2Client {
+        kp: Option<crypto::EphemeralKeyPair>,
+        pub(crate) public: [u8; 32],
+    }
+
+    impl V2Client {
+        pub(crate) fn new() -> Self {
+            let kp = crypto::ephemeral_keypair();
+            let public = kp.public;
+            Self { kp: Some(kp), public }
+        }
+        /// 서버 응답으로부터 공유 비밀과 transcript 를 만든다.
+        pub(crate) fn agree(&mut self, epk_hex: &str) -> ([u8; 32], [u8; 64]) {
+            let spk = hex32(epk_hex);
+            let kp = self.kp.take().expect("임시 키는 한 번만 쓴다");
+            let ss = crypto::agree(kp, &spk).expect("정상 키끼리는 합의된다");
+            (ss, crypto::transcript(&self.public, &spk))
+        }
+    }
+
+    pub(crate) fn hex32(s: &str) -> [u8; 32] {
+        let v = PairingManager::hex_decode(s).expect("유효한 hex");
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&v);
+        out
+    }
+
+    pub(crate) fn hex_decode(s: &str) -> Vec<u8> {
+        PairingManager::hex_decode(s).expect("유효한 hex")
+    }
+
+    pub(crate) fn epk_and_nonce(reply: &AuthReply) -> (String, String) {
+        match reply {
+            AuthReply::AwaitingCode2 { epk, nonce } => (epk.clone(), nonce.clone()),
+            other => panic!("AwaitingCode2 를 기대했다: {other:?}"),
+        }
+    }
+
+    /// `Granted2` 의 봉인 토큰을 열고, 그 토큰으로 **클라이언트 방향** 세션
+    /// 채널을 만든다. 맥은 `(s2c, c2s)` 로, 클라이언트는 그 반대로 넣는다 —
+    /// 이 뒤집기가 전송 계층 테스트에서 가장 틀리기 쉬운 지점이라 한 곳에
+    /// 모아 둔다(스펙 6.1).
+    pub(crate) fn open_pairing_and_session(
+        ss: &[u8; 32],
+        nonce_hex: &str,
+        sealed_hex: &str,
+    ) -> (String, SealedChannel) {
+        let nonce_bytes = hex_decode(nonce_hex);
+        let k_pair = crypto::derive_pair_key(ss, &nonce_bytes);
+        let mut pair_ch = SealedChannel::new(k_pair, k_pair);
+        let plain = pair_ch
+            .open(&hex_decode(sealed_hex))
+            .expect("k_pair 로 열려야 한다");
+        let json: serde_json::Value = serde_json::from_slice(&plain).expect("유효한 JSON");
+        let token = json["token"].as_str().expect("토큰이 들어 있어야 한다").to_string();
+
+        let token_bytes = hex_decode(&token);
+        let (s2c, c2s) = crypto::derive_session_keys(ss, &token_bytes, &nonce_bytes);
+        (token, SealedChannel::new(c2s, s2c))
+    }
 }
 
 #[cfg(test)]
@@ -941,46 +1017,8 @@ mod tests {
         chars.into_iter().collect()
     }
 
-    fn hex_encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
     use crate::crypto::{self, channel::SealedChannel};
-
-    /// 테스트에서 "v2 클라이언트" 역할을 한다.
-    struct V2Client {
-        kp: Option<crypto::EphemeralKeyPair>,
-        public: [u8; 32],
-    }
-
-    impl V2Client {
-        fn new() -> Self {
-            let kp = crypto::ephemeral_keypair();
-            let public = kp.public;
-            Self { kp: Some(kp), public }
-        }
-        /// 서버 응답으로부터 공유 비밀과 transcript 를 만든다.
-        fn agree(&mut self, epk_hex: &str) -> ([u8; 32], [u8; 64]) {
-            let spk = hex32(epk_hex);
-            let kp = self.kp.take().expect("임시 키는 한 번만 쓴다");
-            let ss = crypto::agree(kp, &spk).expect("정상 키끼리는 합의된다");
-            (ss, crypto::transcript(&self.public, &spk))
-        }
-    }
-
-    fn hex32(s: &str) -> [u8; 32] {
-        let v = PairingManager::hex_decode(s).expect("유효한 hex");
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&v);
-        out
-    }
-
-    fn epk_and_nonce(reply: &AuthReply) -> (String, String) {
-        match reply {
-            AuthReply::AwaitingCode2 { epk, nonce } => (epk.clone(), nonce.clone()),
-            other => panic!("AwaitingCode2 를 기대했다: {other:?}"),
-        }
-    }
+    use super::test_client::{epk_and_nonce, hex_encode, V2Client};
 
     #[test]
     fn v2_pairing_delivers_the_token_sealed() {

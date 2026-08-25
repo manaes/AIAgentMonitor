@@ -41,7 +41,7 @@ const NETWORK_THROTTLE: Duration = Duration::from_millis(1000);
 pub struct AuthOutcome {
     pub payload: Vec<u8>,
     pub now_authorized: bool,
-    /// `CODE:` 로 새 토큰이 발급됐는가. 그 경우 호출부가 갱신된 목록을
+    /// `CODE:`/`CODE2:` 로 새 토큰이 발급됐는가. 그 경우 호출부가 갱신된 목록을
     /// 디스크에 쓴다(저장소는 이제 앱이 소유한다 — 2026-08-25 스펙 5장).
     pub granted: bool,
 }
@@ -117,8 +117,17 @@ impl NetworkBridge {
         let req = pairing::parse_auth_request(data);
         let reply = pairing.handle(central, req, now);
         let payload = reply.to_json_bytes();
-        let now_authorized = matches!(reply, AuthReply::Granted { .. } | AuthReply::Authorized);
-        let granted = matches!(reply, AuthReply::Granted { .. });
+        // v2 응답도 반드시 함께 본다. 여기서 빠지면 v2 클라이언트는 인증에
+        // 성공하고도 accept 루프가 스냅샷 uni-stream 을 열지 않아 화면이 계속
+        // 비어 있고, 새 토큰도 디스크에 남지 않는다.
+        let now_authorized = matches!(
+            reply,
+            AuthReply::Granted { .. }
+                | AuthReply::Authorized
+                | AuthReply::Granted2 { .. }
+                | AuthReply::Authorized2
+        );
+        let granted = matches!(reply, AuthReply::Granted { .. } | AuthReply::Granted2 { .. });
         AuthOutcome { payload, now_authorized, granted }
     }
 
@@ -135,7 +144,15 @@ impl NetworkBridge {
 
     /// 스냅샷 틱마다 호출한다. 인가된 central 이 하나도 없거나 꺼져 있으면
     /// 즉시 반환 — BLE 의 "구독자 없으면 직렬화도 안 함" 과 같은 절약.
-    pub async fn on_snapshot(&mut self, snap: &Snapshot, now: SystemTime) {
+    ///
+    /// `pairing` 이 `&mut` 인 이유는 BLE 쪽과 같다 — 봉인이 채널의 송신 카운터를
+    /// 전진시킨다.
+    pub async fn on_snapshot(
+        &mut self,
+        snap: &Snapshot,
+        now: SystemTime,
+        pairing: &mut PairingManager,
+    ) {
         if !self.enabled || self.snapshot_senders.is_empty() {
             return;
         }
@@ -144,7 +161,7 @@ impl NetworkBridge {
         }
 
         let dto = MirrorSnapshot::from(snap);
-        let mut line = match serde_json::to_vec(&dto) {
+        let json = match serde_json::to_vec(&dto) {
             Ok(v) => v,
             Err(e) => {
                 tracing::error!("네트워크 스냅샷 직렬화 실패: {e}");
@@ -152,17 +169,43 @@ impl NetworkBridge {
                 return;
             }
         };
-        line.push(b'\n');
 
+        // 봉인은 central 마다 다른 키와 카운터를 쓰므로 줄도 central 마다 따로
+        // 만든다. 대상 목록을 먼저 뜨는 것은 `pairing` 을 `&mut` 로 빌리는 동안
+        // `snapshot_senders` 를 함께 빌릴 수 없기 때문이다.
+        let targets: Vec<CentralId> = self.snapshot_senders.keys().cloned().collect();
         let mut dead = Vec::new();
-        for (central, sender) in self.snapshot_senders.iter_mut() {
+        for central in targets {
+            let mut line = snapshot_line(pairing, &central, &json);
+            line.push(b'\n');
+            let Some(sender) = self.snapshot_senders.get_mut(&central) else {
+                continue;
+            };
             if sender.write_all(&line).await.is_err() {
-                dead.push(central.clone());
+                dead.push(central);
             }
         }
         for central in dead {
             self.snapshot_senders.remove(&central);
         }
+    }
+}
+
+/// 이 central 에게 실제로 나갈 한 줄(줄바꿈은 붙이지 않는다).
+///
+/// v2 세션이면 봉인하고, v1 세션이면 평문 JSON 그대로 보낸다 — 채널이 없다는
+/// 것이 곧 v1 이라는 뜻이고, 전환 기간 동안 두 세대가 공존한다(스펙 8장).
+///
+/// **v2 는 봉인 프레임을 hex 로 싣는다.** 이 스트림은 줄바꿈으로 프레임 경계를
+/// 나누는데(모듈 머리말의 NDJSON) 봉인 프레임은 임의의 이진 바이트라 0x0A 를
+/// 그대로 담을 수 있다 — 날 것으로 흘려보내면 프레임 하나가 여러 줄로 쪼개져
+/// 수신 측 경계 인식이 무너진다. 스냅샷 한 건 크기라면 사실상 매번 일어난다.
+/// hex 는 이 프로토콜이 이미 `Granted2.sealed`·`epk`·`nonce` 에 쓰는 표기이고,
+/// `{` 로 시작하지 않으므로 v1 평문 줄과도 한눈에 구분된다.
+fn snapshot_line(pairing: &mut PairingManager, central: &CentralId, json: &[u8]) -> Vec<u8> {
+    match pairing.channel_mut(central) {
+        Some(ch) => pairing::hex_encode_bytes(&ch.seal(json)).into_bytes(),
+        None => json.to_vec(),
     }
 }
 
@@ -210,11 +253,160 @@ pub fn build_endpoint_builder(secret: iroh::SecretKey) -> iroh::endpoint::Builde
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ble::pairing::test_client::{self, hex_encode, V2Client};
+    use crate::crypto::{self, channel::SealedChannel};
     use iroh::endpoint::{Builder, RelayMode};
     use iroh::{Endpoint, EndpointAddr, SecretKey};
     use std::sync::Arc;
     use std::time::UNIX_EPOCH;
     use tokio::sync::Mutex;
+
+    fn field(bytes: &[u8], key: &str) -> String {
+        let v: serde_json::Value = serde_json::from_slice(bytes).expect("응답은 JSON 이다");
+        v[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("{key} 필드가 없다: {v}"))
+            .to_string()
+    }
+
+    /// v2 로 페어링한다. 브릿지의 `handle_auth` 를 그대로 타므로 `AuthOutcome`
+    /// 배선까지 함께 지나간다 — I/O 는 없다(제어 스트림 읽고 쓰기는 호출부
+    /// 책임이므로 이 메서드는 순수한 동기 상태 기계 호출이다).
+    fn v2_pair(
+        b: &mut NetworkBridge,
+        p: &mut PairingManager,
+        central: &CentralId,
+        now: SystemTime,
+    ) -> (AuthOutcome, SealedChannel) {
+        let code = p.begin_pairing(now);
+        let mut c = V2Client::new();
+
+        let out = b.handle_auth(
+            central,
+            format!("HELLO2:{}", hex_encode(&c.public)).as_bytes(),
+            now,
+            p,
+        );
+        let (epk, nonce) = (field(&out.payload, "epk"), field(&out.payload, "nonce"));
+        let (ss, tr) = c.agree(&epk);
+
+        let cbind = hex_encode(&crypto::code_binding(&code, &tr));
+        let out = b.handle_auth(central, format!("CODE2:{cbind}").as_bytes(), now, p);
+        let sealed = field(&out.payload, "sealed");
+        let (_token, ch) = test_client::open_pairing_and_session(&ss, &nonce, &sealed);
+        (out, ch)
+    }
+
+    /// v2 페어링이 성공해도 `AuthOutcome` 이 그것을 알리지 않으면, accept 루프는
+    /// 스냅샷 uni-stream 을 열지 않고 토큰도 디스크에 쓰지 않는다 — 암호는 전부
+    /// 맞는데 아이폰 화면만 영원히 비어 있게 된다.
+    #[test]
+    fn v2_grant_is_reported_as_authorized_and_worth_persisting() {
+        let mut b = NetworkBridge::new();
+        let mut p = PairingManager::new();
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let (out, _ch) = v2_pair(&mut b, &mut p, &CentralId("N".into()), now);
+
+        assert!(out.now_authorized, "v2 페어링 성공은 인가로 이어져야 한다");
+        assert!(out.granted, "v2 도 새 토큰을 발급한다 — 저장하지 않으면 재부팅 후 사라진다");
+        assert_eq!(p.issued_peers().len(), 1);
+    }
+
+    /// 재연결(`AUTH2`/`PROOF2`)도 인가다. 여기가 빠지면 저장된 토큰으로 자동
+    /// 재연결한 아이폰이 스냅샷 스트림을 못 받는다.
+    #[test]
+    fn v2_reconnect_is_reported_as_authorized_but_not_persisted() {
+        let mut b = NetworkBridge::new();
+        let mut p = PairingManager::new();
+        let token = "aa".repeat(16);
+        p.load_peers(vec![(token.clone(), 900)]);
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let central = CentralId("N".into());
+        let mut c = V2Client::new();
+
+        let out = b.handle_auth(
+            &central,
+            format!("AUTH2:{}", hex_encode(&c.public)).as_bytes(),
+            now,
+            &mut p,
+        );
+        let (epk, nonce) = (field(&out.payload, "epk"), field(&out.payload, "nonce"));
+        let (_ss, tr) = c.agree(&epk);
+        let proof = hex_encode(&crypto::session_proof(
+            &test_client::hex_decode(&token),
+            &test_client::hex_decode(&nonce),
+            &tr,
+        ));
+
+        let out = b.handle_auth(&central, format!("PROOF2:{proof}").as_bytes(), now, &mut p);
+        assert!(out.now_authorized, "재연결 성공은 인가로 이어져야 한다");
+        assert!(
+            !out.granted,
+            "재연결은 새 토큰을 발급하지 않는다 — 저장할 것이 없다"
+        );
+        assert!(p.is_authorized(&central));
+    }
+
+    /// BLE 와 같은 성질 — v2 세션에는 평문 JSON 이 나가면 안 된다.
+    /// `on_snapshot` 은 실제 `SendStream` 을 요구하지만 줄을 만드는 판단 자체는
+    /// `snapshot_line` 에 있으므로, I/O 없이 그 판단만 곧바로 확인한다.
+    #[test]
+    fn v2_session_gets_a_sealed_line_the_client_can_open() {
+        let mut b = NetworkBridge::new();
+        let mut p = PairingManager::new();
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let central = CentralId("N".into());
+        let (_out, mut client) = v2_pair(&mut b, &mut p, &central, now);
+
+        let json = br#"{"v":1,"agents":[]}"#;
+        let line = snapshot_line(&mut p, &central, json);
+
+        assert!(!line.starts_with(b"{"), "평문 JSON 이 나갔다");
+        assert!(
+            !line.contains(&b'\n'),
+            "줄바꿈이 프레임 경계인 스트림에 0x0A 가 섞이면 수신 측이 프레임을 쪼갠다"
+        );
+        let frame = test_client::hex_decode(&String::from_utf8(line).expect("hex 는 ASCII 다"));
+        assert_eq!(
+            client.open(&frame).expect("세션 키로 열려야 한다"),
+            json,
+            "열고 나면 원래 JSON 이어야 한다"
+        );
+    }
+
+    /// v1 세션은 전환 기간 동안 평문 그대로다(스펙 8장).
+    #[test]
+    fn v1_session_still_gets_a_plaintext_json_line() {
+        let mut p = PairingManager::new();
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let central = CentralId("N".into());
+        let code = p.begin_pairing(now);
+        p.handle(&central, pairing::AuthRequest::Code(code), now);
+        assert!(p.is_authorized(&central));
+
+        let json = br#"{"v":1,"agents":[]}"#;
+        assert_eq!(snapshot_line(&mut p, &central, json), json.to_vec());
+    }
+
+    /// 카운터는 줄마다 전진해야 한다 — 같은 (키, 논스) 로 두 번 봉인하면
+    /// ChaCha20-Poly1305 의 보장이 무너진다.
+    #[test]
+    fn each_v2_line_advances_the_counter() {
+        let mut b = NetworkBridge::new();
+        let mut p = PairingManager::new();
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let central = CentralId("N".into());
+        let (_out, mut client) = v2_pair(&mut b, &mut p, &central, now);
+
+        let json = br#"{"v":1,"agents":[]}"#;
+        let first = snapshot_line(&mut p, &central, json);
+        let second = snapshot_line(&mut p, &central, json);
+        assert_ne!(first, second, "같은 내용이라도 카운터가 달라 바이트가 달라야 한다");
+
+        let de = |l: Vec<u8>| test_client::hex_decode(&String::from_utf8(l).unwrap());
+        assert!(client.open(&de(first)).is_ok());
+        assert!(client.open(&de(second)).is_ok(), "재전송으로 오인되면 안 된다");
+    }
 
     /// 회귀 방지: Mac 이 자기 주소를 discovery 에 **게시**하지 않으면, 폰은 QR 을
     /// 스캔하던 순간의 주소 스냅샷만 갖게 되고 Mac 이 재시작해 UDP 포트가 바뀌는

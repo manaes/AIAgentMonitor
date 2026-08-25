@@ -909,6 +909,11 @@ pub fn run() {
                     let pairing_for_ble = shared_pairing.clone();
                     tauri::async_runtime::spawn(async move {
                         while let Some(ev) = ble_rx.recv().await {
+                            // `apply_event` 는 `PoweredOff` 에서 구독자 사본을 통째로
+                            // 비운다. 그 뒤에 읽으면 언제나 빈 목록이므로 반드시
+                            // 여기서 먼저 찍어둔다(`sessions_to_end_before` 의 doc).
+                            let served_before_apply =
+                                h.bridge.lock().await.sessions_to_end_before(&ev);
                             #[cfg(target_os = "macos")]
                             h.peripheral.apply_event(&ev);
                             match &ev {
@@ -924,7 +929,12 @@ pub fn run() {
                                     // 전원을 반복해서 껐다 켤 때마다 죽은 central id 가 쌓인다.
                                     // 공유 매니저이므로 **BLE 가 서비스 중이던 central 만**
                                     // 내린다 — 전체를 지우면 네트워크 세션까지 죽는다.
-                                    let served = h.bridge.lock().await.served_centrals();
+                                    // 목록은 `apply_event` 가 사본을 비우기 전에 찍어둔
+                                    // 것을 쓴다(이 루프 머리의 주석).
+                                    // 전송 자원(큐)은 macOS 쪽 `did_update_state` 의
+                                    // !powered 분기가 이미 비운다 — 여기서는 세션
+                                    // 인가만 내린다.
+                                    let served = served_before_apply.unwrap_or_default();
                                     pairing_for_ble.lock().await.end_sessions(&served);
                                 }
                                 ble::peripheral::PeripheralEvent::Error(e) => {
@@ -1051,12 +1061,19 @@ pub fn run() {
                         drop(g);
                         // BLE 미러는 자체 게이트(1Hz)를 가지며, 꺼져 있거나 구독자가 없으면 즉시 반환한다.
                         {
-                            // 인가 필터에 공유 페어링 상태가 필요하다. 네트워크는
-                            // snapshot_senders 가 이미 인가된 것만 들고 있어 불필요하다.
-                            let p = pairing_for_tick.lock().await;
-                            ble_for_tick.bridge.lock().await.on_snapshot(&snap, now, &p);
+                            // 두 전송 모두 공유 페어링 상태를 **가변으로** 받는다 —
+                            // BLE 는 인가 필터에 더해, 네트워크는 인가 필터 없이도,
+                            // v2 세션의 봉인 카운터를 전진시켜야 하기 때문이다.
+                            // 잠금 순서는 페어링 → 브릿지로, 인증 경로와 같다.
+                            let mut p = pairing_for_tick.lock().await;
+                            ble_for_tick.bridge.lock().await.on_snapshot(&snap, now, &mut p);
+                            network_for_tick
+                                .bridge
+                                .lock()
+                                .await
+                                .on_snapshot(&snap, now, &mut p)
+                                .await;
                         }
-                        network_for_tick.bridge.lock().await.on_snapshot(&snap, now).await;
                     }
                 });
 
