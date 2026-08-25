@@ -2,16 +2,14 @@ import {
   listenSnapshot,
   bleStatus,
   bleSetEnabled,
-  bleBeginPairing,
-  bleUnpair,
-  bleUnpairAll,
   listenBleStatus,
   networkStatus,
   networkSetEnabled,
-  networkBeginPairing,
-  networkUnpair,
-  networkUnpairAll,
   listenNetworkStatus,
+  pairingStatus,
+  beginPairing,
+  unpair,
+  unpairAll,
   getSettings,
   setEnabledAgents,
   type Snapshot,
@@ -19,6 +17,7 @@ import {
   type NetworkStatus,
   type AppSettings,
   type AgentKind,
+  type PairingStatus,
 } from "./tauri";
 
 class SnapshotStore {
@@ -100,49 +99,12 @@ class SnapshotStore {
     }
   }
 
-  async beginPairing() {
-    try {
-      await bleBeginPairing();
-      const seq = ++this.#bleReqSeq;
-      const status = await bleStatus();
-      if (seq === this.#bleReqSeq) this.ble = status;
-      this.bleActionError = null;
-    } catch (e) {
-      this.bleActionError = `페어링을 시작하지 못했습니다: ${e}`;
-    }
-  }
-
-  async unpair(peerId: string) {
-    try {
-      await bleUnpair(peerId);
-      const seq = ++this.#bleReqSeq;
-      const status = await bleStatus();
-      if (seq === this.#bleReqSeq) this.ble = status;
-      this.bleActionError = null;
-    } catch (e) {
-      this.bleActionError = `기기를 해제하지 못했습니다: ${e}`;
-    }
-  }
-
-  async unpairAll() {
-    try {
-      await bleUnpairAll();
-      const seq = ++this.#bleReqSeq;
-      const status = await bleStatus();
-      if (seq === this.#bleReqSeq) this.ble = status;
-      this.bleActionError = null;
-    } catch (e) {
-      this.bleActionError = `전체 해제에 실패했습니다: ${e}`;
-    }
-  }
-
   // ── 네트워크(iroh) — BLE와 같은 패턴(멱등 init, 순번 기반 재조회 경합 방지) ──
 
   network = $state<NetworkStatus | null>(null);
   networkActionError = $state<string | null>(null);
   // begin_pairing 이 돌려준 QR 페이로드. pairing_window 가 "open" 이 아니게
   // 되면(만료/소진/닫힘) DevicePanel 이 이 값을 무시하고 숨긴다.
-  networkQrPayload = $state<string | null>(null);
   #networkInitialized = false;
   #networkUnlisten: (() => void) | null = null;
   #networkReqSeq = 0;
@@ -168,48 +130,64 @@ class SnapshotStore {
       const seq = ++this.#networkReqSeq;
       const status = await networkStatus();
       if (seq === this.#networkReqSeq) this.network = status;
-      if (!on) this.networkQrPayload = null;
       this.networkActionError = null;
     } catch (e) {
       this.networkActionError = `네트워크 설정을 변경하지 못했습니다: ${e}`;
     }
   }
 
-  async beginNetworkPairing() {
+
+  // ── 페어링 (BLE·네트워크 공유) ────────────────────────
+  // 창도 코드도 기기 목록도 하나다(2026-08-25 스펙). 전송 토글과 달리
+  // 여기엔 이벤트 push 가 없어 동작 직후 직접 다시 읽는다.
+  pairing = $state<PairingStatus | null>(null);
+  pairingActionError = $state<string | null>(null);
+  /// 페어링 시작 시 받은 QR 페이로드. 네트워크가 꺼져 있으면 null 이다.
+  qrPayload = $state<string | null>(null);
+  #pairingInitialized = false;
+  #pairingReqSeq = 0;
+
+  async #refreshPairing() {
+    const seq = ++this.#pairingReqSeq;
+    const status = await pairingStatus();
+    if (seq === this.#pairingReqSeq) this.pairing = status;
+  }
+
+  async initPairing() {
+    if (this.#pairingInitialized) return;
+    this.#pairingInitialized = true;
+    await this.#refreshPairing();
+  }
+
+  async beginPairing() {
     try {
-      const info = await networkBeginPairing();
-      this.networkQrPayload = info.qr_payload;
-      const seq = ++this.#networkReqSeq;
-      const status = await networkStatus();
-      if (seq === this.#networkReqSeq) this.network = status;
-      this.networkActionError = null;
+      const info = await beginPairing();
+      this.qrPayload = info.qr_payload;
+      await this.#refreshPairing();
+      this.pairingActionError = null;
     } catch (e) {
-      this.networkActionError = `페어링을 시작하지 못했습니다: ${e}`;
+      this.pairingActionError = `페어링을 시작하지 못했습니다: ${e}`;
     }
   }
 
-  async unpairNetwork(peerId: string) {
+  async unpair(peerId: string) {
     try {
-      await networkUnpair(peerId);
-      const seq = ++this.#networkReqSeq;
-      const status = await networkStatus();
-      if (seq === this.#networkReqSeq) this.network = status;
-      this.networkActionError = null;
+      await unpair(peerId);
+      await this.#refreshPairing();
+      this.pairingActionError = null;
     } catch (e) {
-      this.networkActionError = `기기를 해제하지 못했습니다: ${e}`;
+      this.pairingActionError = `기기를 해제하지 못했습니다: ${e}`;
     }
   }
 
-  async unpairAllNetwork() {
+  async unpairAll() {
     try {
-      await networkUnpairAll();
-      const seq = ++this.#networkReqSeq;
-      const status = await networkStatus();
-      if (seq === this.#networkReqSeq) this.network = status;
-      this.networkQrPayload = null;
-      this.networkActionError = null;
+      await unpairAll();
+      await this.#refreshPairing();
+      this.qrPayload = null;
+      this.pairingActionError = null;
     } catch (e) {
-      this.networkActionError = `전체 해제에 실패했습니다: ${e}`;
+      this.pairingActionError = `전체 해제에 실패했습니다: ${e}`;
     }
   }
 

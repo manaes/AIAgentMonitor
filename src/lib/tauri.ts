@@ -54,16 +54,6 @@ export type BleStatus = {
   // 마지막 BLE 오류. 이 앱에는 tracing subscriber 가 없어 tracing::error! 출력이 전부 유실되므로,
   // 블루투스 권한 거부 같은 실패는 이 필드로만 사용자에게 도달한다.
   last_error: string | null;
-  // 페어링 창 상태. UI 가 만료와 시도 소진을 구분해 보여줘야 한다 —
-  // 소진이 보인다는 것이 창에 소유자를 두지 않기로 한 근거의 절반이다(스펙 5.1).
-  // expires_at 은 절대 epoch 초다 — ble_status 이벤트가 BLE 활동이 있을 때만
-  // 발행되므로, 프론트가 이 값을 한 번만 받아 자체 타이머로 카운트다운을
-  // 계산해야 한다(AgentCard 의 quota_reset_at 과 같은 패턴).
-  pairing_window:
-    | { kind: "open"; code: string; expires_at: number; attempts_left: number }
-    | { kind: "exhausted" }
-    | { kind: "closed" };
-  paired_peers: { peer_id: string; paired_at: number; connected: boolean }[];
 };
 
 export async function bleStatus(): Promise<BleStatus> {
@@ -72,18 +62,6 @@ export async function bleStatus(): Promise<BleStatus> {
 
 export async function bleSetEnabled(enabled: boolean): Promise<void> {
   return invoke<void>("ble_set_enabled", { enabled });
-}
-
-export async function bleBeginPairing(): Promise<void> {
-  return invoke<void>("ble_begin_pairing");
-}
-
-export async function bleUnpair(peerId: string): Promise<void> {
-  return invoke<void>("ble_unpair", { peerId });
-}
-
-export async function bleUnpairAll(): Promise<void> {
-  return invoke<void>("ble_unpair_all");
 }
 
 export async function listenBleStatus(cb: () => void): Promise<UnlistenFn> {
@@ -103,18 +81,6 @@ export type NetworkStatus = {
   enabled: boolean;
   endpoint_id: string;
   last_error: string | null;
-  pairing_window:
-    | { kind: "open"; code: string; expires_at: number; attempts_left: number }
-    | { kind: "exhausted" }
-    | { kind: "closed" };
-  paired_peers: { peer_id: string; paired_at: number; connected: boolean }[];
-};
-
-export type NetworkPairingInfo = {
-  code: string;
-  // iOS가 QR로 스캔할 페이로드(EndpointId + 코드) — 스캔 한 번으로 dial과
-  // CODE: 제출이 자동으로 끝난다.
-  qr_payload: string;
 };
 
 export async function networkStatus(): Promise<NetworkStatus> {
@@ -125,20 +91,50 @@ export async function networkSetEnabled(enabled: boolean): Promise<void> {
   return invoke<void>("network_set_enabled", { enabled });
 }
 
-export async function networkBeginPairing(): Promise<NetworkPairingInfo> {
-  return invoke<NetworkPairingInfo>("network_begin_pairing");
-}
-
-export async function networkUnpair(peerId: string): Promise<void> {
-  return invoke<void>("network_unpair", { peerId });
-}
-
-export async function networkUnpairAll(): Promise<void> {
-  return invoke<void>("network_unpair_all");
-}
-
 export async function listenNetworkStatus(cb: () => void): Promise<UnlistenFn> {
   return listen("network_status", () => cb());
+}
+
+// ── 페어링 (BLE·네트워크 공유) ──────────────────────────────
+// 창도 코드도 기기 목록도 하나다(2026-08-25 스펙) — 전송별 status 와 분리해
+// 여기서만 다룬다. 그래야 시도 5회 예산이 두 전송에 걸쳐 하나로 유지된다.
+
+export type PairingWindow =
+  // expires_at 은 절대 epoch 초다 — status 이벤트가 활동이 있을 때만 발행되므로,
+  // 프론트가 이 값을 한 번만 받아 자체 타이머로 카운트다운을 계산해야 한다
+  // (AgentCard 의 quota_reset_at 과 같은 패턴).
+  | { kind: "open"; code: string; expires_at: number; attempts_left: number }
+  | { kind: "exhausted" }
+  | { kind: "closed" };
+
+export type PairedPeer = { peer_id: string; paired_at: number; connected: boolean };
+
+export type PairingStatus = {
+  pairing_window: PairingWindow;
+  paired_peers: PairedPeer[];
+};
+
+export type PairingInfo = {
+  code: string;
+  // 네트워크 공유가 켜져 있을 때만 채워진다 — BLE 만 켜져 있으면 QR 을 그릴
+  // 이유가 없다. 같은 코드가 6자리로도, QR 안에도 들어 있다.
+  qr_payload: string | null;
+};
+
+export async function pairingStatus(): Promise<PairingStatus> {
+  return invoke<PairingStatus>("pairing_status");
+}
+
+export async function beginPairing(): Promise<PairingInfo> {
+  return invoke<PairingInfo>("begin_pairing");
+}
+
+export async function unpair(peerId: string): Promise<void> {
+  return invoke<void>("unpair", { peerId });
+}
+
+export async function unpairAll(): Promise<void> {
+  return invoke<void>("unpair_all");
 }
 
 // ── 표시 설정(에이전트 선택) ──────────────────────────────
