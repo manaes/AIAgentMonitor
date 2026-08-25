@@ -197,6 +197,41 @@ impl Default for NetworkBridge {
     }
 }
 
+/// 이 Mac 의 iroh 엔드포인트를 만든다.
+///
+/// **`address_lookup(PkarrPublisher)` 가 반드시 있어야 한다.** 이게 빠져 있으면
+/// Mac 은 자기 주소를 discovery 에 게시하지 않고, 폰이 Mac 을 찾을 방법은 QR 을
+/// 스캔하던 순간에 박제된 주소 스냅샷(relay URL + direct 주소)뿐이 된다. Mac 앱이
+/// 재시작하면 UDP 포트가 바뀌므로(릴레이 배정·LAN IP 도 바뀔 수 있다) 그 스냅샷이
+/// 죽고, 폰은 죽은 주소로 3초마다 영원히 재시도하다 `IrohError` 로 실패한다 —
+/// "어제는 됐는데 다음날 앱을 새로 켜니 연결이 안 된다" 의 정체가 이것이었다.
+///
+/// 게시가 성립하는 근거는 `identity::load_or_create` 가 비밀키를 영속화해
+/// `EndpointId` 가 재시작 후에도 같다는 점이다 — 폰은 저장해둔 그 id 로 Mac 의
+/// **현재** 주소를 조회한다. 폰 쪽은 이미 `applyN0()` 로 resolver 를 갖고 있고,
+/// iroh 는 앱이 준 주소가 있어도(`handle_msg_resolve_remote`) 선택된 경로가 없으면
+/// address lookup 을 돌리므로, 낡은 주소가 조회를 막지도 않는다.
+///
+/// `Builder::empty()` 를 쓰는 이유는 crypto provider 를 직접 지정하기 위해서다
+/// (`N0` 프리셋 문서가 권하는 방식). 그 대신 프리셋이 넣어주는 address lookup
+/// 서비스가 빠지므로 여기서 명시적으로 다시 넣는다.
+pub fn build_endpoint_builder(secret: iroh::SecretKey) -> iroh::endpoint::Builder {
+    use iroh::address_lookup::{DnsAddressLookup, PkarrPublisher, PkarrResolver};
+
+    iroh::endpoint::Builder::empty()
+        .secret_key(secret)
+        .alpns(vec![ALPN.to_vec()])
+        .relay_mode(iroh::endpoint::RelayMode::Default)
+        .crypto_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        // 아래 셋은 `presets::N0` 이 넣어주는 것과 같다. 게시(Publisher)가 이
+        // 버그의 핵심이고, 나머지 둘은 프리셋과 대칭을 맞추기 위해 함께 둔다.
+        .address_lookup(PkarrPublisher::n0_dns())
+        .address_lookup(PkarrResolver::n0_dns())
+        .address_lookup(DnsAddressLookup::n0_dns())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +240,34 @@ mod tests {
     use std::sync::Arc;
     use std::time::UNIX_EPOCH;
     use tokio::sync::Mutex;
+
+    /// 회귀 방지: Mac 이 자기 주소를 discovery 에 **게시**하지 않으면, 폰은 QR 을
+    /// 스캔하던 순간의 주소 스냅샷만 갖게 되고 Mac 이 재시작해 UDP 포트가 바뀌는
+    /// 순간 영영 못 찾는다("다음날 앱을 새로 켜면 연결 안 됨" 버그).
+    ///
+    /// `Builder::empty()` 는 문서상 "no address lookup services" 라 그냥 쓰면 이
+    /// 서비스 목록이 비어 있다 — 그게 정확히 버그였던 상태다. bind 하지 않고
+    /// 빌더만 확인하므로 네트워크를 타지 않는다.
+    #[tokio::test]
+    async fn endpoint_publishes_its_address_to_discovery() {
+        let ep = build_endpoint_builder(SecretKey::generate())
+            .bind_addr("127.0.0.1:0")
+            .expect("valid bind addr")
+            .bind()
+            .await
+            .expect("bind endpoint");
+
+        let services = ep.address_lookup().expect("endpoint is open");
+        assert!(
+            !services.is_empty(),
+            "address lookup 서비스가 하나도 없으면 Mac 주소가 게시되지 않는다 — \
+             폰은 재시작한 Mac 을 영영 찾지 못한다"
+        );
+        // N0 프리셋과 같은 3종(Publisher/Resolver/DnsAddressLookup).
+        assert_eq!(services.len(), 3, "실제 서비스: {services:?}");
+
+        ep.close().await;
+    }
 
     async fn local_endpoint() -> Endpoint {
         Builder::empty()

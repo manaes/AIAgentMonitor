@@ -767,12 +767,12 @@ pub fn run() {
                 // 즉시 닫는 것으로 충분하다.
                 let network_secret = network::identity::load_or_create(&network::identity::path())
                     .expect("네트워크 신원 로드/생성 실패");
+                // 빌더 구성은 network::build_endpoint_builder 가 소유한다 —
+                // address_lookup(PkarrPublisher) 가 빠지면 폰이 재시작한 Mac 을
+                // 영영 못 찾는 버그가 생기므로, 그 이유와 회귀 테스트를 구성
+                // 바로 옆에 두기 위해서다.
                 let network_endpoint = tauri::async_runtime::block_on(async {
-                    iroh::endpoint::Builder::empty()
-                        .secret_key(network_secret)
-                        .alpns(vec![network::ALPN.to_vec()])
-                        .relay_mode(iroh::endpoint::RelayMode::Default)
-                        .crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                    network::build_endpoint_builder(network_secret)
                         .bind()
                         .await
                         .expect("iroh Endpoint bind 실패")
