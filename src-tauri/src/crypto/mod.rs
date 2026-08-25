@@ -279,6 +279,10 @@ mod tests {
         let tr = transcript(&cpk, &spk);
         let (s2c, c2s) = derive_session_keys(&ss, &token_bytes, &nonce_bytes);
         let mut server = SealedChannel::new(s2c, c2s);
+        // 같은 채널에서 연속으로 두 장. 매크로 안에서 부르면 평가 순서에 기대게
+        // 되므로 카운터 순서를 여기서 못박는다.
+        let frame0 = server.seal(b"{\"v\":2}");
+        let frame1 = server.seal(b"{\"v\":2}");
 
         let actual = serde_json::json!({
             "note": "모든 hex 는 소문자다. HMAC 의 키와 메시지는 hex 문자열의 \
@@ -298,7 +302,12 @@ mod tests {
             "k_s2c": hex(&s2c),
             "k_c2s": hex(&c2s),
             // 서버가 카운터 0 으로 봉인한 첫 프레임.
-            "sealed_frame_0": hex(&server.seal(b"{\"v\":2}")),
+            "sealed_frame_0": hex(&frame0),
+            // 같은 평문을 카운터 1 로 한 번 더. 카운터 0 짜리 한 장만 있으면
+            // 논스 조립을 고정하지 못한다 — 0 에서는 `[0,0,0,0] || BE(counter)`
+            // 와 `BE(counter) || [0,0,0,0)` 이 둘 다 12바이트 0 이고, 빅엔디언과
+            // 리틀엔디언도 구별되지 않는다. 카운터 1 에서 셋 다 갈라진다.
+            "sealed_frame_1": hex(&frame1),
         });
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

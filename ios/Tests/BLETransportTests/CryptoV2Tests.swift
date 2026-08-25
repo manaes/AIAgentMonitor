@@ -33,6 +33,7 @@ final class CryptoV2Tests: XCTestCase {
         let kS2C: String
         let kC2S: String
         let sealedFrame0: String
+        let sealedFrame1: String
 
         private enum CodingKeys: String, CodingKey {
             case input, transcript
@@ -42,6 +43,7 @@ final class CryptoV2Tests: XCTestCase {
             case kS2C = "k_s2c"
             case kC2S = "k_c2s"
             case sealedFrame0 = "sealed_frame_0"
+            case sealedFrame1 = "sealed_frame_1"
         }
     }
 
@@ -116,24 +118,37 @@ final class CryptoV2Tests: XCTestCase {
 
     /// Rust 가 봉인한 프레임을 Swift 가 열 수 있어야 한다. 이 하나가
     /// 실패하면 두 구현이 다른 프로토콜을 말하는 것이다.
-    func testOpensGoldenSealedFrame() throws {
+    ///
+    /// 두 장을 **한 채널로 순서대로** 연다. 카운터 0 짜리 한 장만으로는
+    /// 논스 조립을 고정하지 못한다 — 0 에서는 `[0,0,0,0] || BE(counter)` 와
+    /// `BE(counter) || [0,0,0,0]` 이 둘 다 12바이트 0 이고, 카운터를 리틀엔디언으로
+    /// 읽고 쓰는 구현도 자기들끼리는 일관돼서 왕복 테스트를 통과한다.
+    /// 카운터 1 에서 셋 다 갈라진다.
+    func testOpensGoldenSealedFrames() throws {
         let g = try golden()
         let keys = try sessionKeys(g)
         // 클라이언트 입장: 서버의 s2c 가 내 수신 키다.
         let ch = SealedChannel(sendKey: keys.c2s, recvKey: keys.s2c)
-        let frame = try bytes(g.sealedFrame0)
-        XCTAssertEqual(try ch.open(frame), Data(#"{"v":2}"#.utf8))
+        XCTAssertEqual(try ch.open(try bytes(g.sealedFrame0)), Data(#"{"v":2}"#.utf8))
+        XCTAssertEqual(
+            try ch.open(try bytes(g.sealedFrame1)), Data(#"{"v":2}"#.utf8),
+            "카운터 1 프레임이 논스 조립(패딩 위치와 바이트 순서)을 고정한다"
+        )
     }
 
     /// ChaCha20-Poly1305 은 (키, 논스) 가 같으면 결정적이다 — 그래서 서버 역할로
     /// 봉인한 결과가 골든 프레임과 **바이트까지** 같아야 한다. 여는 것만 맞추면
-    /// 논스 조립이 틀려도 우연히 통과할 여지가 있어서 반대 방향도 고정한다.
-    func testSealsByteIdenticalGoldenFrame() throws {
+    /// 프레임 배치가 틀려도 우연히 통과할 여지가 있어서 반대 방향도 고정한다.
+    func testSealsByteIdenticalGoldenFrames() throws {
         let g = try golden()
         let keys = try sessionKeys(g)
         // 서버 입장: s2c 가 내 송신 키다.
         let server = SealedChannel(sendKey: keys.s2c, recvKey: keys.c2s)
         XCTAssertEqual(try server.seal(Data(#"{"v":2}"#.utf8)).hexString, g.sealedFrame0)
+        XCTAssertEqual(
+            try server.seal(Data(#"{"v":2}"#.utf8)).hexString, g.sealedFrame1,
+            "같은 평문이라도 카운터가 1 이면 논스가 달라 암호문이 달라야 한다"
+        )
     }
 
     private func sessionKeys(_ g: Golden) throws -> (s2c: SymmetricKey, c2s: SymmetricKey) {
