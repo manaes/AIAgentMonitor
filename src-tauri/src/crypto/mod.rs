@@ -4,6 +4,8 @@
 //! 난수와 시계에 의존하는 것은 `ephemeral_keypair` 하나뿐이고 나머지는 순수하다 —
 //! 그래야 골든 벡터로 세 언어를 묶을 수 있다.
 
+pub mod channel;
+
 use hkdf::Hkdf;
 use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey};
