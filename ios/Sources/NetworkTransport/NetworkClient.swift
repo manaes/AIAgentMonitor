@@ -134,6 +134,16 @@ public final class NetworkClient: NSObject {
             try await authenticate(conn: conn, code: code)
             guard wantsRunning else { return }
             try await listenForSnapshots(conn: conn)
+        } catch NetworkClientError.needsPairing, NetworkClientError.authFailed {
+            // 사용자가 QR 을 다시 스캔해야 풀리는 상태다. 이미 needsPairing/
+            // pairingFailed 를 보냈으니 그 화면을 그대로 두고 멈춘다.
+            //
+            // 여기서 재시도하면 안 된다 — 재시도는 code 가 nil 이라 코드 없이는
+            // 절대 통과할 수 없고, 그때마다 .disconnected 를 보내 QR 스캐너가
+            // 떴다 사라졌다를 반복한다(MirrorViewController 는 needsPairing 에
+            // 스캐너를 띄우고 disconnected 에 닫는다). 성공할 수 없는 재시도로
+            // 화면만 깜빡이던 버그였다.
+            wantsRunning = false
         } catch {
             guard wantsRunning else { return }
             stateSubject.send(.disconnected(reason: "\(error)"))
@@ -145,16 +155,31 @@ public final class NetworkClient: NSObject {
         }
     }
 
+    /// 인증을 어떤 프레임으로 시작할지 고른다.
+    ///
+    /// **코드가 있으면 저장된 토큰보다 코드를 우선한다.** QR 을 방금 스캔했다는
+    /// 것은 "새로 페어링하겠다" 는 명시적 의사이기 때문이다. 초안은 토큰을
+    /// 우선했는데, Mac 에서 전체 해제로 토큰이 폐기된 뒤에는 그 재인증이 반드시
+    /// 거부되어(`Rejected` → `resetAndAwaitCode`) 방금 스캔한 코드가 쓰이지도
+    /// 못한 채 `needsPairing` 으로 떨어졌다.
+    ///
+    /// 코드가 있으면 `HELLO` 를 건너뛰고 바로 `CODE:` 를 낸다 — Mac 은 HELLO
+    /// 없이 온 CODE: 도 받는다(`pairing.rs: code_without_prior_hello_still_grants`).
+    nonisolated static func initialFrame(hasToken: Bool, code: String?) -> Data {
+        if let code {
+            return PairingClient.codeFrame(code)
+        }
+        return hasToken ? PairingClient.authFrame() : PairingClient.helloFrame()
+    }
+
     /// `BLEClient.decide(_:)` 와 동일한 결정을 그대로 쓴다 — 전송만 다를 뿐 상태
     /// 기계는 하나다. QR 로 코드를 이미 받았으므로 `AwaitingCode` 에서 사용자
     /// 입력을 기다리지 않고 즉시 제출한다(재연결 경로에서는 `code`가 nil이라
     /// `needsPairing` 으로 빠진다 — 저장된 토큰이 거부됐다는 뜻이므로 QR 재스캔이
     /// 맞다).
     private func authenticate(conn: Connection, code: String?) async throws {
-        let initialFrame = NetworkTokenStore.loadToken() != nil
-            ? PairingClient.authFrame()
-            : PairingClient.helloFrame()
-        var reply = try await sendControl(conn, initialFrame)
+        let hasToken = NetworkTokenStore.loadToken() != nil
+        var reply = try await sendControl(conn, Self.initialFrame(hasToken: hasToken, code: code))
 
         while true {
             switch BLEClient.decide(reply) {
