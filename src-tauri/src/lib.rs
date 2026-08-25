@@ -297,17 +297,21 @@ async fn unpair_all(
     persist_and_drop(&pairing, &ble_state, &network_state, dropped).await
 }
 
+/// BLE 와 동시에 켤 수 있다(2026-08-25 스펙) — 페어링 창을 공유하므로 예전의
+/// 상호 배타 가드가 필요 없어졌다.
 #[tauri::command]
 async fn network_set_enabled(
     enabled: bool,
     network_state: tauri::State<'_, Arc<NetworkHandle>>,
-    ble_state: tauri::State<'_, Arc<BleHandle>>,
+    pairing: tauri::State<'_, SharedPairing>,
 ) -> Result<(), String> {
-    if enabled && ble_state.bridge.lock().await.is_enabled() {
-        return Err("BLE 공유가 켜져 있습니다. 먼저 꺼주세요.".to_string());
-    }
-    network_state.bridge.lock().await.set_enabled(enabled);
+    let mut bridge = network_state.bridge.lock().await;
+    // 끄기 전에 받아둔다 — set_enabled(false) 가 snapshot_senders 를 비운다.
+    let served = if enabled { Vec::new() } else { bridge.served_centrals() };
+    bridge.set_enabled(enabled);
+    drop(bridge);
     if !enabled {
+        pairing.lock().await.end_sessions(&served);
         *network_state.last_error.lock().unwrap() = None;
     }
     Ok(())
