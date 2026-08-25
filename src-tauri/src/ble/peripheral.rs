@@ -87,8 +87,11 @@ pub trait BlePeripheral: Send + Sync {
     /// 그래서 이 호출을 반드시 함께 해야 한다.
     fn revoke_targets(&self, ids: &[CentralId]);
 
-    /// 인가된 구독자만 추린다. 청크 크기 계산도 이 목록으로 해야
-    /// 미인가 기기의 작은 MTU 에 끌려가지 않는다.
+    /// 인가된 구독자만 추린다. 프레임을 만들지 말지, 그리고 누구에게
+    /// `offer_frame_to` 를 부를지가 전부 이 목록으로 정해진다(스펙 5.1).
+    ///
+    /// 청크 크기는 여기서 나오지 않는다 — 이제 각 구독자의 `max_notify_len`
+    /// 으로 따로 정하므로 전체에 걸친 최솟값이라는 개념 자체가 없다.
     fn authorized_subscribers(&self, is_authorized: &dyn Fn(&CentralId) -> bool) -> Vec<Subscriber> {
         self.subscribers()
             .into_iter()

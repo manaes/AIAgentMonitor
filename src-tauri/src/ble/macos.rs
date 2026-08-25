@@ -4,7 +4,7 @@
 //! CBPeripheralManager 를 queue=None 으로 만들면 콜백이 메인 큐로 오고, Tauri 가 이미
 //! 메인 런루프를 돌리고 있으므로 별도 런루프가 필요 없다.
 //! SendQueue 도 메인 스레드가 소유해 updateValue 의 bool 반환을 스레드 왕복 없이 처리한다.
-//! tokio 쪽에서는 `offer_frame` 으로 프레임만 던지고(fire-and-forget) 즉시 돌아온다.
+//! tokio 쪽에서는 `offer_frame_to` 로 프레임만 던지고(fire-and-forget) 즉시 돌아온다.
 use super::peripheral::{
     BlePeripheral, CentralId, CharId, PeripheralEvent, Subscriber, SERVICE_UUID,
 };
@@ -89,14 +89,53 @@ struct MainState {
 }
 
 impl MainState {
-    /// 이 characteristic 으로 보낼 것이 남아 있는 central 들. `CBCentral`/
-    /// `CBPeripheralManager` 를 전혀 필요로 하지 않는 순수 함수로 뽑아둔 이유는,
-    /// 이 파일의 나머지는 실제 CoreBluetooth 객체가 있어야만 돌아가서
-    /// `#[cfg(test)]` 로 묶을 수 없기 때문이다 — 라운드 2가 고친 누출(인가
-    /// 필터가 추상화 계층에서만 걸리고 실기기 전송 경로는 구독자 전원에게
-    /// 보내던 문제)이 바로 "실제 동작이 테스트 사각지대" 였다. 대상 선정
-    /// 로직 자체는 키 집합 연산일 뿐이므로 이렇게 분리하면 그 사각지대가
-    /// 남지 않는다.
+    /// **큐를 만드는 유일한 경로.** `pump()` 에는 인가 검사가 없고 큐의 존재
+    /// 자체가 인가이므로(위 `queues` 주석), 이 계층의 인가 관문 전체가 이
+    /// 함수 하나다. 조건은 둘의 논리곱이다:
+    ///
+    /// 1. **인가됨** — 호출자(`BleBridge::on_snapshot`)가 인가된 구독자에게만
+    ///    `offer_frame_to` 를 부른다.
+    /// 2. **구독 중** — 여기서 `subs` 로 확인한다. `subs` 는 메인 스레드가
+    ///    콜백에서 직접 갱신하므로, tokio 쪽 `subs_mirror` 가 아직 따라잡지
+    ///    못한 사이(`did_unsubscribe` 는 지났는데 `apply_event` 는 아직)에
+    ///    떠난 central 의 큐가 되살아나는 것을 막는다. 바이트가 새지는
+    ///    않지만(`pump` 도 `subs` 를 본다) 큐가 `stop()` 까지 남고, 본딩하지
+    ///    않은 peer 의 CBCentral identifier 는 바뀌므로 계속 쌓인다.
+    ///
+    /// **다른 곳에서 `queues` 에 키를 넣지 마라.** 예를 들어 재구독 지연을
+    /// 줄이겠다고 `did_subscribe` 에서 큐를 미리 만들거나, `pump` 의
+    /// `let Some(q) = ... else { return }` 을 `entry().or_default()` 로
+    /// 단순화하면, 그 순간 미인가 구독자에게도 큐가 생겨 `pump_all` 이
+    /// 그들을 순회한다 — 아래 `queued_centrals` 주석이 말하는 "라운드 2가
+    /// 고친 누출"이 그대로 되살아난다. 대신 `pump` 에 필터를 다시 넣는 것도
+    /// 답이 아니다(그러면 동기화해야 할 상태가 또 생긴다).
+    ///
+    /// `subs` 를 제네릭으로 받는 이유는 실제 값이 `Retained<CBCentral>` 이라
+    /// 테스트에서 만들 수 없기 때문이다 — 판정에 필요한 건 키뿐이다.
+    fn enqueue<T>(
+        queues: &mut HashMap<QueueKey, SendQueue>,
+        subs: &HashMap<String, T>,
+        ch_uuid: &'static str,
+        central_id: &str,
+        chunks: Vec<Vec<u8>>,
+    ) {
+        if !subs.contains_key(central_id) {
+            return;
+        }
+        queues
+            .entry((ch_uuid, central_id.to_string()))
+            .or_default()
+            .offer(chunks);
+    }
+
+    /// 이 characteristic 으로 보낼 것이 남아 있는 central 들 — 즉 `pump_all` 의
+    /// 대상 전체다. `CBCentral`/`CBPeripheralManager` 를 전혀 필요로 하지 않는
+    /// 순수 함수로 뽑아둔 이유는, 이 파일의 나머지는 실제 CoreBluetooth 객체가
+    /// 있어야만 돌아가서 `#[cfg(test)]` 로 묶을 수 없기 때문이다 — 라운드 2가
+    /// 고친 누출(인가 필터가 추상화 계층에서만 걸리고 실기기 전송 경로는
+    /// 구독자 전원에게 보내던 문제)이 바로 "실제 동작이 테스트 사각지대"
+    /// 였다. 지금은 그 필터가 `enqueue` 의 큐 생성 조건으로 옮겨갔고, 여기는
+    /// 키 집합 연산일 뿐이므로 양쪽 다 사각지대 없이 검증된다.
     fn queued_centrals(queues: &HashMap<QueueKey, SendQueue>, ch_uuid: &str) -> Vec<String> {
         queues
             .keys()
@@ -187,6 +226,19 @@ define_class!(
                 _ => {}
             }
             drop(st);
+            // 전원이 내려가면 구독은 전부 무효다 — stop() 과 같은 이유로 구독과
+            // 큐를 함께 버린다. 제어 센터에서 블루투스를 껐다 켜는 경로는 stop()
+            // 을 거치지 않으므로(PoweredOff 는 subs_mirror 만 비운다), 여기서
+            // 치우지 않으면 포화된 채로 꺼진 큐가 paused=true 로 남는다.
+            // SendQueue::pump 는 paused 면 즉시 반환하는데, 재게시 뒤에는 그것을
+            // 풀어줄 isReadyToUpdateSubscribers 가 오지 않을 수 있다. 큐가
+            // central 별이 된 지금은 그 결과가 "전체 정지"가 아니라 "그 기기만
+            // 조용히 죽음"이라 더 알아채기 어렵다(이 앱은 로그를 남기지 않는다).
+            if !powered {
+                let mut st = self.ivars().borrow_mut();
+                st.subs.clear();
+                st.queues.clear();
+            }
             // 사용자가 공유를 끈 상태라면 전원이 다시 들어와도 서비스를 올리지 않는다.
             // publish() 를 건너뛰면 didAddService 가 오지 않으므로 advertise() 도 함께 막힌다.
             if powered && SHARING_WANTED.load(Ordering::SeqCst) {
@@ -466,13 +518,10 @@ impl BlePeripheral for MacPeripheral {
         let id = central.0.clone();
         with_delegate(&self.app, move |d| {
             {
-                let mut st = d.ivars().borrow_mut();
-                // 이 central 의 첫 프레임이면 큐를 만든다. 호출자가 인가된
-                // 구독자에게만 부르므로 큐가 생기는 것 = 인가된 것이다.
-                st.queues
-                    .entry((uuid, id.clone()))
-                    .or_insert_with(SendQueue::new)
-                    .offer(chunks);
+                let mut borrow = d.ivars().borrow_mut();
+                // 두 필드를 따로 빌리려면 RefMut 를 한 번 벗겨야 한다.
+                let st = &mut *borrow;
+                MainState::enqueue(&mut st.queues, &st.subs, uuid, &id, chunks);
             }
             d.ivars().borrow_mut().pump(uuid, &id);
         });
@@ -535,6 +584,42 @@ mod queue_routing_tests {
         keys.iter()
             .map(|(u, id)| ((*u, id.to_string()), SendQueue::new()))
             .collect()
+    }
+
+    fn subs(ids: &[&str]) -> HashMap<String, ()> {
+        ids.iter().map(|id| (id.to_string(), ())).collect()
+    }
+
+    /// 큐 생성 = 인가라는 불변식의 나머지 절반. 구독하지 않은 central 에게
+    /// 프레임이 들어와도 큐가 생기면 안 된다 — 생기면 `pump_all` 이 그를
+    /// 순회 대상에 넣는다. `enqueue` 의 `subs.contains_key` 가드를 지우면
+    /// 이 테스트가 실패한다.
+    #[test]
+    fn no_queue_is_created_for_a_central_that_is_not_subscribed() {
+        let mut q = queues(&[]);
+        MainState::enqueue(&mut q, &subs(&[]), "SNAP", "GHOST", vec![vec![1]]);
+        assert_eq!(
+            MainState::queued_centrals(&q, "SNAP"),
+            Vec::<String>::new(),
+            "구독하지 않은 central 에게는 큐를 만들지 않는다"
+        );
+    }
+
+    /// 떠난 central 의 큐가 되살아나지 않는다. `did_unsubscribe` 는 지났는데
+    /// tokio 쪽 `subs_mirror` 가 아직 그를 들고 있는 창(窓)에서 실제로 일어난다.
+    #[test]
+    fn a_departed_centrals_queue_is_not_recreated() {
+        let mut q = queues(&[("SNAP", "A")]);
+        MainState::drop_queues_for(&mut q, &["A".to_string()]); // did_unsubscribe
+        MainState::enqueue(&mut q, &subs(&[]), "SNAP", "A", vec![vec![1]]);
+        assert_eq!(MainState::queued_centrals(&q, "SNAP"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_subscribed_central_gets_a_queue() {
+        let mut q = queues(&[]);
+        MainState::enqueue(&mut q, &subs(&["A"]), "SNAP", "A", vec![vec![1]]);
+        assert_eq!(MainState::queued_centrals(&q, "SNAP"), vec!["A".to_string()]);
     }
 
     #[test]
