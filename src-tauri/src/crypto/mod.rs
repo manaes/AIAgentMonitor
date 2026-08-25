@@ -7,8 +7,11 @@
 pub mod channel;
 
 use hkdf::Hkdf;
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey};
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// HKDF info 문자열. 세 언어가 바이트 단위로 같아야 한다.
 pub const INFO_PAIR: &[u8] = b"aim-pair-v2";
@@ -70,9 +73,80 @@ pub fn derive_session_keys(ss: &[u8; 32], token: &[u8], nonce: &[u8]) -> ([u8; 3
     (hkdf32(&ikm, nonce, INFO_S2C), hkdf32(&ikm, nonce, INFO_C2S))
 }
 
+/// 6자리 코드를 **키로** 써서 두 임시 공개키를 MAC 한다.
+///
+/// 코드 자체는 어느 방향으로도 링크를 건너지 않는다(v1 은 `CODE:123456` 으로
+/// 그대로 보냈다). 동시에 이 값이 두 임시 공개키를 묶으므로 능동적 중간자가
+/// 자기 키를 끼워넣으면 값이 맞지 않는다.
+///
+/// 코드의 엔트로피는 20비트뿐이지만, 창당 5회라는 시도 예산이 온라인 추측을
+/// 5번으로 묶는다. **그 예산은 절대 넓히지 않는다.**
+pub fn code_binding(code: &str, transcript: &[u8; 64]) -> [u8; 32] {
+    let mut mac =
+        HmacSha256::new_from_slice(code.as_bytes()).expect("HMAC 은 임의 길이 키를 받는다");
+    mac.update(transcript);
+    mac.finalize().into_bytes().into()
+}
+
+/// 재연결 증명. v1 의 `HMAC(token, nonce)` 에 transcript 를 붙인 것이다.
+pub fn session_proof(token_bytes: &[u8], nonce_bytes: &[u8], transcript: &[u8; 64]) -> [u8; 32] {
+    let mut mac =
+        HmacSha256::new_from_slice(token_bytes).expect("HMAC 은 임의 길이 키를 받는다");
+    mac.update(nonce_bytes);
+    mac.update(transcript);
+    mac.finalize().into_bytes().into()
+}
+
+/// 소문자 hex 64자만 받는다. 형식이 다르면 디코드를 시도하지 않는다 —
+/// 모르는 것을 관대하게 받아주지 않는 기존 방침을 따른다.
+fn hex_decode_32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+        out[i] = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// 상수 시간 비교. `hmac::Mac::verify_slice` 를 쓰는 기존 `verify_proof` 와
+/// 같은 이유다 — 바이트별 조기 반환은 타이밍으로 값을 흘린다.
+pub fn verify_code_binding(code: &str, transcript: &[u8; 64], given_hex: &str) -> bool {
+    let Some(given) = hex_decode_32(given_hex) else {
+        return false;
+    };
+    let Ok(mut mac) = HmacSha256::new_from_slice(code.as_bytes()) else {
+        return false;
+    };
+    mac.update(transcript);
+    mac.verify_slice(&given).is_ok()
+}
+
+pub fn verify_session_proof(
+    token_bytes: &[u8],
+    nonce_bytes: &[u8],
+    transcript: &[u8; 64],
+    given_hex: &str,
+) -> bool {
+    let Some(given) = hex_decode_32(given_hex) else {
+        return false;
+    };
+    let Ok(mut mac) = HmacSha256::new_from_slice(token_bytes) else {
+        return false;
+    };
+    mac.update(nonce_bytes);
+    mac.update(transcript);
+    mac.verify_slice(&given).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
 
     #[test]
     fn both_sides_agree_on_the_same_secret() {
@@ -127,5 +201,63 @@ mod tests {
             derive_pair_key(&ss, b"nonce-b"),
             "논스가 salt 로 실제로 쓰여야 한다"
         );
+    }
+
+    /// 중간자가 자기 임시 키를 끼워넣으면 transcript 가 달라져 cbind 가 맞지
+    /// 않는다. 중간자는 6자리 코드를 모르므로 올바른 값을 만들 수 없다 —
+    /// 이것이 페어링의 중간자 방어 전부다.
+    #[test]
+    fn code_binding_changes_when_the_transcript_changes() {
+        let t1 = transcript(&[1u8; 32], &[2u8; 32]);
+        let t2 = transcript(&[1u8; 32], &[9u8; 32]);
+        assert_ne!(code_binding("123456", &t1), code_binding("123456", &t2));
+    }
+
+    #[test]
+    fn code_binding_changes_when_the_code_changes() {
+        let t = transcript(&[1u8; 32], &[2u8; 32]);
+        assert_ne!(code_binding("123456", &t), code_binding("123457", &t));
+    }
+
+    #[test]
+    fn verifies_a_correct_code_binding() {
+        let t = transcript(&[1u8; 32], &[2u8; 32]);
+        let given = hex(&code_binding("123456", &t));
+        assert!(verify_code_binding("123456", &t, &given));
+        assert!(!verify_code_binding("999999", &t, &given), "다른 코드는 통과 못 한다");
+    }
+
+    /// 길이나 대소문자가 다르면 디코드를 시도하지 않고 거부한다 — 토큰·proof 에
+    /// 이미 적용된 기준과 같다.
+    #[test]
+    fn rejects_malformed_binding_hex() {
+        let t = transcript(&[1u8; 32], &[2u8; 32]);
+        assert!(!verify_code_binding("123456", &t, "짧다"));
+        assert!(!verify_code_binding("123456", &t, &"AB".repeat(32)), "대문자 hex 거부");
+    }
+
+    /// v1 proof 는 HMAC(token, nonce) 였다. v2 는 transcript 를 붙여 키 합의를
+    /// 토큰에 묶는다 — 중간자가 임시 키를 바꿔치기하면 proof 가 맞지 않는다.
+    #[test]
+    fn session_proof_binds_the_transcript() {
+        let token = [3u8; 16];
+        let nonce = [4u8; 16];
+        let t1 = transcript(&[1u8; 32], &[2u8; 32]);
+        let t2 = transcript(&[1u8; 32], &[9u8; 32]);
+        assert_ne!(
+            session_proof(&token, &nonce, &t1),
+            session_proof(&token, &nonce, &t2),
+            "transcript 가 proof 에 실제로 들어가야 한다"
+        );
+    }
+
+    #[test]
+    fn verifies_a_correct_session_proof() {
+        let token = [3u8; 16];
+        let nonce = [4u8; 16];
+        let t = transcript(&[1u8; 32], &[2u8; 32]);
+        let given = hex(&session_proof(&token, &nonce, &t));
+        assert!(verify_session_proof(&token, &nonce, &t, &given));
+        assert!(!verify_session_proof(&[9u8; 16], &nonce, &t, &given), "다른 토큰은 통과 못 한다");
     }
 }
