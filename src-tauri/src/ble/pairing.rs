@@ -190,6 +190,10 @@ struct PendingHandshake {
     transcript: [u8; 64],
     /// 이 핸드셰이크에 쓰인 논스(hex). 세션 키 파생의 salt 다.
     nonce: String,
+    /// 발급 시각. `PendingNonce` 와 같은 이유로 스윕 대상이다(전체 브랜치
+    /// 리뷰 I-5) — `HELLO2` 만 보내고 사라지는 central 이 쌓이면 원격에서
+    /// 키우는 메모리 누수가 된다.
+    issued_at: SystemTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -241,11 +245,24 @@ pub struct PairingManager {
 
 /// `#[derive(Debug)]` 를 쓰지 않는다 — `SealedChannel` 은 대칭키를 들고
 /// 있어서 일부러 `Debug` 를 구현하지 않았고(로그에 키가 찍히면 안 된다),
-/// `handshakes` 의 공유 비밀도 마찬가지로 민감하다. 개수만 보여준다.
+/// `handshakes` 의 공유 비밀도 마찬가지로 민감하다. **`pending.code` 도
+/// 마찬가지로 절대 찍지 않는다** — 코드는 `code_binding` 의 HMAC 키이자
+/// 무차별 대입 방어(창당 시도 5회)의 전제 그 자체다(스펙 5.1/5.2). 이
+/// 값이 로그·패닉 메시지·크래시 리포트로 한 번이라도 새면, 능동적 MITM 은
+/// 추측 없이 곧바로 유효한 `code_binding` 을 만들 수 있어 시도 예산이
+/// 통째로 무의미해진다(전체 브랜치 리뷰 I-1). 그래서 `pending` 은 코드를
+/// 뺀 요약(남은 시도, 만료 시각)만 보여준다.
 impl std::fmt::Debug for PairingManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pending_summary = self.pending.as_ref().map(|p| {
+            let expires_at = (p.issued_at + CODE_TTL)
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            (p.attempts_left, expires_at)
+        });
         f.debug_struct("PairingManager")
-            .field("pending", &self.pending)
+            .field("pending_attempts_left_and_expires_at", &pending_summary)
             .field("tokens", &self.tokens.len())
             .field("authorized", &self.authorized.len())
             .field("nonces", &self.nonces.len())
@@ -497,12 +514,17 @@ impl PairingManager {
         }
     }
 
-    /// 만료된 논스를 청소한다. `AUTH` 만 보내고 사라지는 central 이 계속
-    /// 쌓이면 원격에서 키우는 메모리 누수가 되므로, 모든 요청 처리
-    /// 시점마다 훑는다.
+    /// 만료된 논스·v2 핸드셰이크를 청소한다. `AUTH`/`HELLO2` 만 보내고
+    /// 사라지는 central 이 계속 쌓이면 원격에서 키우는 메모리 누수가
+    /// 되므로, 모든 요청 처리 시점마다 훑는다. 핸드셰이크는 `CODE2`/
+    /// `end_session`/`revoke_*` 로만 지워지고 자체 TTL 이 없었다(전체
+    /// 브랜치 리뷰 I-5) — 재연결(`AUTH2`)은 페어링 창의 120초 같은 상한이
+    /// 없으므로 논스와 같은 `NONCE_TTL` 을 그대로 쓴다.
     fn sweep_expired_nonces(&mut self, now: SystemTime) {
         self.nonces
             .retain(|_, n| now.duration_since(n.issued_at).unwrap_or_default() <= NONCE_TTL);
+        self.handshakes
+            .retain(|_, h| now.duration_since(h.issued_at).unwrap_or_default() <= NONCE_TTL);
     }
 
     #[cfg(test)]
@@ -529,6 +551,14 @@ impl PairingManager {
                         .as_secs();
                     self.tokens.insert(token.clone(), paired_at);
                     self.authorized.insert(id.0.clone(), token.clone());
+                    // 이 central 이 예전에 v2 로 페어링됐다가 `end_session` 없이
+                    // 다시 v1 으로 들어오는 경우를 대비한다 — 낡은 v2 채널이
+                    // 남아 있으면 Task 9 가 `channel_mut` 로 v1/v2 를 가르는
+                    // 순간 v1 세션인데 낡은 키로 스냅샷을 봉인하게 된다(전체
+                    // 브랜치 리뷰 I-2). `authorized` 를 덮어쓰는 자리이므로
+                    // 지우는 자리와 똑같이 취급한다.
+                    self.channels.remove(&id.0);
+                    self.handshakes.remove(&id.0);
                     self.pending = None;
                     AuthReply::Granted { token }
                 } else {
@@ -579,6 +609,11 @@ impl PairingManager {
                     .cloned();
                 if let Some(token) = matched {
                     self.authorized.insert(id.0.clone(), token);
+                    // v1 `Code` 성공 경로와 같은 이유(전체 브랜치 리뷰 I-2) —
+                    // `authorized` 를 덮어쓰는 자리에서는 낡은 v2 채널·핸드셰이크도
+                    // 함께 지운다.
+                    self.channels.remove(&id.0);
+                    self.handshakes.remove(&id.0);
                     AuthReply::Authorized
                 } else {
                     AuthReply::Rejected
@@ -605,6 +640,7 @@ impl PairingManager {
                         ss,
                         transcript: crypto::transcript(&cpk, &spk),
                         nonce: nonce.clone(),
+                        issued_at: now,
                     },
                 );
                 AuthReply::AwaitingCode2 { epk: hex_encode_bytes(&spk), nonce }
@@ -922,6 +958,110 @@ mod tests {
         assert!(matches!(reply, AuthReply::Rejected));
     }
 
+    /// 전체 브랜치 리뷰 I-3 회귀 테스트: 틀린 바인딩을 낸 CODE2 도 핸드셰이크를
+    /// 소비해야 한다. 그러지 않으면 같은 transcript 로 여러 바인딩을 계속
+    /// 시도할 수 있어(HELLO2 를 다시 안 보내도) 시도 예산만으로는 막히지 않는
+    /// 반복 추측 경로가 열린다.
+    #[test]
+    fn v2_failed_code_binding_consumes_the_handshake() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let mut c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Hello2(hex_encode(&c.public)), t(1001));
+        let (epk, _) = epk_and_nonce(&reply);
+        let (_ss, tr) = c.agree(&epk);
+
+        let wrong = hex_encode(&crypto::code_binding("999999", &tr));
+        let r1 = m.handle(&id("A"), AuthRequest::Code2(wrong), t(1002));
+        assert!(matches!(r1, AuthReply::Denied { left: 4 }));
+
+        // 같은 transcript 로 이번엔 진짜 바인딩을 내도 거부돼야 한다 —
+        // 핸드셰이크가 이미 소비됐다. 재시도하려면 새 HELLO2 부터다.
+        let correct = hex_encode(&crypto::code_binding(&code, &tr));
+        let r2 = m.handle(&id("A"), AuthRequest::Code2(correct), t(1003));
+        assert!(matches!(r2, AuthReply::Rejected), "핸드셰이크는 이미 소비됐어야 한다: {r2:?}");
+    }
+
+    /// 성공한 CODE2 도 핸드셰이크를 소비한다 — 같은 값을 재전송해도 통과하면
+    /// 안 된다.
+    #[test]
+    fn v2_code2_replay_after_success_is_rejected() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let mut c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Hello2(hex_encode(&c.public)), t(1001));
+        let (epk, _) = epk_and_nonce(&reply);
+        let (_ss, tr) = c.agree(&epk);
+        let cbind = hex_encode(&crypto::code_binding(&code, &tr));
+
+        let first = m.handle(&id("A"), AuthRequest::Code2(cbind.clone()), t(1002));
+        assert!(matches!(first, AuthReply::Granted2 { .. }), "{first:?}");
+
+        let replay = m.handle(&id("A"), AuthRequest::Code2(cbind), t(1003));
+        assert!(matches!(replay, AuthReply::Rejected), "성공 후 재전송은 거부돼야 한다: {replay:?}");
+    }
+
+    /// v2 로 페어링한 뒤 만든 `V2Client` 헬퍼. 전체 브랜치 리뷰 I-4 테스트들이
+    /// 공유한다 — `channel_mut` 이 세션마다 실제로 채워지고, 정리 경로마다
+    /// 실제로 비는지 확인해야 한다.
+    fn v2_pair(m: &mut PairingManager, central: &CentralId, now: SystemTime) {
+        let code = m.begin_pairing(now);
+        let mut c = V2Client::new();
+        let reply = m.handle(central, AuthRequest::Hello2(hex_encode(&c.public)), now);
+        let (epk, _nonce) = epk_and_nonce(&reply);
+        let (_ss, tr) = c.agree(&epk);
+        let cbind = hex_encode(&crypto::code_binding(&code, &tr));
+        let reply = m.handle(central, AuthRequest::Code2(cbind), now);
+        assert!(matches!(reply, AuthReply::Granted2 { .. }), "v2 페어링 셋업 실패: {reply:?}");
+    }
+
+    /// 전체 브랜치 리뷰 I-4 회귀 테스트: `end_session` 이 v2 봉인 채널도
+    /// 지워야 한다. 남겨두면 다음에 이 central 이 다시 붙었을 때(v1 이든
+    /// v2 든) 낡은 키로 봉인된 채널이 살아남는다.
+    #[test]
+    fn end_session_clears_the_v2_channel() {
+        let mut m = PairingManager::new();
+        v2_pair(&mut m, &id("A"), t(1000));
+        assert!(m.channel_mut(&id("A")).is_some(), "페어링 직후에는 채널이 있어야 한다");
+
+        m.end_session(&id("A"));
+        assert!(m.channel_mut(&id("A")).is_none(), "세션을 끊으면 v2 채널도 지워야 한다");
+    }
+
+    /// 전체 브랜치 리뷰 I-4 회귀 테스트.
+    #[test]
+    fn revoke_peer_clears_the_v2_channel() {
+        let mut m = PairingManager::new();
+        v2_pair(&mut m, &id("A"), t(1000));
+        assert!(m.channel_mut(&id("A")).is_some());
+
+        let token = m.issued_peers()[0].0.clone();
+        let peer_id = PairingManager::peer_id_of(&token);
+        m.revoke_peer(&peer_id);
+        assert!(m.channel_mut(&id("A")).is_none(), "peer 를 폐기하면 v2 채널도 지워야 한다");
+    }
+
+    /// 전체 브랜치 리뷰 I-4 회귀 테스트.
+    #[test]
+    fn revoke_all_clears_v2_channels() {
+        let mut m = PairingManager::new();
+        v2_pair(&mut m, &id("A"), t(1000));
+        assert!(m.channel_mut(&id("A")).is_some());
+
+        m.revoke_all();
+        assert!(m.channel_mut(&id("A")).is_none(), "전체 폐기 후에는 v2 채널도 남으면 안 된다");
+    }
+
+    /// 전체 브랜치 리뷰 I-4 회귀 테스트.
+    #[test]
+    fn end_all_sessions_clears_v2_channels() {
+        let mut m = PairingManager::new();
+        v2_pair(&mut m, &id("A"), t(1000));
+        assert!(m.channel_mut(&id("A")).is_some());
+
+        m.end_all_sessions();
+        assert!(m.channel_mut(&id("A")).is_none(), "전체 세션 종료 후에는 v2 채널도 남으면 안 된다");
+    }
 
     /// 테스트에서 "iOS 클라이언트" 역할을 대신한다 — 토큰으로 논스에
     /// 서명해 올바른 PROOF 값을 만든다.
