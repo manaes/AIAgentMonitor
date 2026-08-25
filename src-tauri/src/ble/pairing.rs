@@ -1262,6 +1262,36 @@ mod tests {
         assert!(m.is_authorized(&id("A")));
     }
 
+    /// v1 `same_proof_replayed_against_same_nonce_fails`, v2 `Code2`
+    /// `v2_code2_replay_after_success_is_rejected` 와 같은 이유 — 논스는
+    /// 성공/실패와 무관하게 1회용이다. 캡처한 PROOF2 를 그대로 재전송해도
+    /// 두 번째부터는 통과하면 안 된다(도청자가 첫 성공 응답을 그대로
+    /// 재생하는 시나리오).
+    #[test]
+    fn v2_proof2_replay_after_success_is_rejected() {
+        let mut m = PairingManager::new();
+        let token = "aa".repeat(16);
+        m.load_peers(vec![(token.clone(), 900)]);
+        let mut c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Auth2(hex_encode(&c.public)), t(1001));
+        let AuthReply::Nonce2 { epk, nonce } = reply else {
+            panic!("Nonce2 를 기대했다: {reply:?}")
+        };
+        let (_ss, tr) = c.agree(&epk);
+        let token_bytes = PairingManager::hex_decode(&token).unwrap();
+        let nonce_bytes = PairingManager::hex_decode(&nonce).unwrap();
+        let proof = hex_encode(&crypto::session_proof(&token_bytes, &nonce_bytes, &tr));
+
+        let first = m.handle(&id("A"), AuthRequest::Proof2(proof.clone()), t(1002));
+        assert_eq!(first, AuthReply::Authorized2, "{first:?}");
+
+        let replay = m.handle(&id("A"), AuthRequest::Proof2(proof), t(1003));
+        assert!(
+            matches!(replay, AuthReply::Rejected),
+            "성공 후 캡처한 PROOF2 를 재전송해도 거부돼야 한다: {replay:?}"
+        );
+    }
+
     /// v1 과 같다 — proof 실패는 코드 추측이 아니므로 예산을 소모하지 않는다.
     #[test]
     fn v2_bad_proof_does_not_spend_an_attempt() {
