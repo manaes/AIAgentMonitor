@@ -1,6 +1,7 @@
 mod aggregator;
 mod peers;
 mod ble;
+mod crypto;
 mod clock;
 mod emitter;
 mod network;
