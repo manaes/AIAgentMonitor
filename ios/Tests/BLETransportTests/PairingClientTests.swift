@@ -161,6 +161,32 @@ final class PairingClientTests: XCTestCase {
         XCTAssertNil(hs.codeBinding(code: "123456"), "합의 실패 뒤에는 아무 값도 나오면 안 된다")
     }
 
+    /// **임시 키는 한 번만 쓴다.** 이 불변식을 지키는 건 `agree` 안의
+    /// `privateKey = nil` 한 줄뿐인데, 지워도 성공 경로는 아무 티가 안 난다.
+    /// 두 번째 합의가 통하면 그 키는 더 이상 임시가 아니고, 서로 다른 두 세션이
+    /// 같은 개인키를 공유한다 — 하나가 새면 다른 하나도 함께 열린다.
+    func testTheEphemeralKeyIsUsedExactlyOnce() {
+        let hs = V2Handshake()
+        let first = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
+        let second = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
+        XCTAssertTrue(hs.agree(epkHex: first.hexString, nonceHex: "00112233"))
+        XCTAssertFalse(
+            hs.agree(epkHex: second.hexString, nonceHex: "44556677"),
+            "임시 키는 한 번만 쓴다"
+        )
+    }
+
+    /// 두 번째 합의가 거절될 뿐 아니라, **첫 합의의 결과가 그대로 남아야 한다** —
+    /// 두 번째 논스로 덮어써지면 세션 키의 salt 가 맥과 어긋난다.
+    func testASecondAgreementDoesNotOverwriteTheFirst() {
+        let hs = V2Handshake()
+        let serverPub = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
+        XCTAssertTrue(hs.agree(epkHex: serverPub.hexString, nonceHex: "00112233"))
+        let binding = hs.codeBinding(code: "123456")
+        XCTAssertFalse(hs.agree(epkHex: serverPub.hexString, nonceHex: "ffffffff"))
+        XCTAssertEqual(hs.codeBinding(code: "123456"), binding)
+    }
+
     /// 형식이 어긋난 `epk`(길이·문자)로는 합의하지 않는다 — 여기서 통과시키면
     /// 이후 파생 키가 조용히 엉뚱한 값이 된다.
     func testMalformedServerKeyIsRejected() {

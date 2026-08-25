@@ -172,18 +172,6 @@ public final class NetworkClient: NSObject {
         return hasToken ? PairingClient.authFrame() : PairingClient.helloFrame()
     }
 
-    /// v2 의 첫 프레임. `initialFrame` 과 **같은 규칙이다 — 코드가 있으면 코드
-    /// 우선.** 다만 v1 처럼 `CODE:` 를 바로 낼 수는 없다: `CODE2` 의 바인딩은
-    /// `HELLO2` 가 만든 transcript 위에서만 계산되고, 맥도 핸드셰이크가 없으면
-    /// 즉시 거절한다(`pairing.rs: Code2`). 그래서 "코드 우선" 은 v2 에서
-    /// "`AUTH2` 가 아니라 `HELLO2` 로 시작한다" 는 뜻이 된다.
-    nonisolated static func initialFrameV2(hasToken: Bool, code: String?, clientPub: Data) -> Data {
-        if code != nil || !hasToken {
-            return PairingClient.hello2Frame(clientPub: clientPub)
-        }
-        return PairingClient.auth2Frame(clientPub: clientPub)
-    }
-
     /// `BLEClient.decideV2` 와 동일한 결정을 그대로 쓴다 — 전송만 다를 뿐 상태
     /// 기계는 하나다. QR 로 코드를 이미 받았으므로 `AwaitingCode2` 에서 사용자
     /// 입력을 기다리지 않고 즉시 바인딩을 낸다(재연결 경로에서는 `code` 가 nil
@@ -193,15 +181,18 @@ public final class NetworkClient: NSObject {
     /// 인가되면 이 연결의 봉인 채널을 돌려준다. 이 값 없이는 스냅샷을 한 장도
     /// 읽을 수 없다.
     private func authenticate(conn: Connection, code: String?) async throws -> SealedChannel {
-        let hasToken = NetworkTokenStore.loadToken() != nil
         let handshake = V2Handshake()
-        // 응답을 보낸 동사로 가른다 — `AwaitingCode2` 와 `Nonce2` 는 필드
-        // 구성이 같아서 필드로는 갈리지 않는다(`BLEClient.V2Verb`).
-        var sent: BLEClient.V2Verb = (code != nil || !hasToken) ? .hello2 : .auth2
-        var reply = try await sendControl(
-            conn,
-            Self.initialFrameV2(hasToken: hasToken, code: code, clientPub: handshake.clientPub)
+        // 프레임과 동사를 **한 값으로** 받는다 — 따로 계산하면 조건 하나만
+        // 고쳤을 때 서로 어긋나고, 그러면 `AwaitingCode2` 를 `Nonce2` 로 오해해
+        // 논스 없는 `PROOF2` 를 내고 조용히 `needsPairing` 에 앉는다.
+        // "코드가 저장된 토큰을 이긴다" 는 규칙도 이 한 함수에만 있다.
+        let first = BLEClient.initialSend(
+            hasToken: NetworkTokenStore.loadToken() != nil,
+            code: code,
+            clientPub: handshake.clientPub
         )
+        var sent = first.verb
+        var reply = try await sendControl(conn, first.frame)
 
         while true {
             switch BLEClient.decideV2(sent: sent, reply: reply) {

@@ -87,9 +87,12 @@ final class NetworkClientTests: XCTestCase {
     /// v1 에서 겪은 버그를 v2 에서 반복하지 않는다. 맥이 토큰을 이미 폐기한
     /// 경우 토큰 재인증(`AUTH2`)은 반드시 거부되고, 그 사이 방금 스캔한 코드는
     /// 쓰이지도 못한 채 `needsPairing` 으로 떨어진다.
+    ///
+    /// 규칙 자체는 `BLEClient.initialSend` 한 곳에만 있다(두 전송이 공유한다).
+    /// 여기서는 **네트워크 경로가 그걸 쓴다**는 사실을 고정한다.
     func testAFreshCodeWinsOverAStoredTokenInV2() {
         XCTAssertEqual(
-            NetworkClient.initialFrameV2(hasToken: true, code: "123456", clientPub: clientPub),
+            BLEClient.initialSend(hasToken: true, code: "123456", clientPub: clientPub).frame,
             PairingClient.hello2Frame(clientPub: clientPub),
             "코드가 있으면 HELLO2 로 시작한다"
         )
@@ -97,7 +100,7 @@ final class NetworkClientTests: XCTestCase {
 
     func testStoredTokenWithoutCodeUsesAuth2() {
         XCTAssertEqual(
-            NetworkClient.initialFrameV2(hasToken: true, code: nil, clientPub: clientPub),
+            BLEClient.initialSend(hasToken: true, code: nil, clientPub: clientPub).frame,
             PairingClient.auth2Frame(clientPub: clientPub),
             "코드가 없고 토큰이 있으면 AUTH2"
         )
@@ -108,11 +111,11 @@ final class NetworkClientTests: XCTestCase {
     /// 맥도 핸드셰이크가 없으면 곧바로 거절한다(`pairing.rs: Code2`).
     func testFirstPairingStillStartsWithHello2() {
         XCTAssertEqual(
-            NetworkClient.initialFrameV2(hasToken: false, code: "654321", clientPub: clientPub),
+            BLEClient.initialSend(hasToken: false, code: "654321", clientPub: clientPub).frame,
             PairingClient.hello2Frame(clientPub: clientPub)
         )
         XCTAssertEqual(
-            NetworkClient.initialFrameV2(hasToken: false, code: nil, clientPub: clientPub),
+            BLEClient.initialSend(hasToken: false, code: nil, clientPub: clientPub).frame,
             PairingClient.hello2Frame(clientPub: clientPub)
         )
     }

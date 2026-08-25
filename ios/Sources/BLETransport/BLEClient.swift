@@ -26,18 +26,12 @@ public final class BLEClient: NSObject {
 
     /// 이번 연결의 v2 핸드셰이크. 임시 키가 한 번만 쓰이므로 연결마다 새로 만든다.
     private var handshake: V2Handshake?
-    /// 방금 보낸 v2 동사. 응답을 이걸로 가른다(`decideV2`).
-    private var sentVerb: V2Verb?
+    /// v2 인증 상태. 전이는 전부 `advance`/`submit`(순수 함수)이 하고, 이
+    /// 클래스는 그 결과를 CoreBluetooth 와 Keychain 에 옮기기만 한다.
+    private var v2 = V2ClientState()
     /// 인가 후의 봉인 채널. 이게 nil 인 동안 도착하는 스냅샷은 전부 버린다 —
     /// 평문 스냅샷을 받아주는 것이 곧 다운그레이드다.
     private var channel: SealedChannel?
-    /// `AwaitingCode2` 를 받아 transcript 까지 확정된 상태인가. `CODE2` 는 이
-    /// 상태에서만 낼 수 있다.
-    private var awaitingUserCode = false
-    /// 사용자가 낸 코드를 아직 못 쓴 경우 들고 있는다. `HELLO2` 가 거절당한 뒤
-    /// (맥 화면의 페어링 창이 아직 안 열렸을 때) 사용자가 창을 열고 코드를
-    /// 입력하면, 새 `HELLO2` 로 다시 시작해 그 응답에 이 코드를 바로 낸다.
-    private var pendingCode: String?
 
     private let stateSubject = CurrentValueSubject<ConnectionState, Never>(.idle)
     private let snapshotSubject = PassthroughSubject<MirrorSnapshot, Never>()
@@ -76,7 +70,8 @@ public final class BLEClient: NSObject {
         }
         peripheral = nil
         resetV2State()
-        pendingCode = nil
+        // 전송을 바꾸려고 멈춘 것이다 — 들고 있던 코드도 버린다.
+        v2.pendingCode = nil
         stateSubject.send(.idle)
     }
 
@@ -92,49 +87,36 @@ public final class BLEClient: NSObject {
     /// 경로가 오히려 흔하다.
     public func submitPairingCode(_ code: String) {
         guard let peripheral, let authCh = authCharacteristic else { return }
-        guard awaitingUserCode, let handshake,
-              let binding = handshake.codeBinding(code: code) else {
-            pendingCode = code
+        switch Self.submit(code: code, state: &v2, handshake: handshake) {
+        case .send(let send):
+            peripheral.writeValue(send.frame, for: authCh, type: .withResponse)
+        case .restart:
             beginV2Handshake(peripheral, authCh)
-            return
         }
-        // 핸드셰이크는 맥에서도 CODE2 한 번으로 소비된다 — 틀렸으면 HELLO2 부터다.
-        awaitingUserCode = false
-        pendingCode = nil
-        sentVerb = .code2
-        peripheral.writeValue(PairingClient.code2Frame(binding: binding), for: authCh, type: .withResponse)
     }
 
-    /// 새 임시 키로 v2 핸드셰이크를 시작한다.
-    ///
-    /// **방금 받은 코드가 저장된 토큰보다 우선한다.** 맥에서 전체 해제로 토큰이
-    /// 폐기된 뒤에는 `AUTH2` 재인증이 반드시 거부되고, 그때 코드는 쓰이지도 못한
-    /// 채 `needsPairing` 으로 떨어진다(v1 에서 실제로 겪은 버그).
+    /// 새 임시 키로 v2 핸드셰이크를 시작한다. 어떤 동사로 시작할지는
+    /// `initialSend` 가 정한다 — 네트워크 전송도 같은 함수를 부른다.
     private func beginV2Handshake(_ peripheral: CBPeripheral, _ authCh: CBCharacteristic) {
         let hs = V2Handshake()
         handshake = hs
         channel = nil
-        awaitingUserCode = false
-        let frame: Data
-        if pendingCode != nil || TokenStore.load() == nil {
-            sentVerb = .hello2
-            frame = PairingClient.hello2Frame(clientPub: hs.clientPub)
-        } else {
-            // 토큰 자체는 보내지 않는다. 논스를 받아 서명해 답한다.
-            sentVerb = .auth2
-            frame = PairingClient.auth2Frame(clientPub: hs.clientPub)
-        }
-        peripheral.writeValue(frame, for: authCh, type: .withResponse)
+        v2.awaitingUserCode = false
+        let send = Self.initialSend(
+            hasToken: TokenStore.load() != nil,
+            code: v2.pendingCode,
+            clientPub: hs.clientPub
+        )
+        v2.sent = send.verb
+        peripheral.writeValue(send.frame, for: authCh, type: .withResponse)
     }
 
     /// 연결이 끊기거나 서비스가 무효화될 때 v2 상태를 통째로 버린다. 임시 키도
     /// 세션 카운터도 연결 하나에 매인 값이라 다음 연결로 넘기면 안 된다.
-    /// `pendingCode` 는 남긴다 — 사용자가 낸 코드는 재연결 뒤에도 여전히 유효하다.
     private func resetV2State() {
         handshake = nil
-        sentVerb = nil
         channel = nil
-        awaitingUserCode = false
+        v2.resetForNewConnection()
     }
 
     /// 스캔을 (다시) 시작하는 유일한 경로. 재연결마다 이전 연결에서 시작된
@@ -533,10 +515,177 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         }
     }
 
+    // MARK: - v2 전이 (두 전송이 공유하는 순수 함수)
+
+    /// 내보낼 프레임 하나. **프레임과 동사가 한 값에 묶여 있다.** 둘을 따로
+    /// 계산하면 조건 하나만 고쳤을 때 서로 어긋날 수 있고, 그러면 맥은 `HELLO2`
+    /// 에 답하는데 클라이언트는 `AUTH2` 를 보낸 줄 알고 응답을 읽는다 —
+    /// `AwaitingCode2` 를 `Nonce2` 로 오해해 논스 없는 `PROOF2` 를 내고
+    /// `Rejected` 를 받는다. 크래시도 로그도 없는 빈 화면이다.
+    public struct V2Send: Equatable, Sendable {
+        public let verb: V2Verb
+        public let frame: Data
+    }
+
+    /// v2 인증의 클라이언트 상태. 연결 하나에 매인 값이고, 크립토도 저장소도
+    /// 들어 있지 않다 — 그래서 전이를 순수 함수로 돌릴 수 있다.
+    public struct V2ClientState: Equatable, Sendable {
+        /// 방금 보낸 동사. 응답을 이걸로 가른다(`decideV2`). nil 이면 기다리는
+        /// 응답이 없다.
+        public var sent: V2Verb?
+        /// `AwaitingCode2` 를 받아 transcript 까지 확정된 상태인가.
+        /// **`CODE2` 는 이 상태에서만 나간다.**
+        public var awaitingUserCode = false
+        /// 사용자가 냈지만 아직 못 쓴 코드.
+        public var pendingCode: String?
+
+        public nonisolated init() {}
+
+        /// 연결이 끊기거나 서비스가 무효화될 때. 임시 키도 세션 카운터도 연결
+        /// 하나에 매인 값이라 다음 연결로 넘기면 안 된다. **`pendingCode` 는
+        /// 남긴다** — 사용자가 낸 코드는 재연결 뒤에도 여전히 유효하다.
+        /// (`stop` 이 코드까지 버리는 것과 여기서 갈린다.)
+        public nonisolated mutating func resetForNewConnection() {
+            sent = nil
+            awaitingUserCode = false
+        }
+    }
+
+    /// 전이 하나의 결과.
+    public enum V2Step: Equatable, Sendable {
+        case send(V2Send)
+        /// 인가됐다. `storeToken` 이면 `Granted2` 로 새로 받은 토큰이라 저장해야 한다.
+        case openSession(tokenHex: String, storeToken: Bool)
+        /// 사용자가 맥 화면의 6자리를 넣기를 기다린다.
+        case awaitUserCode
+        case failed(left: Int)
+        /// 더 진행할 수 없다. **프레임을 만들지 않는다** — 아래 `stop` 참고.
+        case stop
+    }
+
+    /// v2 인증의 첫 프레임. **두 전송이 이 한 곳만 부른다.**
+    ///
+    /// **방금 받은 코드가 저장된 토큰보다 우선한다.** 맥에서 전체 해제로 토큰이
+    /// 폐기된 뒤에는 `AUTH2` 재인증이 반드시 거부되고, 그때 코드는 쓰이지도 못한
+    /// 채 `needsPairing` 으로 떨어진다(9637972 에서 실제로 겪은 버그).
+    ///
+    /// 다만 v1 처럼 `CODE:` 를 바로 낼 수는 없다 — `CODE2` 의 바인딩은 `HELLO2`
+    /// 가 만든 transcript 위에서만 계산되고, 맥도 핸드셰이크가 없으면 즉시
+    /// 거절한다(`pairing.rs: Code2`). 그래서 v2 에서 "코드 우선" 은 "`AUTH2` 가
+    /// 아니라 `HELLO2` 로 시작한다" 는 뜻이 된다.
+    public nonisolated static func initialSend(hasToken: Bool, code: String?, clientPub: Data) -> V2Send {
+        if code != nil || !hasToken {
+            return V2Send(verb: .hello2, frame: PairingClient.hello2Frame(clientPub: clientPub))
+        }
+        // 토큰 자체는 보내지 않는다. 논스를 받아 서명해 답한다.
+        return V2Send(verb: .auth2, frame: PairingClient.auth2Frame(clientPub: clientPub))
+    }
+
+    /// 결정 하나를 상태 변화와 다음 행동으로 옮긴다. CoreBluetooth 도 Keychain
+    /// 도 난수도 닿지 않는다 — 저장된 토큰은 인자로 받고, 크립토는
+    /// `V2Handshaking` 으로 들어온다. 그래야 전이 하나하나를 테스트가 짚는다.
+    @discardableResult
+    public nonisolated static func advance(
+        state: inout V2ClientState,
+        decision: V2Action,
+        handshake: V2Handshaking,
+        storedToken: String?
+    ) -> V2Step {
+        switch decision {
+        case .bindCode(let epk, let nonce):
+            guard handshake.agree(epkHex: epk, nonceHex: nonce) else { return stop(&state) }
+            guard let code = state.pendingCode,
+                  let binding = handshake.codeBinding(code: code) else {
+                // 아직 코드가 없다. 사용자가 넣으면 `submit` 이 이 핸드셰이크 위에서 낸다.
+                state.awaitingUserCode = true
+                return .awaitUserCode
+            }
+            return .send(sendCode2(binding: binding, state: &state))
+        case .signSessionProof(let epk, let nonce):
+            guard handshake.agree(epkHex: epk, nonceHex: nonce),
+                  let token = storedToken,
+                  let proof = handshake.sessionProof(tokenHex: token) else {
+                return stop(&state)
+            }
+            state.sent = .proof2
+            return .send(V2Send(verb: .proof2, frame: PairingClient.proof2Frame(proof: proof)))
+        case .openSealedToken(let sealed):
+            // 봉인이 안 열렸다는 건 우리가 만든 키가 맥의 키와 다르다는 뜻이다.
+            guard let token = handshake.openSealedToken(sealedHex: sealed) else { return stop(&state) }
+            state.sent = nil
+            state.awaitingUserCode = false
+            state.pendingCode = nil
+            return .openSession(tokenHex: token, storeToken: true)
+        case .openSession:
+            // 재인증 성공 — 되돌아온 토큰이 없다(스펙 5.1).
+            guard let token = storedToken else { return stop(&state) }
+            state.sent = nil
+            state.awaitingUserCode = false
+            return .openSession(tokenHex: token, storeToken: false)
+        case .failed(let left):
+            // 맥은 `CODE2` 하나로 핸드셰이크를 소비했다 — 다시 넣으려면 `HELLO2` 부터다.
+            state.sent = nil
+            state.awaitingUserCode = false
+            state.pendingCode = nil
+            return .failed(left: left)
+        case .needsPairing:
+            return stop(&state)
+        }
+    }
+
+    /// 사용자가 6자리를 냈을 때 무엇을 할지.
+    ///
+    /// **`CODE2` 는 `awaitingUserCode` 에서만 나간다.** 그렇지 않으면 코드를 들고
+    /// `HELLO2` 부터 다시 시작한다(`.restart`) — 연결 시점에 맥 화면의 페어링
+    /// 창은 보통 아직 닫혀 있고(사용자가 그 뒤에 연다) 그때의 `HELLO2` 는
+    /// `Rejected` 를 받으므로, 이 경로가 오히려 정상 흐름이다.
+    public enum V2Submit: Equatable, Sendable {
+        case send(V2Send)
+        /// 쓸 수 있는 핸드셰이크가 없다. 호출부가 새 임시 키로 다시 시작한다 —
+        /// 코드는 `state.pendingCode` 에 담겨 있으므로 `initialSend` 가 `HELLO2`
+        /// 를 고르고, 그 응답에서 곧바로 `CODE2` 가 나간다.
+        case restart
+    }
+
+    public nonisolated static func submit(
+        code: String,
+        state: inout V2ClientState,
+        handshake: V2Handshaking?
+    ) -> V2Submit {
+        guard state.awaitingUserCode, let handshake,
+              let binding = handshake.codeBinding(code: code) else {
+            state.pendingCode = code
+            state.awaitingUserCode = false
+            return .restart
+        }
+        return .send(sendCode2(binding: binding, state: &state))
+    }
+
+    /// `CODE2` 를 만드는 유일한 자리. 핸드셰이크는 맥에서도 `CODE2` 한 번으로
+    /// 소비되므로 `awaitingUserCode` 를 반드시 함께 내린다 — 틀렸으면 `HELLO2` 부터다.
+    private nonisolated static func sendCode2(binding: Data, state: inout V2ClientState) -> V2Send {
+        state.awaitingUserCode = false
+        state.pendingCode = nil
+        state.sent = .code2
+        return V2Send(verb: .code2, frame: PairingClient.code2Frame(binding: binding))
+    }
+
+    /// 더 진행할 수 없을 때의 유일한 종착점. **여기서 프레임을 만들지 않는다** —
+    /// 창이 안 열려 있으면 재전송도 다시 거절당하고, 그게 다시 여기로 와 무한
+    /// 루프가 된다(v1 에서 겪은 C-1). v1 로 물러서지도 않는다. 들고 있던 코드도
+    /// 버린다: 여기까지 왔다는 건 창이 닫혔거나 만료됐다는 뜻이고, 맥의 코드는
+    /// 120초짜리라 나중에 쓰면 어차피 틀린다.
+    private nonisolated static func stop(_ state: inout V2ClientState) -> V2Step {
+        state.sent = nil
+        state.awaitingUserCode = false
+        state.pendingCode = nil
+        return .stop
+    }
+
     private func handleAuthReply(_ data: Data) {
         guard let peripheral, let authCh = authCharacteristic,
               let snapshotCh = snapshotCharacteristic,
-              let handshake, let sentVerb else { return }
+              let handshake, let sentVerb = v2.sent else { return }
         guard let reply = PairingClient.parse(data) else {
             // v2 응답은 v1 보다 훨씬 길다(`AwaitingCode2` 가 148바이트). Auth 특성은
             // 청킹 없이 notify 한 장으로 나가므로 MTU 협상이 낮게 끝나면 여기서
@@ -545,87 +694,45 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
             return
         }
 
-        switch Self.decideV2(sent: sentVerb, reply: reply) {
-        case .bindCode(let epk, let nonce):
-            guard handshake.agree(epkHex: epk, nonceHex: nonce) else {
-                // 저차 점이거나 형식이 깨진 epk — 재시도해도 같은 맥이면 같은
-                // 결과다. resetAndAwaitCode 와 같은 이유로 자동 재전송은 없다.
-                failV2()
-                return
-            }
-            guard let code = pendingCode, let binding = handshake.codeBinding(code: code) else {
-                // 아직 코드가 없다. 사용자가 맥 화면의 6자리를 입력하면
-                // `submitPairingCode` 가 이 핸드셰이크 위에서 CODE2 를 낸다.
-                awaitingUserCode = true
-                stateSubject.send(.needsPairing)
-                return
-            }
-            pendingCode = nil
-            self.sentVerb = .code2
-            peripheral.writeValue(PairingClient.code2Frame(binding: binding), for: authCh, type: .withResponse)
-        case .signSessionProof(let epk, let nonce):
-            guard handshake.agree(epkHex: epk, nonceHex: nonce),
-                  let token = TokenStore.load(),
-                  let proof = handshake.sessionProof(tokenHex: token) else {
-                // 토큰이 없거나 증명을 못 만들었다 — 코드 페어링으로 되돌아간다.
-                failV2()
-                return
-            }
-            self.sentVerb = .proof2
-            peripheral.writeValue(PairingClient.proof2Frame(proof: proof), for: authCh, type: .withResponse)
-        case .openSealedToken(let sealed):
-            guard let token = handshake.openSealedToken(sealedHex: sealed),
-                  let channel = handshake.sessionChannel(tokenHex: token) else {
-                // 봉인이 안 열렸다는 건 우리가 만든 키가 맥의 키와 다르다는 뜻이다.
-                failV2()
-                return
-            }
+        let decision = Self.decideV2(sent: sentVerb, reply: reply)
+        // 결정 → 상태 전이는 전부 `advance` 가 한다(순수 함수). 여기 남은 일은
+        // 그 결과를 CoreBluetooth 와 Keychain 에 옮기는 것뿐이다.
+        switch Self.advance(
+            state: &v2, decision: decision, handshake: handshake, storedToken: TokenStore.load()
+        ) {
+        case .send(let send):
+            peripheral.writeValue(send.frame, for: authCh, type: .withResponse)
+        case .openSession(let token, let storeToken):
             // 저장이 실패해도(디스크 꽉 참 등) 스트리밍은 계속한다 — 지금 세션은
             // 인가된 상태다. 다만 다음 재연결부터는 저장된 토큰이 없어 코드를
             // 다시 요구하게 되므로 로그를 남긴다(TokenStore.save 가 이제
             // SecItemAdd 결과를 그대로 돌려준다, Task 6 리뷰 반영).
-            if !TokenStore.save(token) {
+            if storeToken, !TokenStore.save(token) {
                 NSLog("페어링 토큰 저장 실패 — 다음 재연결부터 코드를 다시 요구합니다")
+            }
+            guard let channel = handshake.sessionChannel(tokenHex: token) else {
+                // 토큰이 hex 가 아니다 — 세션 키를 만들 수 없으니 페어링부터다.
+                failV2()
+                return
             }
             // 채널을 먼저 세운다 — 구독보다 늦으면 첫 스냅샷이 채널 없이 도착해
             // 버려진다.
             self.channel = channel
-            self.sentVerb = nil
             peripheral.setNotifyValue(true, for: snapshotCh)   // 여기서 비로소 데이터가 흐른다
-        case .openSession:
-            // 재인증 성공 — 되돌아온 토큰이 없다(스펙 5.1). 이미 저장된 토큰으로
-            // 세션 키를 만든다.
-            guard let token = TokenStore.load(),
-                  let channel = handshake.sessionChannel(tokenHex: token) else {
-                failV2()
-                return
-            }
-            self.channel = channel
-            self.sentVerb = nil
-            peripheral.setNotifyValue(true, for: snapshotCh)
+        case .awaitUserCode:
+            stateSubject.send(.needsPairing)
         case .failed(let left):
-            // 맥은 CODE2 하나로 핸드셰이크를 소비했다 — 다시 넣으려면 HELLO2
-            // 부터다. `submitPairingCode` 가 그 판단을 한다.
-            awaitingUserCode = false
-            pendingCode = nil
-            self.sentVerb = nil
             stateSubject.send(.pairingFailed(left: left))
-        case .needsPairing:
+        case .stop:
             failV2()
         }
     }
 
-    /// v2 인증이 더 진행될 수 없을 때의 유일한 종착점. **여기서 프레임을 다시
-    /// 쓰지 않는다** — 창이 안 열려 있으면 재전송도 다시 거절당하고, 그게 다시
-    /// 여기로 와 무한 루프가 된다(v1 에서 겪은 C-1). v1 로 물러서지도 않는다.
-    /// 사용자가 코드를 내면 `submitPairingCode` 가 HELLO2 부터 다시 시작한다.
+    /// `advance`/`submit` 가 `.stop` 을 낸 뒤의 정리. 상태는 이미 `stop` 이
+    /// 비웠으므로 여기 남은 일은 토큰 폐기와 화면 전환뿐이다. **프레임을 다시
+    /// 쓰지 않는다** — 그 이유는 `stop` 의 doc 에 있다.
     private func failV2() {
         TokenStore.clear()
-        awaitingUserCode = false
-        sentVerb = nil
-        // 들고 있던 코드도 버린다. 여기까지 왔다는 건 창이 닫혔거나 만료됐다는
-        // 뜻이고(HELLO2 거절), 맥의 코드는 120초짜리라 나중에 쓰면 어차피 틀린다.
-        pendingCode = nil
         stateSubject.send(.needsPairing)
     }
 }

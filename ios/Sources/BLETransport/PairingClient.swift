@@ -75,6 +75,19 @@ public extension PairingClient {
     }
 }
 
+/// `V2Handshake` 중에서 상태 기계가 실제로 쓰는 부분. **`BLEClient.advance` 를
+/// CoreBluetooth 도 Keychain 도 난수도 없이 돌리기 위해 있다** — 그래야 전이
+/// 하나하나를 테스트가 직접 짚을 수 있다. 이 프로젝트가 반복해서 빠진 사각지대가
+/// 정확히 "연결 코드 안에 박힌 결정" 이고, 재도입하지 말라고 지목된 두 버그도
+/// 거기서 나왔다.
+public protocol V2Handshaking: AnyObject {
+    var clientPub: Data { get }
+    func agree(epkHex: String, nonceHex: String) -> Bool
+    func codeBinding(code: String) -> Data?
+    func sessionProof(tokenHex: String) -> Data?
+    func openSealedToken(sealedHex: String) -> String?
+}
+
 /// v2 핸드셰이크의 **클라이언트 절반**. 임시 X25519 키를 만들고, 맥의 응답에서
 /// 공유 비밀·transcript·논스를 확정한 뒤, 그 위에서 코드 바인딩·재연결 증명·
 /// 세션 채널을 만든다. Rust 쪽 짝은 `pairing.rs::test_client::V2Client` 와
@@ -87,7 +100,7 @@ public extension PairingClient {
 /// 같은 조립을 공유한다.
 ///
 /// `Sendable` 이 아니다 — 임시 개인키가 한 번만 쓰이는 가변 상태다.
-public final class V2Handshake {
+public final class V2Handshake: V2Handshaking {
     /// 임시 개인키. `agree` 가 소비하고 nil 로 만든다 — 같은 키로 두 번
     /// 합의하면 임시 키가 임시가 아니게 된다.
     private var privateKey: Curve25519.KeyAgreement.PrivateKey?

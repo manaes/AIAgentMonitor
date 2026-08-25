@@ -174,4 +174,259 @@ final class BLEClientTests: XCTestCase {
             "CODE2 성공은 봉인된 토큰을 반드시 들고 온다"
         )
     }
+
+    // MARK: - v2 첫 프레임 (`initialSend`) — 두 전송이 공유하는 규칙
+
+    private static let pub32 = Data(repeating: 1, count: 32)
+
+    /// **방금 받은 코드가 저장된 토큰보다 우선한다.** 9637972 에서 고친 버그다 —
+    /// 맥이 전체 해제로 토큰을 폐기한 뒤에는 `AUTH2` 재인증이 반드시 거부되고,
+    /// 그때 방금 낸 코드는 쓰이지도 못한 채 "연결끊김: needsPairing" 이 된다.
+    ///
+    /// 이 단언이 BLE 경로도 함께 지킨다 — `beginV2Handshake` 가 조건을 따로
+    /// 갖고 있지 않고 이 함수를 부르기 때문이다.
+    func testAFreshCodeBeatsAStoredToken() {
+        XCTAssertEqual(
+            BLEClient.initialSend(hasToken: true, code: "123456", clientPub: Self.pub32),
+            BLEClient.V2Send(verb: .hello2, frame: PairingClient.hello2Frame(clientPub: Self.pub32))
+        )
+    }
+
+    func testAStoredTokenWithNoCodeReconnectsWithAuth2() {
+        XCTAssertEqual(
+            BLEClient.initialSend(hasToken: true, code: nil, clientPub: Self.pub32),
+            BLEClient.V2Send(verb: .auth2, frame: PairingClient.auth2Frame(clientPub: Self.pub32))
+        )
+    }
+
+    func testWithoutATokenItAlwaysStartsAtHello2() {
+        for code in [nil, "654321"] {
+            XCTAssertEqual(
+                BLEClient.initialSend(hasToken: false, code: code, clientPub: Self.pub32),
+                BLEClient.V2Send(verb: .hello2, frame: PairingClient.hello2Frame(clientPub: Self.pub32)),
+                "v2 는 HELLO2 없이 CODE2 를 낼 수 없다 — 바인딩할 transcript 가 없다"
+            )
+        }
+    }
+
+    /// 동사와 프레임이 한 값에 묶여 있어야 한다. 따로 계산하면 조건 하나만
+    /// 고쳤을 때 어긋나고, 그러면 `AwaitingCode2` 를 `Nonce2` 로 오해해 논스
+    /// 없는 `PROOF2` 를 내고 조용히 `needsPairing` 에 앉는다.
+    func testTheVerbAlwaysMatchesTheFrameItIsPairedWith() {
+        for (hasToken, code) in [(true, nil), (true, "1"), (false, nil), (false, "1")] as [(Bool, String?)] {
+            let send = BLEClient.initialSend(hasToken: hasToken, code: code, clientPub: Self.pub32)
+            let expected = send.verb == .hello2
+                ? PairingClient.hello2Frame(clientPub: Self.pub32)
+                : PairingClient.auth2Frame(clientPub: Self.pub32)
+            XCTAssertEqual(send.frame, expected, "hasToken=\(hasToken) code=\(String(describing: code))")
+        }
+    }
+
+    // MARK: - v2 상태 전이 (`advance` / `submit`)
+
+    /// `V2Handshaking` 의 가짜 구현. 크립토 대신 고정 값을 돌려주므로 전이
+    /// 자체만 남는다 — 이 결정들이 `CBPeripheral` 을 쥔 코드 안에 있었을 때는
+    /// 어떤 테스트도 닿지 못했고, 재도입 금지 두 버그가 정확히 거기서 나왔다.
+    private final class FakeHandshake: V2Handshaking {
+        let clientPub = Data(repeating: 9, count: 32)
+        var agrees = true
+        var opensSealed: String? = "aabb"
+        /// `agree` 가 몇 번 불렸는지 — 전이가 합의를 건너뛰지 않는지 본다.
+        private(set) var agreeCount = 0
+
+        func agree(epkHex: String, nonceHex: String) -> Bool {
+            agreeCount += 1
+            return agrees
+        }
+        func codeBinding(code: String) -> Data? { agrees ? Data("bind-\(code)".utf8) : nil }
+        func sessionProof(tokenHex: String) -> Data? { agrees ? Data("proof-\(tokenHex)".utf8) : nil }
+        func openSealedToken(sealedHex: String) -> String? { opensSealed }
+    }
+
+    /// `AwaitingCode2` 인데 코드가 없으면 사용자를 기다린다. **`CODE2` 는
+    /// 여기서 나가지 않는다** — 낼 코드가 없다.
+    func testBindCodeWithoutACodeWaitsForTheUser() {
+        var state = BLEClient.V2ClientState()
+        state.sent = .hello2
+        let step = BLEClient.advance(
+            state: &state, decision: .bindCode(epk: "e", nonce: "n"),
+            handshake: FakeHandshake(), storedToken: nil
+        )
+        XCTAssertEqual(step, .awaitUserCode)
+        XCTAssertTrue(state.awaitingUserCode, "CODE2 를 낼 수 있는 상태가 돼야 한다")
+    }
+
+    /// QR 처럼 코드를 이미 들고 있으면 사용자를 기다리지 않고 곧바로 낸다.
+    func testBindCodeWithAPendingCodeSendsCode2Immediately() {
+        var state = BLEClient.V2ClientState()
+        state.sent = .hello2
+        state.pendingCode = "123456"
+        let step = BLEClient.advance(
+            state: &state, decision: .bindCode(epk: "e", nonce: "n"),
+            handshake: FakeHandshake(), storedToken: nil
+        )
+        XCTAssertEqual(
+            step,
+            .send(BLEClient.V2Send(
+                verb: .code2,
+                frame: PairingClient.code2Frame(binding: Data("bind-123456".utf8))
+            ))
+        )
+        XCTAssertEqual(state.sent, .code2, "보낸 동사가 프레임과 같이 움직여야 한다")
+        XCTAssertNil(state.pendingCode, "코드는 한 번 쓰면 소비된다")
+        XCTAssertFalse(state.awaitingUserCode, "맥도 CODE2 하나로 핸드셰이크를 소비한다")
+    }
+
+    /// 합의가 실패하면(저차 점·형식 오류) 멈춘다. 재시도해도 같은 맥이면 같은 결과다.
+    func testAFailedAgreementStops() {
+        var state = BLEClient.V2ClientState()
+        state.sent = .hello2
+        state.pendingCode = "123456"
+        let fake = FakeHandshake()
+        fake.agrees = false
+        XCTAssertEqual(
+            BLEClient.advance(
+                state: &state, decision: .bindCode(epk: "e", nonce: "n"),
+                handshake: fake, storedToken: nil
+            ),
+            .stop
+        )
+    }
+
+    /// `.stop` 은 **프레임을 만들지 않는다.** 이게 재도입 금지 두 번째 버그의
+    /// BLE 절반이다 — 성공할 수 없는 재전송은 다시 거절당하고, 그 `.disconnected`
+    /// 가 QR 스캐너를 깜빡이게 한다.
+    func testStopNeverProducesAFrame() {
+        let decisions: [BLEClient.V2Action] = [
+            .needsPairing,
+            .openSealedToken(sealed: "zz"),   // 봉인이 안 열리는 경우
+            .signSessionProof(epk: "e", nonce: "n"),   // 저장된 토큰이 없는 경우
+            .openSession,                     // 저장된 토큰이 없는 경우
+        ]
+        for decision in decisions {
+            var state = BLEClient.V2ClientState()
+            state.sent = .hello2
+            state.pendingCode = "123456"
+            state.awaitingUserCode = true
+            let fake = FakeHandshake()
+            fake.opensSealed = nil
+            let step = BLEClient.advance(
+                state: &state, decision: decision, handshake: fake, storedToken: nil
+            )
+            XCTAssertEqual(step, .stop, "\(decision)")
+            if case .send = step { XCTFail("멈출 때 프레임을 만들면 안 된다: \(decision)") }
+            XCTAssertNil(state.sent, "\(decision)")
+            XCTAssertNil(state.pendingCode, "만료됐을 코드를 들고 있으면 안 된다: \(decision)")
+            XCTAssertFalse(state.awaitingUserCode, "\(decision)")
+        }
+    }
+
+    func testNonce2SignsWithTheStoredToken() {
+        var state = BLEClient.V2ClientState()
+        state.sent = .auth2
+        let step = BLEClient.advance(
+            state: &state, decision: .signSessionProof(epk: "e", nonce: "n"),
+            handshake: FakeHandshake(), storedToken: "cafe"
+        )
+        XCTAssertEqual(
+            step,
+            .send(BLEClient.V2Send(
+                verb: .proof2,
+                frame: PairingClient.proof2Frame(proof: Data("proof-cafe".utf8))
+            ))
+        )
+        XCTAssertEqual(state.sent, .proof2)
+    }
+
+    /// `Granted2` 는 새 토큰이라 저장해야 하고, `Authorized2` 는 이미 저장된
+    /// 토큰을 쓴다 — 이 둘이 뭉개지면 재연결마다 Keychain 을 덮어쓰게 된다.
+    func testGranted2StoresTheTokenAndAuthorized2DoesNot() {
+        var pairing = BLEClient.V2ClientState()
+        pairing.sent = .code2
+        XCTAssertEqual(
+            BLEClient.advance(
+                state: &pairing, decision: .openSealedToken(sealed: "s"),
+                handshake: FakeHandshake(), storedToken: nil
+            ),
+            .openSession(tokenHex: "aabb", storeToken: true)
+        )
+        XCTAssertNil(pairing.sent, "인가된 뒤에는 기다리는 응답이 없다")
+
+        var reconnect = BLEClient.V2ClientState()
+        reconnect.sent = .proof2
+        XCTAssertEqual(
+            BLEClient.advance(
+                state: &reconnect, decision: .openSession,
+                handshake: FakeHandshake(), storedToken: "cafe"
+            ),
+            .openSession(tokenHex: "cafe", storeToken: false)
+        )
+    }
+
+    /// 코드가 틀렸다. 맥은 `CODE2` 하나로 핸드셰이크를 소비했으므로 다시 넣으려면
+    /// `HELLO2` 부터다 — 그래서 `awaitingUserCode` 를 내려둬야 한다.
+    func testDeniedClearsTheHandshakeSoTheNextTryRestarts() {
+        var state = BLEClient.V2ClientState()
+        state.sent = .code2
+        state.awaitingUserCode = true
+        XCTAssertEqual(
+            BLEClient.advance(
+                state: &state, decision: .failed(left: 2),
+                handshake: FakeHandshake(), storedToken: nil
+            ),
+            .failed(left: 2)
+        )
+        XCTAssertFalse(state.awaitingUserCode)
+        XCTAssertNil(state.pendingCode)
+    }
+
+    /// **`CODE2` 는 `awaitingUserCode` 에서만 나간다.** 그 밖에서는 코드를 들고
+    /// `HELLO2` 부터 다시 시작한다 — 연결 시점에 맥 화면의 창은 보통 아직
+    /// 닫혀 있고, 사용자가 그 뒤에 연다.
+    func testSubmitOutsideAwaitingUserCodeRestartsCarryingTheCode() {
+        var state = BLEClient.V2ClientState()
+        XCTAssertEqual(BLEClient.submit(code: "123456", state: &state, handshake: FakeHandshake()), .restart)
+        XCTAssertEqual(state.pendingCode, "123456", "다시 시작할 때 쓰려면 들고 있어야 한다")
+        XCTAssertEqual(
+            BLEClient.initialSend(hasToken: true, code: state.pendingCode, clientPub: Self.pub32).verb,
+            .hello2,
+            "코드를 들고 있으면 저장된 토큰이 있어도 HELLO2 다"
+        )
+    }
+
+    /// 핸드셰이크가 아예 없어도(연결 직후) 같은 판단이어야 한다.
+    func testSubmitWithNoHandshakeRestarts() {
+        var state = BLEClient.V2ClientState()
+        state.awaitingUserCode = true
+        XCTAssertEqual(BLEClient.submit(code: "123456", state: &state, handshake: nil), .restart)
+        XCTAssertEqual(state.pendingCode, "123456")
+    }
+
+    func testSubmitInAwaitingUserCodeSendsCode2() {
+        var state = BLEClient.V2ClientState()
+        state.sent = .hello2
+        state.awaitingUserCode = true
+        XCTAssertEqual(
+            BLEClient.submit(code: "123456", state: &state, handshake: FakeHandshake()),
+            .send(BLEClient.V2Send(
+                verb: .code2,
+                frame: PairingClient.code2Frame(binding: Data("bind-123456".utf8))
+            ))
+        )
+        XCTAssertEqual(state.sent, .code2)
+        XCTAssertFalse(state.awaitingUserCode)
+    }
+
+    /// 재연결은 사용자가 낸 코드를 **유지한다**(`.stop` 이 버리는 것과 갈린다) —
+    /// 코드를 넣자마자 링크가 한 번 끊겼다고 다시 입력하게 만들면 안 된다.
+    func testResetForNewConnectionKeepsThePendingCodeButDropsTheVerb() {
+        var state = BLEClient.V2ClientState()
+        state.sent = .code2
+        state.awaitingUserCode = true
+        state.pendingCode = "123456"
+        state.resetForNewConnection()
+        XCTAssertNil(state.sent, "임시 키가 바뀌므로 기다리던 응답도 무의미하다")
+        XCTAssertFalse(state.awaitingUserCode)
+        XCTAssertEqual(state.pendingCode, "123456")
+    }
 }
