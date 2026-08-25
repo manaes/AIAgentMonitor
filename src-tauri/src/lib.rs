@@ -262,18 +262,23 @@ async fn begin_pairing(pairing: tauri::State<'_, SharedPairing>) -> Result<(), S
     Ok(())
 }
 
-/// 저장소를 갱신하고, 내려간 세션을 **두 브릿지 모두**에 알린다. 그 central 이
+/// 내려간 세션을 **두 브릿지 모두**에 알리고, 저장소를 갱신한다. 그 central 이
 /// 어느 전송에 붙어 있었는지 앱은 모르고 알 필요도 없다 — 모르는 id 는 무시된다.
+///
+/// **스트림을 먼저 끊고 디스크는 나중에 쓴다.** 순서가 반대면 디스크 I/O 를
+/// 기다리는 동안 250ms 틱이 끼어들 수 있고, 네트워크 전송은 봉인(페어링 잠금
+/// 안)과 쓰기(잠금 밖)가 나뉘어 있어 인가가 살아 있을 때 봉인해 둔 프레임 한
+/// 장이 해제 뒤에 나갈 수 있다. 평문은 아니고 다음 틱에 저절로 낫지만, 디스크를
+/// 먼저 기다릴 이유가 없으므로 그냥 순서를 뒤집는다.
 async fn persist_and_drop(
     pairing: &SharedPairing,
     ble_state: &Arc<BleHandle>,
     network_state: &Arc<NetworkHandle>,
     dropped: Vec<ble::peripheral::CentralId>,
 ) -> Result<(), String> {
-    save_paired_peers(pairing).await?;
     ble_state.bridge.lock().await.drop_sessions(&dropped);
     network_state.bridge.lock().await.drop_sessions(&dropped);
-    Ok(())
+    save_paired_peers(pairing).await
 }
 
 /// 기기 하나만 해제한다(스펙 6장). `peer_id` 는 토큰에서 파생된 8자 hex 이며,
@@ -990,6 +995,18 @@ pub fn run() {
                 let network_for_tick = network_handle.clone();
                 let settings_for_tick = settings_state.clone();
                 let pairing_for_tick = shared_pairing.clone();
+                // **이 루프가 하나의 순차 태스크라는 점이 v2 프레임 순서의 근거다.**
+                // 봉인 카운터는 `prepare_snapshot` 에서 전진하고 실제 쓰기는
+                // `send_prepared` 에서 일어나는데, 둘 사이에 순서를 지키는 장치가
+                // 아무것도 없다 — 잠금도, 시퀀스 검사도 없다. 지금 안전한 이유는
+                // 오직 틱 N 의 `send_prepared` 가 끝나야 틱 N+1 의
+                // `prepare_snapshot` 이 시작되기 때문이다.
+                //
+                // 그래서 "느린 폰이 틱을 붙잡지 않게" 쓰기를 별도 `spawn` 으로
+                // 빼는 최적화는 **그대로 하면 안 된다.** 프레임이 뒤집히면
+                // 수신 측은 `counter <= last` 로 조용히 전부 버린다(재전송으로
+                // 오인). 그렇게 바꾸려면 central 별 순서 보장(전송 큐 하나씩)을
+                // 먼저 만들어야 한다.
                 tauri::async_runtime::spawn(async move {
                     let clock = SystemClock;
                     let mut ticker = tokio::time::interval(Duration::from_millis(250));

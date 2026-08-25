@@ -200,8 +200,13 @@ impl NetworkBridge {
     /// 없이 돈다(`prepare_snapshot` 의 doc).
     ///
     /// 줄을 만든 뒤 여기 오기까지 잠금이 풀려 있으므로 그 사이에 언페어링이
-    /// 끼어들 수 있다. 그때는 `drop_sessions` 가 이미 스트림을 지웠고, 여기서는
-    /// 없는 대상을 조용히 건너뛴다 — 이 조회가 fail-closed 의 두 번째 겹이다.
+    /// 끼어들 수 있다. `get_mut` 이 없는 대상을 건너뛰므로 그 경우 프레임은
+    /// 버려진다 — 다만 이것이 **보장**이 되려면 언페어링이 그 사이에 실제로
+    /// `drop_sessions` 까지 마쳐야 한다. 그래서 `lib.rs::persist_and_drop` 이
+    /// `drop_sessions` 를 `save_paired_peers` **앞에서** 부른다. 순서가 반대면
+    /// 해제는 디스크 쓰기를 기다리는 동안 이 쓰기보다 늦게 도착하기 쉽고, 그때는
+    /// 이 조회가 아무것도 막지 못한다. 여기서 막히는 것은 봉인된 프레임 한
+    /// 장뿐이고 평문 유출은 `snapshot_line` 의 인가 검사가 별도로 막는다.
     pub async fn send_prepared(&mut self, lines: Vec<(CentralId, Vec<u8>)>) {
         let mut dead = Vec::new();
         for (central, line) in lines {
