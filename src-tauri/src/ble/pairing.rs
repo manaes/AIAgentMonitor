@@ -518,13 +518,28 @@ impl PairingManager {
     /// 사라지는 central 이 계속 쌓이면 원격에서 키우는 메모리 누수가
     /// 되므로, 모든 요청 처리 시점마다 훑는다. 핸드셰이크는 `CODE2`/
     /// `end_session`/`revoke_*` 로만 지워지고 자체 TTL 이 없었다(전체
-    /// 브랜치 리뷰 I-5) — 재연결(`AUTH2`)은 페어링 창의 120초 같은 상한이
-    /// 없으므로 논스와 같은 `NONCE_TTL` 을 그대로 쓴다.
-    fn sweep_expired_nonces(&mut self, now: SystemTime) {
+    /// 브랜치 리뷰 I-5).
+    ///
+    /// **두 맵의 TTL 은 다르다.** 논스는 기계 속도다 — `AUTH` → 서명 →
+    /// `PROOF` 가 사람 개입 없이 밀리초 단위로 끝나므로 `NONCE_TTL`(30초)
+    /// 이면 충분하다(스펙, 이 파일 47-50줄: "논스는 연결할 때마다 매번
+    /// 새로 받아 즉시 쓰는 값이라... 여유 시간이 필요 없다"). 반면 이
+    /// 맵에 지금 들어오는 핸드셰이크는 페어링용(v2 `HELLO2`)이라 사람
+    /// 속도다 — `HELLO2` 와 `CODE2` 사이에 사용자가 맥 화면의 6자리를
+    /// 읽어 폰에 옮겨 적는다. 여기에 `NONCE_TTL` 을 썼던 라운드 1 수정은
+    /// 회귀였다(전체 브랜치 리뷰 I-5 재검토) — 코드를 옮겨 적는 데 30초
+    /// 이상 걸리는 사용자는 창은 `Open` 인데 `CODE2` 만 이유 없이
+    /// `Rejected` 로 튕겼다. 그래서 핸드셰이크는 페어링 창과 같은
+    /// `CODE_TTL`(120초)로 스윕한다 — 창보다 오래 살아남는 핸드셰이크는
+    /// 어차피 쓸모가 없고, 맵을 유계로 만든다는 목적에는 30초든 120초든
+    /// 똑같이 충분하다. (`Auth2` 재연결 핸드셰이크가 이 맵에 들어오기
+    /// 시작하면 그때는 이 함수를 central 별로 다시 나눠야 할 수 있다 —
+    /// 아직은 오지 않았다.)
+    fn sweep_expired(&mut self, now: SystemTime) {
         self.nonces
             .retain(|_, n| now.duration_since(n.issued_at).unwrap_or_default() <= NONCE_TTL);
         self.handshakes
-            .retain(|_, h| now.duration_since(h.issued_at).unwrap_or_default() <= NONCE_TTL);
+            .retain(|_, h| now.duration_since(h.issued_at).unwrap_or_default() <= CODE_TTL);
     }
 
     #[cfg(test)]
@@ -533,7 +548,7 @@ impl PairingManager {
     }
 
     pub fn handle(&mut self, id: &CentralId, req: AuthRequest, now: SystemTime) -> AuthReply {
-        self.sweep_expired_nonces(now);
+        self.sweep_expired(now);
         match req {
             AuthRequest::Hello => match self.open_window(now) {
                 Some(_) => AuthReply::AwaitingCode,
@@ -599,7 +614,7 @@ impl PairingManager {
                     // 같은 기준을 적용한다.
                     return AuthReply::Rejected;
                 }
-                // 만료 검사는 없다 — handle() 진입 시 sweep_expired_nonces 가
+                // 만료 검사는 없다 — handle() 진입 시 sweep_expired 가
                 // 이미 이 `now` 기준으로 지난 논스를 전부 제거했으므로,
                 // 여기까지 남아 있다면 반드시 유효하다.
                 let matched = self
@@ -999,6 +1014,45 @@ mod tests {
 
         let replay = m.handle(&id("A"), AuthRequest::Code2(cbind), t(1003));
         assert!(matches!(replay, AuthReply::Rejected), "성공 후 재전송은 거부돼야 한다: {replay:?}");
+    }
+
+    /// 전체 브랜치 리뷰 I-5 재검토 회귀 테스트: 라운드 1 이 핸드셰이크를
+    /// `NONCE_TTL`(30초)로 스윕하게 만들었는데, 이는 회귀였다 — 사용자가
+    /// 맥 화면의 6자리 코드를 폰에 옮겨 적는 데 30초보다 오래 걸리면
+    /// (얼마든지 있을 수 있는 일이다) 창은 아직 `Open`(120초)인데 `CODE2`
+    /// 만 이유 없이 `Rejected` 로 튕겼다. HELLO2 와 CODE2 사이에 100초를
+    /// 두어(30초는 지났지만 120초 페어링 창 안) 이 사용자가 페어링에
+    /// 성공하는지 확인한다.
+    #[test]
+    fn v2_pairing_survives_a_slow_human() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let mut c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Hello2(hex_encode(&c.public)), t(1000));
+        let (epk, _) = epk_and_nonce(&reply);
+        let (_ss, tr) = c.agree(&epk);
+        let cbind = hex_encode(&crypto::code_binding(&code, &tr));
+
+        // 100초 뒤 — NONCE_TTL(30초)은 지났지만 CODE_TTL(120초) 안이다.
+        let reply = m.handle(&id("A"), AuthRequest::Code2(cbind), t(1100));
+        assert!(matches!(reply, AuthReply::Granted2 { .. }), "느린 사용자도 페어링돼야 한다: {reply:?}");
+    }
+
+    /// 핸드셰이크 스윕이 조용히 꺼져 있지 않은지 확인하는 짝 테스트 —
+    /// 페어링 창(120초)보다 오래 묵은 핸드셰이크는 여전히 청소돼야 한다.
+    #[test]
+    fn v2_handshake_expires_with_the_pairing_window() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let mut c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Hello2(hex_encode(&c.public)), t(1000));
+        let (epk, _) = epk_and_nonce(&reply);
+        let (_ss, tr) = c.agree(&epk);
+        let cbind = hex_encode(&crypto::code_binding(&code, &tr));
+
+        // 200초 뒤 — CODE_TTL(120초)도 지났다.
+        let reply = m.handle(&id("A"), AuthRequest::Code2(cbind), t(1200));
+        assert!(matches!(reply, AuthReply::Rejected), "120초를 넘긴 핸드셰이크는 거부돼야 한다: {reply:?}");
     }
 
     /// v2 로 페어링한 뒤 만든 `V2Client` 헬퍼. 전체 브랜치 리뷰 I-4 테스트들이
