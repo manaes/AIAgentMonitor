@@ -1307,6 +1307,40 @@ mod tests {
         );
     }
 
+    /// `v2_proof2_replay_after_success_is_rejected` 의 반대쪽 절반 — 성공
+    /// 뒤가 아니라 **실패 뒤** 재시도를 막는지 확인한다. 논스는 성공·실패와
+    /// 무관하게 1회용이므로, 첫 `PROOF2`가 틀린 값이었어도 같은 논스로
+    /// 두 번째에 올바른 proof 를 보내면 거부돼야 한다 — "실패하면 그 논스는
+    /// 아직 안 썼으니 남겨 둔다"는 식의 리팩터링(소비를 성공 경로로만
+    /// 옮기는 것)이 들어오면 이 테스트가 잡아낸다. 재시도하려면 새
+    /// `AUTH2` 부터 다시 해야 한다.
+    #[test]
+    fn v2_correct_proof_after_a_failed_one_is_rejected() {
+        let mut m = PairingManager::new();
+        let token = "aa".repeat(16);
+        m.load_peers(vec![(token.clone(), 900)]);
+        let mut c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Auth2(hex_encode(&c.public)), t(1001));
+        let AuthReply::Nonce2 { epk, nonce } = reply else {
+            panic!("Nonce2 를 기대했다: {reply:?}")
+        };
+        let (_ss, tr) = c.agree(&epk);
+        let token_bytes = PairingManager::hex_decode(&token).unwrap();
+        let nonce_bytes = PairingManager::hex_decode(&nonce).unwrap();
+        let correct_proof = hex_encode(&crypto::session_proof(&token_bytes, &nonce_bytes, &tr));
+
+        let bogus = m.handle(&id("A"), AuthRequest::Proof2("00".repeat(32)), t(1002));
+        assert!(matches!(bogus, AuthReply::Rejected), "{bogus:?}");
+
+        // 같은 논스에 대한 진짜 proof 를 뒤늦게 보내도 거부돼야 한다 —
+        // 실패한 시도가 논스를 살려 두면 안 된다.
+        let second = m.handle(&id("A"), AuthRequest::Proof2(correct_proof), t(1003));
+        assert!(
+            matches!(second, AuthReply::Rejected),
+            "실패한 PROOF2 뒤에 같은 논스로 온 올바른 proof 도 거부돼야 한다: {second:?}"
+        );
+    }
+
     /// v1 과 같다 — proof 실패는 코드 추측이 아니므로 예산을 소모하지 않는다.
     #[test]
     fn v2_bad_proof_does_not_spend_an_attempt() {
