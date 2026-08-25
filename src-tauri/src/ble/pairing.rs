@@ -202,9 +202,27 @@ struct PendingHandshake {
     /// 이 핸드셰이크에 쓰인 논스(hex). 세션 키 파생의 salt 다.
     nonce: String,
     /// 발급 시각. `PendingNonce` 와 같은 이유로 스윕 대상이다(전체 브랜치
-    /// 리뷰 I-5) — `HELLO2` 만 보내고 사라지는 central 이 쌓이면 원격에서
-    /// 키우는 메모리 누수가 된다.
+    /// 리뷰 I-5) — `HELLO2`/`AUTH2` 만 보내고 사라지는 central 이 쌓이면
+    /// 원격에서 키우는 메모리 누수가 된다.
     issued_at: SystemTime,
+    /// 이 핸드셰이크가 살아 있어도 되는 기간. **핸드셰이크를 만든 동사에
+    /// 따라 다르다** — `nonces` 하나에 `NONCE_TTL` 하나만 쓰면 되는 것과
+    /// 다른 이유는, `handshakes` 맵에는 성격이 다른 두 흐름이 섞여
+    /// 들어오기 때문이다(이 파일 47-50줄, `NONCE_TTL` 자체의 존재 이유와
+    /// 같은 논리를 여기서는 맵 하나 안에서 둘로 나눠 적용한다):
+    /// - `HELLO2`(페어링)는 사람 속도다 — 사용자가 맥 화면의 6자리를 읽어
+    ///   폰에 옮겨 적는 동안 살아 있어야 하므로 `CODE_TTL`(120초).
+    /// - `AUTH2`(재연결)는 기계 속도다 — `AUTH2` → 서명 → `PROOF2` 가
+    ///   사람 개입 없이 밀리초 단위로 끝나므로 `NONCE_TTL`(30초)로 충분하고,
+    ///   짧을수록 탈취된 공유 비밀 `ss` 가 메모리에 머무는 시간도 줄어든다.
+    ///
+    /// 두 흐름이 같은 `CentralId` 를 키로 쓰는 한 맵을 공유하므로, 상수
+    /// 하나로 스윕하면 한쪽에 맞는 값이 다른 쪽에는 항상 틀리다 — 120초로
+    /// 고정하면 재연결 핸드셰이크가 불필요하게 오래 살고, 30초로 고정하면
+    /// (라운드 1 회귀, 전체 브랜치 리뷰 I-5 재검토) 코드를 옮겨 적는 사용자의
+    /// `HELLO2` 핸드셰이크가 창이 열려 있는데도 먼저 죽는다. 그래서 TTL 을
+    /// 핸드셰이크마다 들고 다닌다.
+    ttl: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -525,40 +543,33 @@ impl PairingManager {
         }
     }
 
-    /// 만료된 논스·v2 핸드셰이크를 청소한다. `AUTH`/`HELLO2` 만 보내고
-    /// 사라지는 central 이 계속 쌓이면 원격에서 키우는 메모리 누수가
-    /// 되므로, 모든 요청 처리 시점마다 훑는다. 핸드셰이크는 `CODE2`/
-    /// `end_session`/`revoke_*` 로만 지워지고 자체 TTL 이 없었다(전체
-    /// 브랜치 리뷰 I-5).
+    /// 만료된 논스·v2 핸드셰이크를 청소한다. `AUTH`/`HELLO2`/`AUTH2` 만
+    /// 보내고 사라지는 central 이 계속 쌓이면 원격에서 키우는 메모리
+    /// 누수가 되므로, 모든 요청 처리 시점마다 훑는다. 핸드셰이크는
+    /// `CODE2`/`PROOF2`/`end_session`/`revoke_*` 로만 지워지고 자체 TTL 이
+    /// 없었다(전체 브랜치 리뷰 I-5).
     ///
-    /// **두 맵의 TTL 은 다르다.** 논스는 기계 속도다 — `AUTH` → 서명 →
-    /// `PROOF` 가 사람 개입 없이 밀리초 단위로 끝나므로 `NONCE_TTL`(30초)
-    /// 이면 충분하다(스펙, 이 파일 47-50줄: "논스는 연결할 때마다 매번
-    /// 새로 받아 즉시 쓰는 값이라... 여유 시간이 필요 없다"). 반면 이
-    /// 맵에 지금 들어오는 핸드셰이크는 페어링용(v2 `HELLO2`)이라 사람
-    /// 속도다 — `HELLO2` 와 `CODE2` 사이에 사용자가 맥 화면의 6자리를
-    /// 읽어 폰에 옮겨 적는다. 여기에 `NONCE_TTL` 을 썼던 라운드 1 수정은
-    /// 회귀였다(전체 브랜치 리뷰 I-5 재검토) — 코드를 옮겨 적는 데 30초
+    /// **`nonces` 는 TTL 이 하나(`NONCE_TTL`)지만, `handshakes` 는 항목마다
+    /// 다르다(`PendingHandshake::ttl`).** 논스는 항상 기계 속도라 — `AUTH`
+    /// → 서명 → `PROOF` 가 사람 개입 없이 밀리초 단위로 끝나므로
+    /// `NONCE_TTL`(30초)이면 충분하다(이 파일 47-50줄: "논스는 연결할
+    /// 때마다 매번 새로 받아 즉시 쓰는 값이라... 여유 시간이 필요
+    /// 없다"). 반면 `handshakes` 맵에는 성격이 다른 두 흐름이 섞여
+    /// 들어온다 — `HELLO2`(페어링, 사람 속도: 사용자가 맥 화면의 6자리를
+    /// 폰에 옮겨 적는다)와 `AUTH2`(재연결, 기계 속도: 논스와 마찬가지로
+    /// 밀리초 단위). 라운드 1 이 이 맵 전체를 `NONCE_TTL` 로 스윕한 것도
+    /// 회귀였고(전체 브랜치 리뷰 I-5 재검토 — 코드를 옮겨 적는 데 30초
     /// 이상 걸리는 사용자는 창은 `Open` 인데 `CODE2` 만 이유 없이
-    /// `Rejected` 로 튕겼다. 그래서 핸드셰이크는 페어링 창과 같은
-    /// `CODE_TTL`(120초)로 스윕한다 — 창보다 오래 살아남는 핸드셰이크는
-    /// 어차피 쓸모가 없고, 맵을 유계로 만든다는 목적에는 30초든 120초든
-    /// 똑같이 충분하다.
-    ///
-    /// **Task 7 이후: `Auth2`(재연결) 핸드셰이크도 이 같은 맵·같은
-    /// `CODE_TTL` 을 쓴다.** `Auth2` 는 기계 속도라 사람 속도용 120초가
-    /// 필요하지는 않지만, `Auth2` 는 `nonces` 에도 항목을 남기고 그
-    /// `NONCE_TTL`(30초)이 항상 먼저 지나 `Proof2` 를 막아 주므로, 이 맵의
-    /// 120초는 그저 "언젠가는 지운다"는 유계 보장 이상의 역할을 하지
-    /// 않는다 — 페어링용 핸드셰이크처럼 정확한 타이밍이 필요한 자리가
-    /// 아니다. 그래서 지금은 central 별로 다시 나누지 않았다. `Auth2` 가
-    /// 사람 속도 정책이 필요해지면(예: 재연결에도 유예 시간을 주고
-    /// 싶어지면) 그때 나눈다.
+    /// `Rejected` 로 튕겼다), Task 7 이 이어서 이 맵 전체를 `CODE_TTL` 로
+    /// 고정한 것도 같은 종류의 실수였다 — 상수 하나로는 두 흐름 중 어느
+    /// 쪽에도 정확히 맞지 않는다(재연결 핸드셰이크가 불필요하게 120초씩
+    /// 살아 있게 된다). 그래서 TTL 을 핸드셰이크 자신에게 들려 보낸다 —
+    /// `Hello2` 는 `CODE_TTL`, `Auth2` 는 `NONCE_TTL` 로 넣는다.
     fn sweep_expired(&mut self, now: SystemTime) {
         self.nonces
             .retain(|_, n| now.duration_since(n.issued_at).unwrap_or_default() <= NONCE_TTL);
         self.handshakes
-            .retain(|_, h| now.duration_since(h.issued_at).unwrap_or_default() <= CODE_TTL);
+            .retain(|_, h| now.duration_since(h.issued_at).unwrap_or_default() <= h.ttl);
     }
 
     #[cfg(test)]
@@ -680,6 +691,9 @@ impl PairingManager {
                         transcript: crypto::transcript(&cpk, &spk),
                         nonce: nonce.clone(),
                         issued_at: now,
+                        // 사람 속도(스펙 5.1) — `HELLO2` 와 `CODE2` 사이에
+                        // 사용자가 맥 화면의 6자리를 폰에 옮겨 적는다.
+                        ttl: CODE_TTL,
                     },
                 );
                 AuthReply::AwaitingCode2 { epk: hex_encode_bytes(&spk), nonce }
@@ -738,14 +752,14 @@ impl PairingManager {
                     id.0.clone(),
                     PendingNonce { nonce: nonce.clone(), issued_at: now },
                 );
-                // 핸드셰이크(공유 비밀·transcript)는 `handshakes` 맵에 같이
-                // 둔다 — `HELLO2` 가 쓰는 맵과 같지만, 여기 들어오는 항목은
-                // 재연결용이라 열린 페어링 창이 전혀 필요 없다. 이 맵은
-                // `CODE_TTL`(120초)로 스윕되므로(사람 속도 페어링에 맞춘
-                // 값), `Auth2` 는 사실상 더 짧은 `NONCE_TTL` 이 실질적인
-                // 상한이 된다 — `nonces` 항목이 먼저 사라져 `Proof2` 를
-                // 막기 때문이다. 그래도 핸드셰이크 자체도 언젠가는 지워야
-                // 유계 메모리가 유지되므로 같은 스윕을 그대로 태운다.
+                // 핸드셰이크(공유 비밀·transcript)는 `HELLO2` 와 같은
+                // `handshakes` 맵에 둔다 — 여기 들어오는 항목은 재연결용이라
+                // 열린 페어링 창이 전혀 필요 없다는 점만 다르다. TTL 은
+                // `PendingHandshake::ttl` 의 doc comment 가 설명하듯 흐름마다
+                // 다르다 — `Auth2` 는 기계 속도(`AUTH2`→서명→`PROOF2` 가
+                // 밀리초 단위)이므로 `NONCE_TTL`(30초)을 쓴다. 이 값은
+                // `nonces` 항목의 TTL 과 정확히 같다 — 어차피 `Proof2` 가
+                // 둘 다 있어야 통과하므로, 둘을 다르게 둘 이유가 없다.
                 self.handshakes.insert(
                     id.0.clone(),
                     PendingHandshake {
@@ -753,6 +767,7 @@ impl PairingManager {
                         transcript: crypto::transcript(&cpk, &spk),
                         nonce: nonce.clone(),
                         issued_at: now,
+                        ttl: NONCE_TTL,
                     },
                 );
                 AuthReply::Nonce2 { epk: hex_encode_bytes(&spk), nonce }
@@ -1362,40 +1377,57 @@ mod tests {
         assert!(m.channel_mut(&id("A")).is_none(), "세션이 끝나면 채널도 없어야 한다");
     }
 
-    /// Task 7 회귀 테스트: `Auth2` 가 만든 핸드셰이크가 `sweep_expired` 로
-    /// 실제로 청소되는지 확인한다.
+    /// 수정 라운드 1 회귀 테스트: `handshakes` 맵에 섞여 들어오는 두 흐름
+    /// (`HELLO2` 페어링·`AUTH2` 재연결)이 **서로 다른 TTL** 로 스윕되는지
+    /// 확인한다.
     ///
-    /// `PROOF2` 응답만으로는 이걸 증명할 수 없다 — `Auth2` 는 `nonces` 에도
-    /// 항목을 남기고, 그 TTL(`NONCE_TTL`, 30초)이 핸드셰이크 TTL(120초)보다
-    /// 항상 먼저 지나서 `Proof2` 를 `Rejected` 로 만들어 버린다. 핸드셰이크
-    /// 스윕을 통째로 지워도 `nonces` 스윕이 대신 거부해 주므로, 그 경로로는
-    /// 이 테스트가 가짜로 통과한다(Task 6 재검토에서 지적된 것과 같은 함정).
-    /// 그래서 `handshakes` 맵의 크기를 직접 들여다봐서, 핸드셰이크 스윕
-    /// 자체가 동작하는지를 논스 스윕과 분리해 검증한다.
+    /// `Auth2` 핸드셰이크의 `PROOF2` 응답만 보면 안 되는 이유는 여전하다
+    /// — `Auth2` 는 `nonces` 에도 항목을 남기고, 그 TTL(`NONCE_TTL`, 30초)이
+    /// 지금은 핸드셰이크 TTL 과 **똑같아서**(둘 다 `NONCE_TTL`), `Proof2`
+    /// 가 `Rejected` 를 내는 것만으로는 핸드셰이크 스윕이 실제로 돌았는지
+    /// 논스 스윕과 구분할 수 없다. 그래서 `handshake_count()` 로 맵 크기를
+    /// 직접 들여다본다. 동시에 **재연결에는 열린 페어링 창이 필요 없다**
+    /// 는 성질을 이용해, 같은 시각에 `HELLO2`(사람 속도, `CODE_TTL`)로
+    /// 만든 핸드셰이크는 40초 뒤에도 살아 있어야 한다는 대조 assertion을
+    /// 같이 둔다 — 이게 있어야 "핸드셰이크가 다 같이 지워지는지"가 아니라
+    /// "종류별로 다른 TTL 이 실제로 적용되는지"를 증명한다.
     #[test]
-    fn v2_auth2_handshake_is_swept_independently_of_the_nonce() {
+    fn v2_handshake_ttl_differs_by_kind() {
         let mut m = PairingManager::new();
-        // 페어링 창을 아예 열지 않는다 — 재연결에는 열린 창이 필요 없다.
-        let c = V2Client::new();
-        m.handle(&id("A"), AuthRequest::Auth2(hex_encode(&c.public)), t(1000));
-        assert_eq!(m.handshake_count(), 1);
+        let code = m.begin_pairing(t(1000));
 
-        // 50초 뒤 — 논스 TTL(30초)은 지났지만 핸드셰이크 TTL(120초)은 아직이다.
-        // 다른 central 의 요청으로 sweep_expired 를 한 번 더 돌려도, 이
-        // 핸드셰이크는 아직 살아 있어야 한다(너무 이르게 청소되면 안 된다).
-        m.handle(&id("B"), AuthRequest::Hello, t(1050));
+        // central A: HELLO2(페어링) 핸드셰이크 — 사람 속도, CODE_TTL(120초).
+        let mut ca = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Hello2(hex_encode(&ca.public)), t(1000));
+        let (epk_a, _nonce_a) = epk_and_nonce(&reply);
+        let (_ss_a, tr_a) = ca.agree(&epk_a);
+
+        // central B: AUTH2(재연결) 핸드셰이크 — 기계 속도, NONCE_TTL(30초).
+        let cb = V2Client::new();
+        m.handle(&id("B"), AuthRequest::Auth2(hex_encode(&cb.public)), t(1000));
+
+        assert_eq!(m.handshake_count(), 2, "두 핸드셰이크 모두 등록돼 있어야 한다");
+
+        // 40초 뒤: NONCE_TTL(30초)은 지났지만 CODE_TTL(120초)은 아직이다.
+        let reply = m.handle(&id("B"), AuthRequest::Proof2("00".repeat(32)), t(1040));
+        assert!(
+            matches!(reply, AuthReply::Rejected),
+            "AUTH2 핸드셰이크는 이미 만료돼 있어야 한다: {reply:?}"
+        );
         assert_eq!(
             m.handshake_count(),
             1,
-            "핸드셰이크 TTL(120초) 안에는 아직 청소되면 안 된다"
+            "만료된 AUTH2(central B) 핸드셰이크만 스윕돼야 한다 — HELLO2(central A) 는 남아야 한다"
         );
 
-        // 130초 뒤 — 핸드셰이크 TTL(120초)도 지났다.
-        m.handle(&id("B"), AuthRequest::Hello, t(1130));
-        assert_eq!(
-            m.handshake_count(),
-            0,
-            "TTL 을 넘긴 Auth2 핸드셰이크는 스윕으로 지워져야 한다"
+        // 대조군: 같은 시각(t=1000)에 만든 HELLO2(central A) 핸드셰이크는
+        // 40초 뒤에도 아직 살아 있어야 한다 — CODE2 를 실제로 완주해서
+        // 증명한다(핸드셰이크가 없으면 CODE2 는 Rejected 다).
+        let cbind = hex_encode(&crypto::code_binding(&code, &tr_a));
+        let reply = m.handle(&id("A"), AuthRequest::Code2(cbind), t(1040));
+        assert!(
+            matches!(reply, AuthReply::Granted2 { .. }),
+            "HELLO2 핸드셰이크는 CODE_TTL(120초) 안이라 아직 살아 있어야 한다: {reply:?}"
         );
     }
 
