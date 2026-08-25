@@ -57,6 +57,14 @@ pub enum AuthRequest {
     Auth,
     /// `AUTH` 로 받은 논스에 대한 HMAC-SHA256 서명(hex).
     Proof(String),
+    /// v2 페어링 시작. 클라이언트 임시 공개키(64 hex).
+    Hello2(String),
+    /// v2 코드 제출. `HMAC(6자리코드, transcript)` 의 hex — **코드 자체가 아니다.**
+    Code2(String),
+    /// v2 재연결 시작. 클라이언트 임시 공개키(64 hex).
+    Auth2(String),
+    /// v2 재연결 증명. `HMAC(token, nonce || transcript)` 의 hex.
+    Proof2(String),
     Malformed,
 }
 
@@ -116,6 +124,20 @@ pub fn parse_auth_request(bytes: &[u8]) -> AuthRequest {
         return AuthRequest::Malformed;
     };
     let s = s.trim();
+    // v2 를 먼저 본다. `HELLO` 를 먼저 검사하면 `HELLO2:...` 가 걸리지 않지만,
+    // 순서를 명시해 두는 편이 나중에 동사가 늘 때 안전하다.
+    if let Some(rest) = s.strip_prefix("HELLO2:") {
+        return AuthRequest::Hello2(rest.to_string());
+    }
+    if let Some(rest) = s.strip_prefix("CODE2:") {
+        return AuthRequest::Code2(rest.to_string());
+    }
+    if let Some(rest) = s.strip_prefix("AUTH2:") {
+        return AuthRequest::Auth2(rest.to_string());
+    }
+    if let Some(rest) = s.strip_prefix("PROOF2:") {
+        return AuthRequest::Proof2(rest.to_string());
+    }
     if s == "HELLO" {
         return AuthRequest::Hello;
     }
@@ -498,6 +520,11 @@ impl PairingManager {
                     AuthReply::Rejected
                 }
             }
+            // v2 동사는 아직 파싱만 한다 — 실제 동작은 Task 6·7 에서 채운다.
+            AuthRequest::Hello2(_)
+            | AuthRequest::Code2(_)
+            | AuthRequest::Auth2(_)
+            | AuthRequest::Proof2(_) => AuthReply::Rejected,
             AuthRequest::Malformed => AuthReply::Rejected,
         }
     }
@@ -629,6 +656,43 @@ mod tests {
         assert!(matches!(parse_auth_request(b"NONSENSE"), AuthRequest::Malformed));
         assert!(matches!(parse_auth_request(&[0xff, 0xfe]), AuthRequest::Malformed),
                 "UTF-8 이 아니면 Malformed");
+    }
+
+    #[test]
+    fn parses_v2_request_forms() {
+        assert!(matches!(
+            parse_auth_request(b"HELLO2:aabb"),
+            AuthRequest::Hello2(p) if p == "aabb"
+        ));
+        assert!(matches!(
+            parse_auth_request(b"CODE2:ccdd"),
+            AuthRequest::Code2(p) if p == "ccdd"
+        ));
+        assert!(matches!(
+            parse_auth_request(b"AUTH2:eeff"),
+            AuthRequest::Auth2(p) if p == "eeff"
+        ));
+        assert!(matches!(
+            parse_auth_request(b"PROOF2:0011"),
+            AuthRequest::Proof2(p) if p == "0011"
+        ));
+    }
+
+    /// v1 동사가 그대로 남아야 한다 — 이미 페어링된 아이폰이 전환 기간에
+    /// 끊기지 않는 근거다(스펙 8장).
+    #[test]
+    fn v1_verbs_still_parse_alongside_v2() {
+        assert!(matches!(parse_auth_request(b"HELLO"), AuthRequest::Hello));
+        assert!(matches!(parse_auth_request(b"AUTH"), AuthRequest::Auth));
+        assert!(matches!(parse_auth_request(b"CODE:123456"), AuthRequest::Code(c) if c == "123456"));
+    }
+
+    /// `HELLO2` 는 접두사 뒤에 공개키가 반드시 와야 한다. 콜론 없는 `HELLO2`
+    /// 가 `HELLO` 로 오인되면 v2 클라이언트가 조용히 v1 경로로 떨어진다.
+    #[test]
+    fn hello2_without_payload_is_malformed() {
+        assert!(matches!(parse_auth_request(b"HELLO2"), AuthRequest::Malformed));
+        assert!(matches!(parse_auth_request(b"AUTH2"), AuthRequest::Malformed));
     }
 
     #[test]
