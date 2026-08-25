@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import BLETransport
 
@@ -92,5 +93,134 @@ final class PairingClientTests: XCTestCase {
         let frame = try XCTUnwrap(PairingClient.proofFrame(token: golden.token, nonce: golden.nonce))
         let text = try XCTUnwrap(String(data: frame, encoding: .utf8))
         XCTAssertEqual(text, "PROOF:\(golden.proof)")
+    }
+
+    // MARK: - v2
+
+    /// Rust `parse_auth_request` 가 `strip_prefix` 로 읽는 네 동사. 접두사 하나만
+    /// 어긋나도 맥은 `Malformed` → `Rejected` 로 답하고, 클라이언트는 이유 없이
+    /// `needsPairing` 에 앉는다.
+    func testV2FrameEncodingMatchesRustParser() {
+        let pub32 = Data(repeating: 0xAB, count: 32)
+        let hex = String(repeating: "ab", count: 32)
+        XCTAssertEqual(
+            String(data: PairingClient.hello2Frame(clientPub: pub32), encoding: .utf8),
+            "HELLO2:\(hex)"
+        )
+        XCTAssertEqual(
+            String(data: PairingClient.auth2Frame(clientPub: pub32), encoding: .utf8),
+            "AUTH2:\(hex)"
+        )
+        XCTAssertEqual(
+            String(data: PairingClient.code2Frame(binding: Data([0x01, 0x02])), encoding: .utf8),
+            "CODE2:0102"
+        )
+        XCTAssertEqual(
+            String(data: PairingClient.proof2Frame(proof: Data([0xde, 0xad])), encoding: .utf8),
+            "PROOF2:dead"
+        )
+    }
+
+    /// `AwaitingCode2`/`Nonce2`/`Granted2` 의 v2 전용 필드가 실제로 뽑혀야 한다.
+    /// 하나라도 nil 로 떨어지면 화면은 아무 로그 없이 비어 있게 된다.
+    func testParsesV2Replies() {
+        let awaiting = PairingClient.parse(
+            Data(#"{"ok":false,"v":2,"await":"code","epk":"aa","nonce":"bb"}"#.utf8)
+        )
+        XCTAssertEqual(awaiting?.v, 2)
+        XCTAssertEqual(awaiting?.epk, "aa")
+        XCTAssertEqual(awaiting?.nonce, "bb")
+        XCTAssertEqual(awaiting?.awaiting, "code")
+
+        let nonce2 = PairingClient.parse(Data(#"{"ok":false,"v":2,"epk":"aa","nonce":"bb"}"#.utf8))
+        XCTAssertEqual(nonce2?.v, 2)
+        XCTAssertNil(nonce2?.awaiting, "Nonce2 는 `await` 이 없다 — 이 차이가 전부다")
+
+        let granted2 = PairingClient.parse(Data(#"{"ok":true,"v":2,"sealed":"cc"}"#.utf8))
+        XCTAssertEqual(granted2?.ok, true)
+        XCTAssertEqual(granted2?.sealed, "cc")
+
+        XCTAssertEqual(PairingClient.parse(Data(#"{"ok":true,"v":2}"#.utf8))?.v, 2)
+    }
+
+    /// v1 응답에는 `v` 가 없다. 이 값이 0 이나 1 로 튀면 다운그레이드 판정이 무너진다.
+    func testV1RepliesCarryNoVersionMarker() {
+        XCTAssertNil(PairingClient.parse(Data(#"{"ok":true}"#.utf8))?.v)
+        XCTAssertNil(PairingClient.parse(Data(#"{"ok":false,"left":3}"#.utf8))?.v)
+    }
+
+    /// 저차 점(전부 0인 공개키)은 공유 비밀을 상수로 만든다. Rust 는
+    /// `was_contributory()` 로 `None` 을 돌려주는데, 클라이언트가 이걸 받아주면
+    /// 양쪽이 "공격자가 아는 상수"에 합의한 꼴이 된다.
+    func testLowOrderServerKeyIsRejected() {
+        let hs = V2Handshake()
+        XCTAssertFalse(
+            hs.agree(epkHex: String(repeating: "00", count: 32), nonceHex: "00112233"),
+            "저차 점으로 만든 공유 비밀에는 합의하지 않는다"
+        )
+        XCTAssertNil(hs.codeBinding(code: "123456"), "합의 실패 뒤에는 아무 값도 나오면 안 된다")
+    }
+
+    /// 형식이 어긋난 `epk`(길이·문자)로는 합의하지 않는다 — 여기서 통과시키면
+    /// 이후 파생 키가 조용히 엉뚱한 값이 된다.
+    func testMalformedServerKeyIsRejected() {
+        XCTAssertFalse(V2Handshake().agree(epkHex: "zz", nonceHex: "00"))
+        XCTAssertFalse(
+            V2Handshake().agree(epkHex: String(repeating: "aa", count: 31), nonceHex: "00"),
+            "32바이트가 아니면 X25519 공개키가 아니다"
+        )
+    }
+
+    /// 맥이 `Granted2` 에서 하는 일을 그대로 흉내 내, 클라이언트가 토큰을 꺼내고
+    /// **방향이 뒤집힌** 세션 채널을 만드는지 본다. 이 뒤집기(`c2s` 가 송신,
+    /// `s2c` 가 수신)를 틀리면 연결은 되는데 스냅샷이 한 장도 안 열린다.
+    func testPairingRoundTripYieldsTokenAndAWorkingSessionChannel() throws {
+        let hs = V2Handshake()
+        // 맥 역할: 임시 키를 만들고 클라이언트 공개키와 합의한다.
+        let serverPriv = Curve25519.KeyAgreement.PrivateKey()
+        let serverPub = serverPriv.publicKey.rawRepresentation
+        let clientPubKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: hs.clientPub)
+        let ss = try serverPriv.sharedSecretFromKeyAgreement(with: clientPubKey)
+            .withUnsafeBytes { Data($0) }
+        let nonce = Data(repeating: 0x5A, count: 16)
+        let token = String(repeating: "7f", count: 16)
+
+        // 맥은 토큰 한 건을 k_pair 로 봉인한다(양방향 같은 키).
+        let kPair = CryptoV2.derivePairKey(sharedSecret: ss, nonce: nonce)
+        let sealedHex = try SealedChannel(sendKey: kPair, recvKey: kPair)
+            .seal(Data(#"{"token":"\#(token)"}"#.utf8)).hexString
+
+        XCTAssertTrue(hs.agree(epkHex: serverPub.hexString, nonceHex: nonce.hexString))
+        XCTAssertEqual(hs.openSealedToken(sealedHex: sealedHex), token)
+
+        // 맥은 (s2c, c2s) 로 채널을 만든다. 클라이언트 채널이 그 반대여야 열린다.
+        let keys = CryptoV2.deriveSessionKeys(
+            sharedSecret: ss, token: try XCTUnwrap(Data(hexString: token)), nonce: nonce
+        )
+        let mac = SealedChannel(sendKey: keys.s2c, recvKey: keys.c2s)
+        let client = try XCTUnwrap(hs.sessionChannel(tokenHex: token))
+        let snapshot = Data(#"{"v":1}"#.utf8)
+        XCTAssertEqual(try client.open(mac.seal(snapshot)), snapshot)
+    }
+
+    /// 재연결 증명. 맥은 저장된 토큰 후보들에 대해 같은 계산을 돌려 대조하므로,
+    /// transcript 가 한 바이트라도 다르면(=능동적 MITM) 통과하지 못한다.
+    func testSessionProofMatchesWhatTheMacRecomputes() throws {
+        let hs = V2Handshake()
+        let serverPriv = Curve25519.KeyAgreement.PrivateKey()
+        let serverPub = serverPriv.publicKey.rawRepresentation
+        // 증명은 토큰·논스·transcript 만으로 계산된다 — 공유 비밀은 쓰이지 않는다.
+        let nonce = Data(repeating: 0x11, count: 16)
+        let token = String(repeating: "3c", count: 16)
+
+        XCTAssertTrue(hs.agree(epkHex: serverPub.hexString, nonceHex: nonce.hexString))
+
+        // 맥이 계산하는 값 — transcript 는 **클라이언트 키가 먼저**다.
+        let expected = CryptoV2.sessionProof(
+            token: try XCTUnwrap(Data(hexString: token)),
+            nonce: nonce,
+            transcript: CryptoV2.transcript(clientPub: hs.clientPub, serverPub: serverPub)
+        )
+        XCTAssertEqual(hs.sessionProof(tokenHex: token), expected)
     }
 }

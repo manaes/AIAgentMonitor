@@ -131,9 +131,9 @@ public final class NetworkClient: NSObject {
             endpoint = ep
 
             let conn = try await ep.connect(addr: addr, alpn: Self.alpn)
-            try await authenticate(conn: conn, code: code)
+            let channel = try await authenticate(conn: conn, code: code)
             guard wantsRunning else { return }
-            try await listenForSnapshots(conn: conn)
+            try await listenForSnapshots(conn: conn, channel: channel)
         } catch NetworkClientError.needsPairing, NetworkClientError.authFailed {
             // 사용자가 QR 을 다시 스캔해야 풀리는 상태다. 이미 needsPairing/
             // pairingFailed 를 보냈으니 그 화면을 그대로 두고 멈춘다.
@@ -172,42 +172,83 @@ public final class NetworkClient: NSObject {
         return hasToken ? PairingClient.authFrame() : PairingClient.helloFrame()
     }
 
-    /// `BLEClient.decide(_:)` 와 동일한 결정을 그대로 쓴다 — 전송만 다를 뿐 상태
-    /// 기계는 하나다. QR 로 코드를 이미 받았으므로 `AwaitingCode` 에서 사용자
-    /// 입력을 기다리지 않고 즉시 제출한다(재연결 경로에서는 `code`가 nil이라
-    /// `needsPairing` 으로 빠진다 — 저장된 토큰이 거부됐다는 뜻이므로 QR 재스캔이
-    /// 맞다).
-    private func authenticate(conn: Connection, code: String?) async throws {
+    /// v2 의 첫 프레임. `initialFrame` 과 **같은 규칙이다 — 코드가 있으면 코드
+    /// 우선.** 다만 v1 처럼 `CODE:` 를 바로 낼 수는 없다: `CODE2` 의 바인딩은
+    /// `HELLO2` 가 만든 transcript 위에서만 계산되고, 맥도 핸드셰이크가 없으면
+    /// 즉시 거절한다(`pairing.rs: Code2`). 그래서 "코드 우선" 은 v2 에서
+    /// "`AUTH2` 가 아니라 `HELLO2` 로 시작한다" 는 뜻이 된다.
+    nonisolated static func initialFrameV2(hasToken: Bool, code: String?, clientPub: Data) -> Data {
+        if code != nil || !hasToken {
+            return PairingClient.hello2Frame(clientPub: clientPub)
+        }
+        return PairingClient.auth2Frame(clientPub: clientPub)
+    }
+
+    /// `BLEClient.decideV2` 와 동일한 결정을 그대로 쓴다 — 전송만 다를 뿐 상태
+    /// 기계는 하나다. QR 로 코드를 이미 받았으므로 `AwaitingCode2` 에서 사용자
+    /// 입력을 기다리지 않고 즉시 바인딩을 낸다(재연결 경로에서는 `code` 가 nil
+    /// 이라 `needsPairing` 으로 빠진다 — 저장된 토큰이 거부됐다는 뜻이므로 QR
+    /// 재스캔이 맞다).
+    ///
+    /// 인가되면 이 연결의 봉인 채널을 돌려준다. 이 값 없이는 스냅샷을 한 장도
+    /// 읽을 수 없다.
+    private func authenticate(conn: Connection, code: String?) async throws -> SealedChannel {
         let hasToken = NetworkTokenStore.loadToken() != nil
-        var reply = try await sendControl(conn, Self.initialFrame(hasToken: hasToken, code: code))
+        let handshake = V2Handshake()
+        // 응답을 보낸 동사로 가른다 — `AwaitingCode2` 와 `Nonce2` 는 필드
+        // 구성이 같아서 필드로는 갈리지 않는다(`BLEClient.V2Verb`).
+        var sent: BLEClient.V2Verb = (code != nil || !hasToken) ? .hello2 : .auth2
+        var reply = try await sendControl(
+            conn,
+            Self.initialFrameV2(hasToken: hasToken, code: code, clientPub: handshake.clientPub)
+        )
 
         while true {
-            switch BLEClient.decide(reply) {
-            case .signNonce(let nonce):
-                guard let token = NetworkTokenStore.loadToken(),
-                      let proof = PairingClient.proofFrame(token: token, nonce: nonce) else {
+            switch BLEClient.decideV2(sent: sent, reply: reply) {
+            case .bindCode(let epk, let nonce):
+                guard let code, handshake.agree(epkHex: epk, nonceHex: nonce),
+                      let binding = handshake.codeBinding(code: code) else {
+                    // 코드가 없다(재연결 경로) 또는 합의 자체가 실패했다.
+                    stateSubject.send(.needsPairing)
+                    throw NetworkClientError.needsPairing
+                }
+                sent = .code2
+                reply = try await sendControl(conn, PairingClient.code2Frame(binding: binding))
+            case .signSessionProof(let epk, let nonce):
+                guard handshake.agree(epkHex: epk, nonceHex: nonce),
+                      let token = NetworkTokenStore.loadToken(),
+                      let proof = handshake.sessionProof(tokenHex: token) else {
                     NetworkTokenStore.clearToken()
                     stateSubject.send(.needsPairing)
                     throw NetworkClientError.needsPairing
                 }
-                reply = try await sendControl(conn, proof)
-            case .storeTokenAndSubscribe(let token):
-                if !NetworkTokenStore.saveToken(token) {
-                    NSLog("네트워크 페어링 토큰 저장 실패 — 다음 재연결부터 코드를 다시 요구합니다")
-                }
-                return
-            case .subscribe:
-                return
-            case .failed(let left):
-                stateSubject.send(.pairingFailed(left: left))
-                throw NetworkClientError.authFailed
-            case .awaitCode:
-                guard let code else {
+                sent = .proof2
+                reply = try await sendControl(conn, PairingClient.proof2Frame(proof: proof))
+            case .openSealedToken(let sealed):
+                guard let token = handshake.openSealedToken(sealedHex: sealed),
+                      let channel = handshake.sessionChannel(tokenHex: token) else {
+                    // 봉인이 안 열렸다 = 우리가 만든 키가 맥의 키와 다르다.
                     stateSubject.send(.needsPairing)
                     throw NetworkClientError.needsPairing
                 }
-                reply = try await sendControl(conn, PairingClient.codeFrame(code))
-            case .resetAndAwaitCode:
+                if !NetworkTokenStore.saveToken(token) {
+                    NSLog("네트워크 페어링 토큰 저장 실패 — 다음 재연결부터 코드를 다시 요구합니다")
+                }
+                return channel
+            case .openSession:
+                guard let token = NetworkTokenStore.loadToken(),
+                      let channel = handshake.sessionChannel(tokenHex: token) else {
+                    NetworkTokenStore.clearToken()
+                    stateSubject.send(.needsPairing)
+                    throw NetworkClientError.needsPairing
+                }
+                return channel
+            case .failed(let left):
+                stateSubject.send(.pairingFailed(left: left))
+                throw NetworkClientError.authFailed
+            case .needsPairing:
+                // v1 으로 물러서지 않는다. 재시도도 하지 않는다 — 두 결정 모두
+                // `runConnection` 의 전용 catch 가 지킨다.
                 NetworkTokenStore.clearToken()
                 stateSubject.send(.needsPairing)
                 throw NetworkClientError.needsPairing
@@ -229,9 +270,39 @@ public final class NetworkClient: NSObject {
         return reply
     }
 
-    /// 인가된 뒤 Mac 이 여는 장수명 uni-stream 을 NDJSON 으로 읽는다 — 스냅샷
-    /// JSON 은 raw 개행을 포함하지 않으므로 줄 단위 분리만으로 프레이밍이 끝난다.
-    private func listenForSnapshots(conn: Connection) async throws {
+    /// 스냅샷 스트림 한 줄의 정체.
+    ///
+    /// **BLE 와 달리 네트워크는 봉인 프레임을 hex 문자열로 싣는다.** 이 스트림은
+    /// 0x0A 로 프레임을 나누는데(NDJSON) 봉인 프레임은 임의의 이진 바이트라 0x0A
+    /// 를 그대로 담을 수 있어, 날 것으로 흘리면 프레임 하나가 여러 줄로 쪼개진다.
+    /// 스냅샷 한 건 크기라면 사실상 매번 일어난다. 그래서 맥이 hex 로 감싼다
+    /// (`network/mod.rs: snapshot_line` 의 doc). hex 는 `{` 로 시작하지 않으므로
+    /// v1 평문 줄과도 한눈에 구분된다.
+    enum SnapshotLine: Equatable {
+        /// hex 를 디코드한 봉인 프레임. `SealedChannel.open` 으로 간다.
+        case sealed(Data)
+        /// `{` 로 시작 — 맥이 평문 JSON 을 보냈다. v2 세션에서는 일어날 수 없고,
+        /// 일어났다면 다운그레이드다.
+        case plaintextJSON
+        /// 빈 줄이거나 hex 도 JSON 도 아니다.
+        case unusable
+    }
+
+    nonisolated static func classifyLine(_ line: Data) -> SnapshotLine {
+        guard let first = line.first else { return .unusable }
+        if first == UInt8(ascii: "{") { return .plaintextJSON }
+        guard let text = String(data: line, encoding: .utf8),
+              let frame = Data(hexString: text) else { return .unusable }
+        return .sealed(frame)
+    }
+
+    /// 인가된 뒤 Mac 이 여는 장수명 uni-stream 을 NDJSON 으로 읽는다 — 줄 하나가
+    /// 프레임 하나이고, 그 줄은 hex 로 실린 봉인 프레임이다(`classifyLine`).
+    ///
+    /// 여기서 `try? JSONDecoder().decode(...)` 로 바로 떨어뜨리면 안 된다 —
+    /// hex 줄은 JSON 이 아니라 항상 nil 을 내고, `continue` 가 그걸 조용히
+    /// 삼켜 "연결은 됐는데 화면이 영영 비어 있는" 무증상 실패가 된다.
+    private func listenForSnapshots(conn: Connection, channel: SealedChannel) async throws {
         stateSubject.send(.streaming)
         let recv = try await conn.acceptUni()
         var buffer = Data()
@@ -239,9 +310,33 @@ public final class NetworkClient: NSObject {
             let chunk = try await recv.read(sizeLimit: Self.snapshotChunkSizeLimit)
             buffer.append(chunk)
             while let newlineIndex = buffer.firstIndex(of: 0x0A) {
-                let lineData = buffer[..<newlineIndex]
+                let lineData = Data(buffer[..<newlineIndex])
                 buffer.removeSubrange(buffer.startIndex...newlineIndex)
-                guard let snap = try? JSONDecoder().decode(MirrorSnapshot.self, from: lineData) else {
+
+                let frame: Data
+                switch Self.classifyLine(lineData) {
+                case .sealed(let f):
+                    frame = f
+                case .plaintextJSON:
+                    // 인가된 v2 세션에 평문이 올 수 없다 — 받아주면 그게
+                    // 다운그레이드다(스펙 8장). 연결을 끊을 만큼 확실한 공격
+                    // 신호는 아니므로 줄만 버리고 남긴다.
+                    NSLog("v2 세션에 평문 스냅샷이 도착해 버립니다")
+                    continue
+                case .unusable:
+                    continue
+                }
+
+                let plaintext: Data
+                do {
+                    plaintext = try channel.open(frame)
+                } catch {
+                    // 프레임 하나를 버릴 뿐 연결은 끊지 않는다 — 다음 프레임에서
+                    // 회복될 수 있다(수신 측은 카운터의 빈 칸을 견딘다).
+                    NSLog("봉인 프레임 열기 실패: \(error)")
+                    continue
+                }
+                guard let snap = try? JSONDecoder().decode(MirrorSnapshot.self, from: plaintext) else {
                     continue
                 }
                 guard snap.isSupportedVersion else {

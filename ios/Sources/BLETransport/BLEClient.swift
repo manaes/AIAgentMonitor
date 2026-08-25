@@ -24,6 +24,21 @@ public final class BLEClient: NSObject {
     /// 확정되면 반드시 취소해서 이후 연결 시도에 잘못 발동하지 않게 한다.
     private var connectTimeout: Task<Void, Never>?
 
+    /// 이번 연결의 v2 핸드셰이크. 임시 키가 한 번만 쓰이므로 연결마다 새로 만든다.
+    private var handshake: V2Handshake?
+    /// 방금 보낸 v2 동사. 응답을 이걸로 가른다(`decideV2`).
+    private var sentVerb: V2Verb?
+    /// 인가 후의 봉인 채널. 이게 nil 인 동안 도착하는 스냅샷은 전부 버린다 —
+    /// 평문 스냅샷을 받아주는 것이 곧 다운그레이드다.
+    private var channel: SealedChannel?
+    /// `AwaitingCode2` 를 받아 transcript 까지 확정된 상태인가. `CODE2` 는 이
+    /// 상태에서만 낼 수 있다.
+    private var awaitingUserCode = false
+    /// 사용자가 낸 코드를 아직 못 쓴 경우 들고 있는다. `HELLO2` 가 거절당한 뒤
+    /// (맥 화면의 페어링 창이 아직 안 열렸을 때) 사용자가 창을 열고 코드를
+    /// 입력하면, 새 `HELLO2` 로 다시 시작해 그 응답에 이 코드를 바로 낸다.
+    private var pendingCode: String?
+
     private let stateSubject = CurrentValueSubject<ConnectionState, Never>(.idle)
     private let snapshotSubject = PassthroughSubject<MirrorSnapshot, Never>()
     private let rawSubject = PassthroughSubject<String, Never>()
@@ -60,15 +75,66 @@ public final class BLEClient: NSObject {
             central?.cancelPeripheralConnection(p)
         }
         peripheral = nil
+        resetV2State()
+        pendingCode = nil
         stateSubject.send(.idle)
     }
 
     /// 사용자가 페어링 화면에서 6자리 코드를 입력하고 확인을 눌렀을 때 호출한다.
-    /// 코드 자체는 이 파일이 만들거나 검증하지 않는다 — 이미 열려 있는 Mac 쪽 창에
-    /// 제출할 뿐이다(창을 여는 것은 여전히 Mac 사용자 제스처 전용이다, 스펙 5.1).
+    /// 코드 자체는 링크를 건너지 않는다 — transcript 를 코드로 MAC 한 값만 나간다.
+    ///
+    /// **v1 과 달리 코드를 곧바로 낼 수 없다.** v1 은 `CODE:` 를 `HELLO` 없이도
+    /// 낼 수 있었지만(`pairing.rs: code_without_prior_hello_still_grants`), v2 의
+    /// 바인딩은 `HELLO2` 가 만든 transcript 위에서만 계산되고 맥도 핸드셰이크가
+    /// 없으면 즉시 거절한다(`pairing.rs: Code2`). 그래서 쓸 수 있는 핸드셰이크가
+    /// 없으면 코드를 들고 `HELLO2` 부터 다시 시작한다 — 맥 화면의 창이 연결
+    /// 시점에는 닫혀 있다가 사용자가 그 뒤에 여는 것이 정상 순서이므로, 이
+    /// 경로가 오히려 흔하다.
     public func submitPairingCode(_ code: String) {
         guard let peripheral, let authCh = authCharacteristic else { return }
-        peripheral.writeValue(PairingClient.codeFrame(code), for: authCh, type: .withResponse)
+        guard awaitingUserCode, let handshake,
+              let binding = handshake.codeBinding(code: code) else {
+            pendingCode = code
+            beginV2Handshake(peripheral, authCh)
+            return
+        }
+        // 핸드셰이크는 맥에서도 CODE2 한 번으로 소비된다 — 틀렸으면 HELLO2 부터다.
+        awaitingUserCode = false
+        pendingCode = nil
+        sentVerb = .code2
+        peripheral.writeValue(PairingClient.code2Frame(binding: binding), for: authCh, type: .withResponse)
+    }
+
+    /// 새 임시 키로 v2 핸드셰이크를 시작한다.
+    ///
+    /// **방금 받은 코드가 저장된 토큰보다 우선한다.** 맥에서 전체 해제로 토큰이
+    /// 폐기된 뒤에는 `AUTH2` 재인증이 반드시 거부되고, 그때 코드는 쓰이지도 못한
+    /// 채 `needsPairing` 으로 떨어진다(v1 에서 실제로 겪은 버그).
+    private func beginV2Handshake(_ peripheral: CBPeripheral, _ authCh: CBCharacteristic) {
+        let hs = V2Handshake()
+        handshake = hs
+        channel = nil
+        awaitingUserCode = false
+        let frame: Data
+        if pendingCode != nil || TokenStore.load() == nil {
+            sentVerb = .hello2
+            frame = PairingClient.hello2Frame(clientPub: hs.clientPub)
+        } else {
+            // 토큰 자체는 보내지 않는다. 논스를 받아 서명해 답한다.
+            sentVerb = .auth2
+            frame = PairingClient.auth2Frame(clientPub: hs.clientPub)
+        }
+        peripheral.writeValue(frame, for: authCh, type: .withResponse)
+    }
+
+    /// 연결이 끊기거나 서비스가 무효화될 때 v2 상태를 통째로 버린다. 임시 키도
+    /// 세션 카운터도 연결 하나에 매인 값이라 다음 연결로 넘기면 안 된다.
+    /// `pendingCode` 는 남긴다 — 사용자가 낸 코드는 재연결 뒤에도 여전히 유효하다.
+    private func resetV2State() {
+        handshake = nil
+        sentVerb = nil
+        channel = nil
+        awaitingUserCode = false
     }
 
     /// 스캔을 (다시) 시작하는 유일한 경로. 재연결마다 이전 연결에서 시작된
@@ -76,6 +142,9 @@ public final class BLEClient: NSObject {
     private func beginScan() {
         guard let central, central.state == .poweredOn else { return }
         reassembler = FrameReassembler()
+        // 임시 키도 세션 카운터도 연결 하나에 매인 값이다. 다음 연결로 넘기면
+        // 봉인 채널의 카운터가 맥과 어긋나 스냅샷이 한 장도 안 열린다.
+        resetV2State()
         stateSubject.send(.scanning)
         central.scanForPeripherals(withServices: [MirrorUUIDs.service])
     }
@@ -206,6 +275,9 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         // 첫 청크와 이어붙지 않도록 여기서 버린다. didUpdateValueFor 에 이르는 모든
         // 경로는 그 앞에서 재조립기를 초기화한다는 규약을 이 새 경로도 지킨다.
         reassembler = FrameReassembler()
+        // 맥이 서비스를 내렸다 올리면 그쪽 세션도 끝나 있다 — 이쪽 봉인 채널도
+        // 버리고 특성 재검색부터 핸드셰이크를 다시 탄다.
+        resetV2State()
 
         // 재검색 → 특성 검색 → 재구독 체인을 처음부터 다시 타야 하므로 아직 스트리밍이
         // 아니다. .connecting 으로 내려두면 라벨이 정직해질 뿐 아니라, 체인이 영영
@@ -249,12 +321,7 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         snapshotCharacteristic = snapshotCh
         authCharacteristic = authCh
         peripheral.setNotifyValue(true, for: authCh)
-        if let token = TokenStore.load() {
-            // 토큰 자체는 보내지 않는다. 논스를 받아 서명해 답한다.
-            peripheral.writeValue(PairingClient.authFrame(), for: authCh, type: .withResponse)
-        } else {
-            peripheral.writeValue(PairingClient.helloFrame(), for: authCh, type: .withResponse)
-        }
+        beginV2Handshake(peripheral, authCh)
     }
 
     public func peripheral(
@@ -300,11 +367,32 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         guard characteristic.uuid == MirrorUUIDs.snapshot, let data = characteristic.value else { return }
         guard let message = reassembler.push(data) else { return }
 
-        if let text = String(data: message, encoding: .utf8) {
+        // BLE 는 재조립한 프레임이 **곧 봉인 프레임**이다 —
+        // `counter(8B BE) || ciphertext || tag(16)` 를 그대로 청킹해 보내기
+        // 때문이다(`ble/mod.rs`: 봉인은 청킹 직전에 한다). 네트워크 전송과
+        // 달리 hex 도 줄 단위 프레이밍도 끼지 않는다.
+        guard let channel else {
+            // 세션이 아직 안 열렸는데 스냅샷이 왔다 — 봉인되지 않은 평문이다.
+            // 받아주면 그게 다운그레이드다(스펙 8장).
+            NSLog("v2 세션 전에 도착한 스냅샷을 버립니다")
+            return
+        }
+        let plaintext: Data
+        do {
+            plaintext = try channel.open(message)
+        } catch {
+            // 프레임 하나를 버릴 뿐 연결은 끊지 않는다. 카운터에 빈 칸이 생기는
+            // 것은 정상이고(청크가 어긋난 프레임은 재조립기가 버린다) 수신 측은
+            // 그걸 견디도록 만들어져 있다 — 다음 프레임에서 회복된다.
+            NSLog("봉인 프레임 열기 실패: \(error)")
+            return
+        }
+
+        if let text = String(data: plaintext, encoding: .utf8) {
             rawSubject.send(text)
         }
         do {
-            let snap = try JSONDecoder().decode(MirrorSnapshot.self, from: message)
+            let snap = try JSONDecoder().decode(MirrorSnapshot.self, from: plaintext)
             guard snap.isSupportedVersion else {
                 // 클라이언트가 지원하지 못하는 버전이다. 재시도로는 해결되지 않으므로
                 // 스캔을 재개하지 않고 연결을 끊는다. setNotifyValue(false) 는 일부러
@@ -354,6 +442,12 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         case resetAndAwaitCode
     }
 
+    /// v1 상태 기계. **더 이상 이 앱의 연결 경로에 있지 않다** — 클라이언트는
+    /// v2 만 말한다(아래 `decideV2` 의 다운그레이드 설명). 그래도 남겨 두는
+    /// 이유는 이 함수와 그 여섯 테스트가 맥이 지금도 보내는 여섯 가지 v1 응답
+    /// 모양의 정본이기 때문이다 — `decideV2` 의 거절 규칙("`v:2` 없는 `ok:true`
+    /// 는 평문 인가다")은 정확히 이 표를 근거로 정의된다. 전환이 끝나 맥이 v1
+    /// 응답을 더 이상 만들지 않게 되면 이 함수와 테스트를 함께 지운다.
     public static func decide(_ reply: AuthReplyPayload) -> AuthAction {
         if let nonce = reply.nonce {
             return .signNonce(nonce: nonce)
@@ -370,23 +464,122 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         }
     }
 
+    // MARK: - v2 상태 기계
+
+    /// 방금 보낸 v2 동사. **응답을 이걸로 가른다.**
+    ///
+    /// `AwaitingCode2` 와 `Nonce2` 는 `await` 하나만 다르고 필드 구성이 같다:
+    /// ```
+    /// AwaitingCode2 → {"ok":false,"v":2,"await":"code","epk":"…","nonce":"…"}
+    /// Nonce2        → {"ok":false,"v":2,            "epk":"…","nonce":"…"}
+    /// ```
+    /// "epk 와 nonce 가 있으니 X 다" 로 판단하면 페어링 경로와 재연결 경로가
+    /// 뒤섞인다 — 그 결과는 크래시도 로그도 없는 빈 화면이다.
+    public enum V2Verb: Equatable, Sendable {
+        case hello2, code2, auth2, proof2
+    }
+
+    public enum V2Action: Equatable, Sendable {
+        /// `AwaitingCode2` — 합의하고 사용자 코드로 바인딩을 만들어 `CODE2` 를 낸다.
+        case bindCode(epk: String, nonce: String)
+        /// `Nonce2` — 합의하고 저장된 토큰으로 증명을 만들어 `PROOF2` 를 낸다.
+        case signSessionProof(epk: String, nonce: String)
+        /// `Granted2` — 봉인된 토큰을 열어 저장하고 세션을 연다.
+        case openSealedToken(sealed: String)
+        /// `Authorized2` — 되돌아온 토큰이 없다. 이미 저장된 토큰으로 세션을 연다.
+        case openSession
+        /// `Denied` — 코드가 틀렸다. 남은 시도를 그대로 보여준다.
+        case failed(left: Int)
+        /// `Rejected`, 또는 이 동사에 올 수 없는 응답. **재시도하지 않고 멈춘다.**
+        case needsPairing
+    }
+
+    /// v2 응답 하나를 다음 행동으로 옮긴다.
+    ///
+    /// **다운그레이드하지 않는다.** 이 규칙의 실질은 딱 한 줄이다 — `"v":2` 없는
+    /// `ok:true` 를 인가로 받아들이지 않는 것. `{"ok":true}` 와
+    /// `{"ok":true,"token":…}` 는 v1 이 인가를 알리는 두 모양이고, 이걸 성공으로
+    /// 읽으면 그 뒤 스냅샷을 평문으로 받게 된다. 공격자가 v2 를 방해해 평문으로
+    /// 끌어내리는 경로가 정확히 여기다(스펙 8장). 거절당하면 `needsPairing` 으로
+    /// 멈출 뿐 v1 프레임은 만들지 않는다.
+    ///
+    /// 반대로 `"v":2` 를 **모든** 응답에 요구해서도 안 된다. 맥은 `Denied` 와
+    /// `Rejected` 를 두 세대에 그대로 쓰므로(`to_json_bytes`) v2 흐름에서도 이
+    /// 두 모양이 `"v"` 없이 도착한다 — 전부 `needsPairing` 으로 뭉개면 사용자는
+    /// 코드가 틀렸다는 사실도, 몇 번 남았는지도 알 수 없다.
+    public static func decideV2(sent: V2Verb, reply: AuthReplyPayload) -> V2Action {
+        if reply.ok {
+            // 인가만은 v2 임이 증명돼야 한다.
+            guard reply.v == 2 else { return .needsPairing }
+            switch sent {
+            case .code2:
+                guard let sealed = reply.sealed else { return .needsPairing }
+                return .openSealedToken(sealed: sealed)
+            case .proof2:
+                return .openSession
+            case .hello2, .auth2:
+                // 맥은 이 두 동사에 성공을 돌려주지 않는다.
+                return .needsPairing
+            }
+        }
+        if let left = reply.left { return .failed(left: left) }
+        guard reply.v == 2, let epk = reply.epk, let nonce = reply.nonce else {
+            return .needsPairing
+        }
+        switch sent {
+        case .hello2: return .bindCode(epk: epk, nonce: nonce)
+        case .auth2: return .signSessionProof(epk: epk, nonce: nonce)
+        case .code2, .proof2: return .needsPairing
+        }
+    }
+
     private func handleAuthReply(_ data: Data) {
         guard let peripheral, let authCh = authCharacteristic,
               let snapshotCh = snapshotCharacteristic,
-              let reply = PairingClient.parse(data) else { return }
+              let handshake, let sentVerb else { return }
+        guard let reply = PairingClient.parse(data) else {
+            // v2 응답은 v1 보다 훨씬 길다(`AwaitingCode2` 가 148바이트). Auth 특성은
+            // 청킹 없이 notify 한 장으로 나가므로 MTU 협상이 낮게 끝나면 여기서
+            // 잘린 JSON 이 도착한다 — 조용히 return 하면 화면이 이유 없이 멈춘다.
+            NSLog("Auth 응답을 해석하지 못했습니다(\(data.count)바이트)")
+            return
+        }
 
-        switch Self.decide(reply) {
-        case .signNonce(let nonce):
-            guard let token = TokenStore.load(),
-                  let proof = PairingClient.proofFrame(token: token, nonce: nonce) else {
-                // 토큰이 없거나 서명을 못 만들었다 — 코드 페어링으로 되돌아간다.
-                // resetAndAwaitCode 와 마찬가지로 HELLO 를 자동으로 다시 쓰지 않는다.
-                TokenStore.clear()
+        switch Self.decideV2(sent: sentVerb, reply: reply) {
+        case .bindCode(let epk, let nonce):
+            guard handshake.agree(epkHex: epk, nonceHex: nonce) else {
+                // 저차 점이거나 형식이 깨진 epk — 재시도해도 같은 맥이면 같은
+                // 결과다. resetAndAwaitCode 와 같은 이유로 자동 재전송은 없다.
+                failV2()
+                return
+            }
+            guard let code = pendingCode, let binding = handshake.codeBinding(code: code) else {
+                // 아직 코드가 없다. 사용자가 맥 화면의 6자리를 입력하면
+                // `submitPairingCode` 가 이 핸드셰이크 위에서 CODE2 를 낸다.
+                awaitingUserCode = true
                 stateSubject.send(.needsPairing)
                 return
             }
-            peripheral.writeValue(proof, for: authCh, type: .withResponse)
-        case .storeTokenAndSubscribe(let token):
+            pendingCode = nil
+            self.sentVerb = .code2
+            peripheral.writeValue(PairingClient.code2Frame(binding: binding), for: authCh, type: .withResponse)
+        case .signSessionProof(let epk, let nonce):
+            guard handshake.agree(epkHex: epk, nonceHex: nonce),
+                  let token = TokenStore.load(),
+                  let proof = handshake.sessionProof(tokenHex: token) else {
+                // 토큰이 없거나 증명을 못 만들었다 — 코드 페어링으로 되돌아간다.
+                failV2()
+                return
+            }
+            self.sentVerb = .proof2
+            peripheral.writeValue(PairingClient.proof2Frame(proof: proof), for: authCh, type: .withResponse)
+        case .openSealedToken(let sealed):
+            guard let token = handshake.openSealedToken(sealedHex: sealed),
+                  let channel = handshake.sessionChannel(tokenHex: token) else {
+                // 봉인이 안 열렸다는 건 우리가 만든 키가 맥의 키와 다르다는 뜻이다.
+                failV2()
+                return
+            }
             // 저장이 실패해도(디스크 꽉 참 등) 스트리밍은 계속한다 — 지금 세션은
             // 인가된 상태다. 다만 다음 재연결부터는 저장된 토큰이 없어 코드를
             // 다시 요구하게 되므로 로그를 남긴다(TokenStore.save 가 이제
@@ -394,16 +587,45 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
             if !TokenStore.save(token) {
                 NSLog("페어링 토큰 저장 실패 — 다음 재연결부터 코드를 다시 요구합니다")
             }
+            // 채널을 먼저 세운다 — 구독보다 늦으면 첫 스냅샷이 채널 없이 도착해
+            // 버려진다.
+            self.channel = channel
+            self.sentVerb = nil
             peripheral.setNotifyValue(true, for: snapshotCh)   // 여기서 비로소 데이터가 흐른다
-        case .subscribe:
+        case .openSession:
+            // 재인증 성공 — 되돌아온 토큰이 없다(스펙 5.1). 이미 저장된 토큰으로
+            // 세션 키를 만든다.
+            guard let token = TokenStore.load(),
+                  let channel = handshake.sessionChannel(tokenHex: token) else {
+                failV2()
+                return
+            }
+            self.channel = channel
+            self.sentVerb = nil
             peripheral.setNotifyValue(true, for: snapshotCh)
         case .failed(let left):
+            // 맥은 CODE2 하나로 핸드셰이크를 소비했다 — 다시 넣으려면 HELLO2
+            // 부터다. `submitPairingCode` 가 그 판단을 한다.
+            awaitingUserCode = false
+            pendingCode = nil
+            self.sentVerb = nil
             stateSubject.send(.pairingFailed(left: left))
-        case .awaitCode:
-            stateSubject.send(.needsPairing)
-        case .resetAndAwaitCode:
-            TokenStore.clear()
-            stateSubject.send(.needsPairing)
+        case .needsPairing:
+            failV2()
         }
+    }
+
+    /// v2 인증이 더 진행될 수 없을 때의 유일한 종착점. **여기서 프레임을 다시
+    /// 쓰지 않는다** — 창이 안 열려 있으면 재전송도 다시 거절당하고, 그게 다시
+    /// 여기로 와 무한 루프가 된다(v1 에서 겪은 C-1). v1 로 물러서지도 않는다.
+    /// 사용자가 코드를 내면 `submitPairingCode` 가 HELLO2 부터 다시 시작한다.
+    private func failV2() {
+        TokenStore.clear()
+        awaitingUserCode = false
+        sentVerb = nil
+        // 들고 있던 코드도 버린다. 여기까지 왔다는 건 창이 닫혔거나 만료됐다는
+        // 뜻이고(HELLO2 거절), 맥의 코드는 120초짜리라 나중에 쓰면 어차피 틀린다.
+        pendingCode = nil
+        stateSubject.send(.needsPairing)
     }
 }
