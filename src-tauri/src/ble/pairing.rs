@@ -92,6 +92,13 @@ pub enum AuthReply {
     AwaitingCode2 { epk: String, nonce: String },
     /// v2 의 `Granted`. 토큰을 평문 필드가 아니라 봉인 프레임으로 싣는다.
     Granted2 { sealed: String },
+    /// v2 의 `Nonce`. 맥의 임시 공개키를 함께 싣는다 — 클라이언트가 이
+    /// 임시키로 새 공유 비밀을 만들어야 `session_proof` 에 넣을
+    /// transcript 를 계산할 수 있다.
+    Nonce2 { epk: String, nonce: String },
+    /// v2 의 `Authorized`. `Authorized` 와 같은 이유로 되돌려보낼 비밀이
+    /// 없다 — 필드도 없다.
+    Authorized2,
 }
 
 impl AuthReply {
@@ -119,6 +126,10 @@ impl AuthReply {
             AuthReply::Granted2 { sealed } => {
                 format!(r#"{{"ok":true,"v":2,"sealed":"{sealed}"}}"#).into_bytes()
             }
+            AuthReply::Nonce2 { epk, nonce } => {
+                format!(r#"{{"ok":false,"v":2,"epk":"{epk}","nonce":"{nonce}"}}"#).into_bytes()
+            }
+            AuthReply::Authorized2 => br#"{"ok":true,"v":2}"#.to_vec(),
         }
     }
 }
@@ -532,9 +543,17 @@ impl PairingManager {
     /// `Rejected` 로 튕겼다. 그래서 핸드셰이크는 페어링 창과 같은
     /// `CODE_TTL`(120초)로 스윕한다 — 창보다 오래 살아남는 핸드셰이크는
     /// 어차피 쓸모가 없고, 맵을 유계로 만든다는 목적에는 30초든 120초든
-    /// 똑같이 충분하다. (`Auth2` 재연결 핸드셰이크가 이 맵에 들어오기
-    /// 시작하면 그때는 이 함수를 central 별로 다시 나눠야 할 수 있다 —
-    /// 아직은 오지 않았다.)
+    /// 똑같이 충분하다.
+    ///
+    /// **Task 7 이후: `Auth2`(재연결) 핸드셰이크도 이 같은 맵·같은
+    /// `CODE_TTL` 을 쓴다.** `Auth2` 는 기계 속도라 사람 속도용 120초가
+    /// 필요하지는 않지만, `Auth2` 는 `nonces` 에도 항목을 남기고 그
+    /// `NONCE_TTL`(30초)이 항상 먼저 지나 `Proof2` 를 막아 주므로, 이 맵의
+    /// 120초는 그저 "언젠가는 지운다"는 유계 보장 이상의 역할을 하지
+    /// 않는다 — 페어링용 핸드셰이크처럼 정확한 타이밍이 필요한 자리가
+    /// 아니다. 그래서 지금은 central 별로 다시 나누지 않았다. `Auth2` 가
+    /// 사람 속도 정책이 필요해지면(예: 재연결에도 유예 시간을 주고
+    /// 싶어지면) 그때 나눈다.
     fn sweep_expired(&mut self, now: SystemTime) {
         self.nonces
             .retain(|_, n| now.duration_since(n.issued_at).unwrap_or_default() <= NONCE_TTL);
@@ -545,6 +564,11 @@ impl PairingManager {
     #[cfg(test)]
     fn nonce_count(&self) -> usize {
         self.nonces.len()
+    }
+
+    #[cfg(test)]
+    fn handshake_count(&self) -> usize {
+        self.handshakes.len()
     }
 
     pub fn handle(&mut self, id: &CentralId, req: AuthRequest, now: SystemTime) -> AuthReply {
@@ -696,8 +720,85 @@ impl PairingManager {
                 self.pending = None;
                 AuthReply::Granted2 { sealed }
             }
-            // Auth2/Proof2(v2 재연결)는 아직 파싱만 한다 — 실제 동작은 Task 7 에서 채운다.
-            AuthRequest::Auth2(_) | AuthRequest::Proof2(_) => AuthReply::Rejected,
+            AuthRequest::Auth2(cpk_hex) => {
+                let Some(cpk) = Self::hex32(&cpk_hex) else {
+                    // 형식 오류는 코드 추측이 아니다 — v1 Hello2 와 같은 기준.
+                    return AuthReply::Rejected;
+                };
+                let kp = crypto::ephemeral_keypair();
+                let spk = kp.public;
+                let Some(ss) = crypto::agree(kp, &cpk) else {
+                    // 저차 점 — 공유 비밀이 상수가 된다.
+                    return AuthReply::Rejected;
+                };
+                let nonce = Self::random_hex128();
+                // v1 `Auth` 와 같이, 새 논스는 이전 논스를 덮어써 무효화한다.
+                // `nonces` 항목은 `NONCE_TTL`(30초, 기계 속도)로 스윕된다.
+                self.nonces.insert(
+                    id.0.clone(),
+                    PendingNonce { nonce: nonce.clone(), issued_at: now },
+                );
+                // 핸드셰이크(공유 비밀·transcript)는 `handshakes` 맵에 같이
+                // 둔다 — `HELLO2` 가 쓰는 맵과 같지만, 여기 들어오는 항목은
+                // 재연결용이라 열린 페어링 창이 전혀 필요 없다. 이 맵은
+                // `CODE_TTL`(120초)로 스윕되므로(사람 속도 페어링에 맞춘
+                // 값), `Auth2` 는 사실상 더 짧은 `NONCE_TTL` 이 실질적인
+                // 상한이 된다 — `nonces` 항목이 먼저 사라져 `Proof2` 를
+                // 막기 때문이다. 그래도 핸드셰이크 자체도 언젠가는 지워야
+                // 유계 메모리가 유지되므로 같은 스윕을 그대로 태운다.
+                self.handshakes.insert(
+                    id.0.clone(),
+                    PendingHandshake {
+                        ss,
+                        transcript: crypto::transcript(&cpk, &spk),
+                        nonce: nonce.clone(),
+                        issued_at: now,
+                    },
+                );
+                AuthReply::Nonce2 { epk: hex_encode_bytes(&spk), nonce }
+            }
+            AuthRequest::Proof2(given) => {
+                // v1 `Proof` 와 같이 성공·실패와 무관하게 즉시 폐기한다
+                // (1회용 논스) — 캡처한 PROOF2 를 재생해도 두 번째부터는
+                // 통하지 않아야 한다.
+                let Some(pending) = self.nonces.remove(&id.0) else {
+                    // AUTH2 없이 곧바로 온 PROOF2, 혹은 이미 소비/만료된 논스.
+                    return AuthReply::Rejected;
+                };
+                let Some(hs) = self.handshakes.remove(&id.0) else {
+                    return AuthReply::Rejected;
+                };
+                let Some(nonce_bytes) = Self::hex_decode(&pending.nonce) else {
+                    return AuthReply::Rejected;
+                };
+                // 토큰은 이 라운드트립 어디에도 실리지 않는다 — 저장된 토큰
+                // 후보들에 대해 각각 proof 를 검증해, 어떤 토큰의 소유자가
+                // 이 요청을 보냈는지 알아낼 뿐이다(v1 `Proof` 와 같은 구조).
+                // `verify_session_proof` 가 transcript 도 함께 검증하므로,
+                // 능동적 MITM 이 임시 키를 바꿔치기하면(=다른 transcript)
+                // 올바른 토큰으로 만든 proof 라도 실패한다.
+                let matched = self
+                    .tokens
+                    .keys()
+                    .find(|token| {
+                        Self::hex_decode(token).is_some_and(|tb| {
+                            crypto::verify_session_proof(&tb, &nonce_bytes, &hs.transcript, &given)
+                        })
+                    })
+                    .cloned();
+                let Some(token) = matched else {
+                    // 실패는 코드 추측이 아니다 — 페어링 창의 시도 예산과는
+                    // 무관하므로 여기서 소모할 예산 자체가 없다.
+                    return AuthReply::Rejected;
+                };
+                let token_bytes = Self::hex_decode(&token).expect("저장된 토큰은 유효한 hex 다");
+                // `ikm = ss || token` — 토큰이 새도 임시 개인키가 필요하고,
+                // X25519 가 깨져도 토큰이 필요하다(스펙 6.1).
+                let (s2c, c2s) = crypto::derive_session_keys(&hs.ss, &token_bytes, &nonce_bytes);
+                self.channels.insert(id.0.clone(), SealedChannel::new(s2c, c2s));
+                self.authorized.insert(id.0.clone(), token);
+                AuthReply::Authorized2
+            }
             AuthRequest::Malformed => AuthReply::Rejected,
         }
     }
@@ -1115,6 +1216,157 @@ mod tests {
 
         m.end_all_sessions();
         assert!(m.channel_mut(&id("A")).is_none(), "전체 세션 종료 후에는 v2 채널도 남으면 안 된다");
+    }
+
+    /// 페어링해서 토큰과 세션 키를 얻은 뒤, 연결을 끊고 재연결한다.
+    #[test]
+    fn v2_reconnect_with_token_authorizes() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+
+        // ── 1차: 페어링 ──
+        let mut c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Hello2(hex_encode(&c.public)), t(1001));
+        let (epk, nonce) = epk_and_nonce(&reply);
+        let (ss, tr) = c.agree(&epk);
+        let cbind = hex_encode(&crypto::code_binding(&code, &tr));
+        let AuthReply::Granted2 { sealed } = m.handle(&id("A"), AuthRequest::Code2(cbind), t(1002))
+        else {
+            panic!("Granted2 를 기대했다")
+        };
+        let nonce_bytes = PairingManager::hex_decode(&nonce).unwrap();
+        let k_pair = crypto::derive_pair_key(&ss, &nonce_bytes);
+        let mut pair_ch = SealedChannel::new(k_pair, k_pair);
+        let plain = pair_ch
+            .open(&PairingManager::hex_decode(&sealed).unwrap())
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+        let token = json["token"].as_str().unwrap().to_string();
+
+        m.end_session(&id("A"));
+        assert!(!m.is_authorized(&id("A")));
+
+        // ── 2차: 재연결 ──
+        let mut c2 = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Auth2(hex_encode(&c2.public)), t(2000));
+        let AuthReply::Nonce2 { epk, nonce } = reply else {
+            panic!("Nonce2 를 기대했다: {reply:?}")
+        };
+        let (_ss2, tr2) = c2.agree(&epk);
+        let token_bytes = PairingManager::hex_decode(&token).unwrap();
+        let nonce2_bytes = PairingManager::hex_decode(&nonce).unwrap();
+        let proof = hex_encode(&crypto::session_proof(&token_bytes, &nonce2_bytes, &tr2));
+
+        let reply = m.handle(&id("A"), AuthRequest::Proof2(proof), t(2001));
+        assert_eq!(reply, AuthReply::Authorized2);
+        assert!(m.is_authorized(&id("A")));
+    }
+
+    /// v1 과 같다 — proof 실패는 코드 추측이 아니므로 예산을 소모하지 않는다.
+    #[test]
+    fn v2_bad_proof_does_not_spend_an_attempt() {
+        let mut m = PairingManager::new();
+        m.begin_pairing(t(1000));
+        m.load_peers(vec![("aa".repeat(16), 900)]);
+        let c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Auth2(hex_encode(&c.public)), t(1001));
+        assert!(matches!(reply, AuthReply::Nonce2 { .. }));
+        let reply = m.handle(&id("A"), AuthRequest::Proof2("00".repeat(32)), t(1002));
+        assert!(matches!(reply, AuthReply::Rejected));
+        match m.pairing_window(t(1003)) {
+            PairingWindow::Open { attempts_left, .. } => assert_eq!(attempts_left, MAX_ATTEMPTS),
+            other => panic!("창이 열려 있어야 한다: {other:?}"),
+        }
+    }
+
+    /// **transcript 바인딩이 실제로 동작하는지** 확인한다. 중간자가 임시 키를
+    /// 바꿔치기한 상황을 흉내낸다 — 올바른 토큰으로 만든 proof 라도 transcript
+    /// 가 다르면 통과하면 안 된다.
+    #[test]
+    fn v2_proof_from_a_different_transcript_is_rejected() {
+        let mut m = PairingManager::new();
+        let token = "aa".repeat(16);
+        m.load_peers(vec![(token.clone(), 900)]);
+        let c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Auth2(hex_encode(&c.public)), t(1001));
+        let AuthReply::Nonce2 { nonce, .. } = reply else { panic!() };
+
+        // 서버가 준 epk 가 아니라 엉뚱한 키로 transcript 를 만든다.
+        let bogus_tr = crypto::transcript(&c.public, &[0x77u8; 32]);
+        let token_bytes = PairingManager::hex_decode(&token).unwrap();
+        let nonce_bytes = PairingManager::hex_decode(&nonce).unwrap();
+        let proof = hex_encode(&crypto::session_proof(&token_bytes, &nonce_bytes, &bogus_tr));
+
+        assert!(matches!(
+            m.handle(&id("A"), AuthRequest::Proof2(proof), t(1002)),
+            AuthReply::Rejected
+        ));
+    }
+
+    /// AUTH2 없이 온 PROOF2 는 핸드셰이크가 없으므로 거부한다.
+    #[test]
+    fn v2_proof_without_auth_is_rejected() {
+        let mut m = PairingManager::new();
+        m.load_peers(vec![("aa".repeat(16), 900)]);
+        assert!(matches!(
+            m.handle(&id("A"), AuthRequest::Proof2("00".repeat(32)), t(1000)),
+            AuthReply::Rejected
+        ));
+    }
+
+    /// 인가가 사라지면 봉인 채널도 사라져야 한다 — 남으면 해제된 기기에
+    /// 계속 봉인해 보낼 수 있다.
+    #[test]
+    fn v2_ending_a_session_drops_its_channel() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let mut c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Hello2(hex_encode(&c.public)), t(1001));
+        let (epk, _) = epk_and_nonce(&reply);
+        let (_ss, tr) = c.agree(&epk);
+        let cbind = hex_encode(&crypto::code_binding(&code, &tr));
+        m.handle(&id("A"), AuthRequest::Code2(cbind), t(1002));
+        assert!(m.channel_mut(&id("A")).is_some());
+
+        m.end_session(&id("A"));
+        assert!(m.channel_mut(&id("A")).is_none(), "세션이 끝나면 채널도 없어야 한다");
+    }
+
+    /// Task 7 회귀 테스트: `Auth2` 가 만든 핸드셰이크가 `sweep_expired` 로
+    /// 실제로 청소되는지 확인한다.
+    ///
+    /// `PROOF2` 응답만으로는 이걸 증명할 수 없다 — `Auth2` 는 `nonces` 에도
+    /// 항목을 남기고, 그 TTL(`NONCE_TTL`, 30초)이 핸드셰이크 TTL(120초)보다
+    /// 항상 먼저 지나서 `Proof2` 를 `Rejected` 로 만들어 버린다. 핸드셰이크
+    /// 스윕을 통째로 지워도 `nonces` 스윕이 대신 거부해 주므로, 그 경로로는
+    /// 이 테스트가 가짜로 통과한다(Task 6 재검토에서 지적된 것과 같은 함정).
+    /// 그래서 `handshakes` 맵의 크기를 직접 들여다봐서, 핸드셰이크 스윕
+    /// 자체가 동작하는지를 논스 스윕과 분리해 검증한다.
+    #[test]
+    fn v2_auth2_handshake_is_swept_independently_of_the_nonce() {
+        let mut m = PairingManager::new();
+        // 페어링 창을 아예 열지 않는다 — 재연결에는 열린 창이 필요 없다.
+        let c = V2Client::new();
+        m.handle(&id("A"), AuthRequest::Auth2(hex_encode(&c.public)), t(1000));
+        assert_eq!(m.handshake_count(), 1);
+
+        // 50초 뒤 — 논스 TTL(30초)은 지났지만 핸드셰이크 TTL(120초)은 아직이다.
+        // 다른 central 의 요청으로 sweep_expired 를 한 번 더 돌려도, 이
+        // 핸드셰이크는 아직 살아 있어야 한다(너무 이르게 청소되면 안 된다).
+        m.handle(&id("B"), AuthRequest::Hello, t(1050));
+        assert_eq!(
+            m.handshake_count(),
+            1,
+            "핸드셰이크 TTL(120초) 안에는 아직 청소되면 안 된다"
+        );
+
+        // 130초 뒤 — 핸드셰이크 TTL(120초)도 지났다.
+        m.handle(&id("B"), AuthRequest::Hello, t(1130));
+        assert_eq!(
+            m.handshake_count(),
+            0,
+            "TTL 을 넘긴 Auth2 핸드셰이크는 스윕으로 지워져야 한다"
+        );
     }
 
     /// 테스트에서 "iOS 클라이언트" 역할을 대신한다 — 토큰으로 논스에
