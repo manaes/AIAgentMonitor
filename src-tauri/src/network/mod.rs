@@ -15,7 +15,7 @@
 //!   줄바꿈으로 구분된 JSON(NDJSON)을 흘려보낸다 — `MirrorSnapshot` 의 compact
 //!   JSON 은 raw `\n` 을 포함하지 않는다.
 pub mod identity;
-pub mod peers;
+
 
 use crate::ble::pairing::{self, AuthReply, PairingManager};
 use crate::ble::peripheral::CentralId;
@@ -41,11 +41,12 @@ const NETWORK_THROTTLE: Duration = Duration::from_millis(1000);
 pub struct AuthOutcome {
     pub payload: Vec<u8>,
     pub now_authorized: bool,
-    pub persist: Option<Vec<peers::StoredPeer>>,
+    /// `CODE:` 로 새 토큰이 발급됐는가. 그 경우 호출부가 갱신된 목록을
+    /// 디스크에 쓴다(저장소는 이제 앱이 소유한다 — 2026-08-25 스펙 5장).
+    pub granted: bool,
 }
 
 pub struct NetworkBridge {
-    pairing: PairingManager,
     gate: EmitGate,
     enabled: bool,
     /// 인가된 central 당 스냅샷을 흘려보내는 장수명 uni-stream. `Connection`
@@ -58,7 +59,6 @@ pub struct NetworkBridge {
 impl NetworkBridge {
     pub fn new() -> Self {
         Self {
-            pairing: PairingManager::new(),
             gate: EmitGate::new(NETWORK_THROTTLE),
             enabled: false,
             snapshot_senders: HashMap::new(),
@@ -79,72 +79,47 @@ impl NetworkBridge {
         if on {
             self.gate.reset();
         } else {
-            self.pairing.end_all_sessions();
             self.snapshot_senders.clear();
         }
     }
 
-    /// 사용자가 명시적으로 페어링을 시작할 때만 호출한다(`ble::mod::BleBridge::begin_pairing`
-    /// 과 같은 제약 — 스펙 5.1/5.2, 코드 무차별 대입 방어 전체가 이 성질에 얹혀 있다).
-    pub fn begin_pairing(&mut self, now: SystemTime) -> String {
-        self.pairing.begin_pairing(now)
+    /// 이 전송이 지금 서비스 중인 central 목록. BLE 의 `served_centrals` 와 같은
+    /// 목적 — 공유 `PairingManager` 에서 이 전송의 세션만 정리하기 위해, 호출자가
+    /// `set_enabled(false)` **전에** 받아 간다(2026-08-25 스펙 4장).
+    pub fn served_centrals(&self) -> Vec<CentralId> {
+        self.snapshot_senders.keys().cloned().collect()
     }
 
-    pub fn pairing_window(&self, now: SystemTime) -> pairing::PairingWindow {
-        self.pairing.pairing_window(now)
+    /// 연결이 끊긴 central 의 전송 자원을 정리한다. 세션 인가는 이제 앱이
+    /// 공유 `PairingManager` 에서 지운다.
+    pub fn forget_central(&mut self, central: &CentralId) {
+        self.snapshot_senders.remove(central);
     }
 
-    pub fn paired_peers(&self) -> Vec<pairing::PairedPeer> {
-        self.pairing.paired_peers()
-    }
-
-    pub fn stored_peers(&self) -> Vec<peers::StoredPeer> {
-        self.pairing
-            .issued_peers()
-            .into_iter()
-            .map(|(token, paired_at)| peers::StoredPeer { token, paired_at })
-            .collect()
-    }
-
-    pub fn load_peers(&mut self, peers: Vec<peers::StoredPeer>) {
-        self.pairing
-            .load_peers(peers.into_iter().map(|p| (p.token, p.paired_at)).collect());
-    }
-
-    pub fn unpair_peer(&mut self, peer_id: &str) -> Vec<CentralId> {
-        let dropped = self.pairing.revoke_peer(peer_id);
-        for id in &dropped {
+    /// BLE 의 `drop_sessions` 와 같다 — 앱이 언페어링 후 두 브릿지 모두에
+    /// 같은 목록을 넘기며, 모르는 id 는 무시된다.
+    pub fn drop_sessions(&mut self, ids: &[CentralId]) {
+        for id in ids {
             self.snapshot_senders.remove(id);
         }
-        dropped
-    }
-
-    pub fn unpair_all(&mut self) -> Vec<CentralId> {
-        let dropped = self.pairing.revoke_all();
-        self.snapshot_senders.clear();
-        dropped
-    }
-
-    /// 연결이 끊긴 central 의 세션 인가와 스냅샷 전송 채널을 지운다. 저장된
-    /// 토큰 자체는 지우지 않는다 — 같은 토큰으로 재연결하면 즉시 재인가된다.
-    pub fn forget_central(&mut self, central: &CentralId) {
-        self.pairing.end_session(central);
-        self.snapshot_senders.remove(central);
     }
 
     /// 제어 스트림(bi-stream) 하나에서 읽은 바이트를 처리한다. I/O 는 호출부
     /// 책임이다 — 이 메서드는 `ble::mod::BleBridge::handle_auth` 와 마찬가지로
     /// 동기 상태 기계 호출일 뿐이다.
-    pub fn handle_auth(&mut self, central: &CentralId, data: &[u8], now: SystemTime) -> AuthOutcome {
+    pub fn handle_auth(
+        &mut self,
+        central: &CentralId,
+        data: &[u8],
+        now: SystemTime,
+        pairing: &mut PairingManager,
+    ) -> AuthOutcome {
         let req = pairing::parse_auth_request(data);
-        let reply = self.pairing.handle(central, req, now);
+        let reply = pairing.handle(central, req, now);
         let payload = reply.to_json_bytes();
         let now_authorized = matches!(reply, AuthReply::Granted { .. } | AuthReply::Authorized);
-        let persist = match &reply {
-            AuthReply::Granted { .. } => Some(self.stored_peers()),
-            _ => None,
-        };
-        AuthOutcome { payload, now_authorized, persist }
+        let granted = matches!(reply, AuthReply::Granted { .. });
+        AuthOutcome { payload, now_authorized, granted }
     }
 
     /// `Granted`/`Authorized` 응답 직후, accept 루프가 새로 연 uni-stream 을
@@ -305,11 +280,15 @@ mod tests {
 
         let bridge = Arc::new(Mutex::new(NetworkBridge::new()));
         bridge.lock().await.set_enabled(true);
+        // 페어링은 앱이 소유하고 두 전송이 공유한다(2026-08-25 스펙 3장) —
+        // 테스트도 그 모양 그대로 주입한다.
+        let pairing = Arc::new(Mutex::new(PairingManager::new()));
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
-        let code = bridge.lock().await.begin_pairing(now);
+        let code = pairing.lock().await.begin_pairing(now);
 
         let server_ep_for_task = server_ep.clone();
         let bridge_for_task = bridge.clone();
+        let pairing_for_task = pairing.clone();
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         let server_task = tokio::spawn(async move {
             let incoming = server_ep_for_task.accept().await.expect("incoming");
@@ -319,14 +298,20 @@ mod tests {
             // HELLO
             let (mut send, mut recv) = conn.accept_bi().await.expect("accept_bi #1");
             let req = recv.read_to_end(4096).await.expect("read HELLO");
-            let outcome = bridge_for_task.lock().await.handle_auth(&central, &req, now);
+            let outcome = {
+                let mut p = pairing_for_task.lock().await;
+                bridge_for_task.lock().await.handle_auth(&central, &req, now, &mut p)
+            };
             send.write_all(&outcome.payload).await.expect("write HELLO reply");
             send.finish().expect("finish HELLO reply");
 
             // CODE:<code>
             let (mut send, mut recv) = conn.accept_bi().await.expect("accept_bi #2");
             let req = recv.read_to_end(4096).await.expect("read CODE");
-            let outcome = bridge_for_task.lock().await.handle_auth(&central, &req, now);
+            let outcome = {
+                let mut p = pairing_for_task.lock().await;
+                bridge_for_task.lock().await.handle_auth(&central, &req, now, &mut p)
+            };
             send.write_all(&outcome.payload).await.expect("write CODE reply");
             send.finish().expect("finish CODE reply");
             assert!(outcome.now_authorized, "CODE 성공은 인가로 이어져야 한다");
@@ -355,7 +340,7 @@ mod tests {
         let _ = done_tx.send(());
         server_task.await.expect("server task join");
 
-        let stored = bridge.lock().await.stored_peers();
+        let stored = pairing.lock().await.issued_peers();
         assert_eq!(stored.len(), 1, "페어링 성공 후 저장할 피어가 하나 있어야 한다");
     }
 }

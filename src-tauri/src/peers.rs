@@ -1,5 +1,10 @@
 //! 페어링 토큰 영속화. 앱 설정 디렉토리(`config_dir()`) 규약을 따른다.
 //!
+//! **BLE 와 네트워크가 이 저장소를 공유한다**(2026-08-25 스펙 5장). 예전에는
+//! 전송마다 파일이 따로였는데(`ble-peers.json` / `network-peers.json`), 페어링
+//! 자체가 앱 레벨로 올라가면서 토큰 집합도 하나가 됐다 — 토큰이 곧 기기
+//! 정체성이므로(`peer_id = hex(SHA-256(토큰))[..8]`) 전송별로 나뉠 이유가 없다.
+//!
 //! 저장은 임시 파일에 쓴 뒤 rename 한다. 쓰는 도중 앱이 죽어도 기존 파일이
 //! 반쯤 덮인 채로 남지 않게 하기 위함이다 — 토큰이 깨지면 이미 페어링한
 //! 기기가 전부 재페어링을 요구받는다. `rename` 은 대상 파일을 다른 inode 로
@@ -43,9 +48,63 @@ pub struct PeerStore;
 
 impl PeerStore {
     pub fn path() -> PathBuf {
-        dirs_next::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("ai-agent-monitor/ble-peers.json")
+        Self::config_dir().join("ai-agent-monitor/paired-peers.json")
+    }
+
+    /// 통합 이전에 BLE 전송이 쓰던 파일. 마이그레이션에서만 읽는다.
+    pub fn legacy_ble_path() -> PathBuf {
+        Self::config_dir().join("ai-agent-monitor/ble-peers.json")
+    }
+
+    /// 통합 이전에 네트워크 전송이 쓰던 파일. 마이그레이션에서만 읽는다.
+    pub fn legacy_network_path() -> PathBuf {
+        Self::config_dir().join("ai-agent-monitor/network-peers.json")
+    }
+
+    fn config_dir() -> PathBuf {
+        dirs_next::config_dir().unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// 통합 저장소를 읽는다. 아직 없으면 옛 두 파일을 합쳐 만들어 둔다 —
+    /// 기존 사용자가 재페어링하지 않아도 되도록.
+    ///
+    /// 같은 토큰이 양쪽에 있으면 `paired_at` 이 **이른 쪽**을 남긴다(그 기기를
+    /// 처음 페어링한 시각이 맞다). 옛 파일은 지우지 않는다 — 이 버전을 되돌릴
+    /// 여지를 남긴다.
+    ///
+    /// 마이그레이션 저장이 실패해도 읽어낸 목록은 그대로 돌려준다. 이번 실행은
+    /// 정상 동작하고 다음 실행에서 다시 시도된다 — 여기서 죽으면 페어링이
+    /// 전부 사라진 것처럼 보인다.
+    pub fn load_or_migrate(
+        path: &Path,
+        legacy_ble: &Path,
+        legacy_network: &Path,
+    ) -> LoadOutcome {
+        match Self::load_from(path) {
+            LoadOutcome::Missing => {}
+            outcome => return outcome,
+        }
+
+        let mut merged: Vec<StoredPeer> = Vec::new();
+        for legacy in [legacy_ble, legacy_network] {
+            let LoadOutcome::Loaded(peers) = Self::load_from(legacy) else {
+                continue;
+            };
+            for peer in peers {
+                match merged.iter_mut().find(|m| m.token == peer.token) {
+                    Some(existing) => existing.paired_at = existing.paired_at.min(peer.paired_at),
+                    None => merged.push(peer),
+                }
+            }
+        }
+
+        if merged.is_empty() {
+            return LoadOutcome::Missing;
+        }
+        if let Err(e) = Self::save_to(path, &merged) {
+            tracing::error!(%e, "통합 페어링 저장소 마이그레이션 저장 실패");
+        }
+        LoadOutcome::Loaded(merged)
     }
 
     /// 파일이 없으면 `Missing`, 손상됐으면 `Corrupt`(원인 포함), 정상이면
@@ -128,8 +187,106 @@ mod tests {
     #[test]
     fn path_follows_existing_config_convention() {
         let p = PeerStore::path();
-        assert!(p.ends_with("ai-agent-monitor/ble-peers.json"),
+        assert!(p.ends_with("ai-agent-monitor/paired-peers.json"),
                 "앱 설정 디렉토리 아래여야 한다: {p:?}");
+        assert!(PeerStore::legacy_ble_path().ends_with("ai-agent-monitor/ble-peers.json"));
+        assert!(PeerStore::legacy_network_path().ends_with("ai-agent-monitor/network-peers.json"));
+    }
+
+    // ── 통합 저장소 마이그레이션 (2026-08-25 스펙 5장) ──
+
+    fn peer(token_char: char, paired_at: u64) -> StoredPeer {
+        StoredPeer { token: token_char.to_string().repeat(32), paired_at }
+    }
+
+    #[test]
+    fn migration_merges_both_legacy_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (new, ble, net) = (
+            dir.path().join("paired-peers.json"),
+            dir.path().join("ble-peers.json"),
+            dir.path().join("network-peers.json"),
+        );
+        PeerStore::save_to(&ble, &[peer('a', 100)]).unwrap();
+        PeerStore::save_to(&net, &[peer('b', 200)]).unwrap();
+
+        let LoadOutcome::Loaded(mut merged) = PeerStore::load_or_migrate(&new, &ble, &net) else {
+            panic!("합쳐진 목록이 나와야 한다");
+        };
+        merged.sort_by(|x, y| x.token.cmp(&y.token));
+        assert_eq!(merged, vec![peer('a', 100), peer('b', 200)]);
+
+        // 다음 실행부터는 통합 파일만 읽도록 실제로 저장돼 있어야 한다.
+        assert_eq!(PeerStore::load_from(&new), LoadOutcome::Loaded(merged));
+        assert!(ble.exists() && net.exists(), "옛 파일은 지우지 않는다 — 되돌릴 여지");
+    }
+
+    #[test]
+    fn migration_keeps_the_earlier_paired_at_for_a_shared_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let (new, ble, net) = (
+            dir.path().join("paired-peers.json"),
+            dir.path().join("ble-peers.json"),
+            dir.path().join("network-peers.json"),
+        );
+        PeerStore::save_to(&ble, &[peer('a', 500)]).unwrap();
+        PeerStore::save_to(&net, &[peer('a', 100)]).unwrap();
+
+        let LoadOutcome::Loaded(merged) = PeerStore::load_or_migrate(&new, &ble, &net) else {
+            panic!()
+        };
+        assert_eq!(merged, vec![peer('a', 100)], "처음 페어링한 시각이 맞다");
+    }
+
+    #[test]
+    fn migration_does_not_run_when_the_unified_file_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let (new, ble, net) = (
+            dir.path().join("paired-peers.json"),
+            dir.path().join("ble-peers.json"),
+            dir.path().join("network-peers.json"),
+        );
+        PeerStore::save_to(&new, &[peer('c', 1)]).unwrap();
+        PeerStore::save_to(&ble, &[peer('a', 100)]).unwrap();
+
+        assert_eq!(
+            PeerStore::load_or_migrate(&new, &ble, &net),
+            LoadOutcome::Loaded(vec![peer('c', 1)]),
+            "통합 파일이 있으면 옛 파일을 읽지 않는다(마이그레이션은 1회)"
+        );
+    }
+
+    #[test]
+    fn migration_reports_missing_when_there_is_nothing_anywhere() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            PeerStore::load_or_migrate(
+                &dir.path().join("paired-peers.json"),
+                &dir.path().join("ble-peers.json"),
+                &dir.path().join("network-peers.json"),
+            ),
+            LoadOutcome::Missing,
+            "첫 실행 — 없는 게 정상이고 파일을 만들지도 않는다"
+        );
+        assert!(!dir.path().join("paired-peers.json").exists());
+    }
+
+    #[test]
+    fn migration_survives_one_corrupt_legacy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (new, ble, net) = (
+            dir.path().join("paired-peers.json"),
+            dir.path().join("ble-peers.json"),
+            dir.path().join("network-peers.json"),
+        );
+        std::fs::write(&ble, b"not json").unwrap();
+        PeerStore::save_to(&net, &[peer('b', 200)]).unwrap();
+
+        assert_eq!(
+            PeerStore::load_or_migrate(&new, &ble, &net),
+            LoadOutcome::Loaded(vec![peer('b', 200)]),
+            "한쪽이 깨져도 나머지는 살린다"
+        );
     }
 
     #[test]

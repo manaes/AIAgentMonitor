@@ -326,6 +326,20 @@ impl PairingManager {
         self.authorized.clear();
     }
 
+    /// 주어진 central 들의 세션 인가만 내린다. 저장된 토큰은 남긴다.
+    ///
+    /// BLE 와 네트워크가 이 매니저를 **공유**하므로(2026-08-25 스펙), 전송 하나를
+    /// 끌 때 `end_all_sessions` 를 쓰면 다른 전송의 세션까지 죽는다. 각 전송은
+    /// 자기가 서비스 중이던 central 목록만 넘긴다.
+    ///
+    /// 모르는 id 는 조용히 무시한다 — 언페어링 시 앱은 그 central 이 어느 전송에
+    /// 붙어 있었는지 모르는 채로 두 브릿지 모두에 같은 목록을 넘기기 때문이다.
+    pub fn end_sessions(&mut self, ids: &[CentralId]) {
+        for id in ids {
+            self.end_session(id);
+        }
+    }
+
     /// 화면에 표시할 코드. 만료됐으면 None — UI 가 따로 만료를 계산하지
     /// 않게 한다.
     pub fn visible_code(&self, now: SystemTime) -> Option<String> {
@@ -919,6 +933,91 @@ mod tests {
     }
 
     #[test]
+    /// 전송 하나를 끌 때, 그 전송이 서비스 중이던 central 만 정리해야 한다.
+    /// BLE 와 네트워크가 하나의 PairingManager 를 공유하므로(2026-08-25 스펙 4장),
+    /// end_all_sessions 를 쓰면 BLE 를 끄는 순간 네트워크 세션까지 죽는다.
+    // ── 두 전송이 공유하는 창 (2026-08-25 스펙 9장) ──
+
+    /// 이 설계의 **핵심 보안 성질**: 시도 예산은 창 하나에 묶여 있으므로,
+    /// 공격자가 BLE 와 네트워크로 나눠 들어와도 합쳐서 5회다. 전송마다 매니저를
+    /// 따로 두면 5+5 가 되어 원 스펙 5.2 의 근거가 약해진다.
+    #[test]
+    fn attempt_budget_is_shared_across_transports() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+
+        // BLE 쪽에서 3회, 네트워크 쪽에서 2회 — central 네임스페이스가 다르다.
+        for (idx, expected_left) in [4u8, 3, 2].into_iter().enumerate() {
+            let r = m.handle(&id(&format!("BLE-{idx}")), AuthRequest::Code(wrong_code(&code)), t(1000));
+            assert!(matches!(r, AuthReply::Denied { left } if left == expected_left), "{r:?}");
+        }
+        for (idx, expected_left) in [1u8, 0].into_iter().enumerate() {
+            let r = m.handle(&id(&format!("NET-{idx}")), AuthRequest::Code(wrong_code(&code)), t(1000));
+            assert!(matches!(r, AuthReply::Denied { left } if left == expected_left), "{r:?}");
+        }
+
+        assert!(
+            matches!(m.handle(&id("NET-9"), AuthRequest::Code(code), t(1001)), AuthReply::Rejected),
+            "합쳐서 5회면 창이 소진된다 — 전송을 바꿔도 예산이 늘지 않는다"
+        );
+    }
+
+    /// Mac 저장소가 하나이므로, BLE 의 `CODE:` 로 발급된 토큰을 네트워크 쪽
+    /// `PROOF` 로 검증해도 통과한다. (폰이 전송을 가로지를 수 있다는 뜻은
+    /// 아니다 — iOS Keychain 은 전송별로 분리돼 있다, 스펙 2장·10장)
+    #[test]
+    fn a_token_issued_on_one_transport_verifies_on_the_other() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let AuthReply::Granted { token } = m.handle(&id("BLE-A"), AuthRequest::Code(code), t(1001))
+        else {
+            panic!("BLE 로 페어링")
+        };
+
+        // 같은 토큰으로 네트워크 쪽 central 이 재인증한다.
+        let AuthReply::Nonce { nonce } = m.handle(&id("NET-B"), AuthRequest::Auth, t(1002)) else {
+            panic!()
+        };
+        assert_eq!(
+            m.handle(&id("NET-B"), AuthRequest::Proof(compute_proof(&token, &nonce)), t(1003)),
+            AuthReply::Authorized,
+            "저장소가 하나이므로 전송이 달라도 같은 토큰으로 인증된다"
+        );
+    }
+
+    #[test]
+    fn end_sessions_only_drops_the_given_centrals() {
+        let mut m = PairingManager::new();
+        let code_a = m.begin_pairing(t(1000));
+        m.handle(&id("BLE-A"), AuthRequest::Code(code_a), t(1001));
+        let code_b = m.begin_pairing(t(2000));
+        m.handle(&id("NET-B"), AuthRequest::Code(code_b), t(2001));
+        assert!(m.is_authorized(&id("BLE-A")));
+        assert!(m.is_authorized(&id("NET-B")));
+
+        m.end_sessions(&[id("BLE-A")]);
+
+        assert!(!m.is_authorized(&id("BLE-A")), "넘긴 central 은 인가가 내려간다");
+        assert!(
+            m.is_authorized(&id("NET-B")),
+            "다른 전송의 세션은 살아 있어야 한다 — 이게 end_all_sessions 와의 차이다"
+        );
+        assert_eq!(m.issued_peers().len(), 2, "토큰은 둘 다 남는다");
+    }
+
+    /// 없는 id 를 넘겨도 조용히 무시한다 — 앱은 언페어링된 central 이 어느
+    /// 전송에 붙어 있었는지 모르는 채로 두 브릿지 모두에 넘기기 때문이다.
+    #[test]
+    fn end_sessions_ignores_unknown_centrals() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        m.handle(&id("A"), AuthRequest::Code(code), t(1001));
+
+        m.end_sessions(&[id("NOBODY")]);
+
+        assert!(m.is_authorized(&id("A")));
+    }
+
     fn end_all_sessions_drops_authorization_but_keeps_tokens() {
         let mut m = PairingManager::new();
         let code_a = m.begin_pairing(t(1000));

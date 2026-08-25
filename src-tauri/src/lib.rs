@@ -1,4 +1,5 @@
 mod aggregator;
+mod peers;
 mod ble;
 mod clock;
 mod emitter;
@@ -49,10 +50,26 @@ pub struct BleStatus {
     pub advertising: bool,
     pub peers: Vec<BlePeer>,
     pub last_error: Option<String>,
+}
+
+/// BLE 와 네트워크가 공유하는 페어링 상태(2026-08-25 스펙). 전송별 status 에
+/// 중복으로 싣지 않고 여기 한 곳에서만 내보낸다 — 창도 기기 목록도 하나다.
+pub type SharedPairing = Arc<Mutex<ble::pairing::PairingManager>>;
+
+#[derive(Clone, serde::Serialize)]
+pub struct PairingStatus {
     /// 페어링 창 상태. UI 가 만료와 시도 소진을 구분해 보여줘야 한다 — 소진이
     /// 보인다는 것이 창에 소유자를 두지 않기로 한 근거의 절반이다(스펙 5.1).
     pub pairing_window: ble::pairing::PairingWindow,
     pub paired_peers: Vec<ble::pairing::PairedPeer>,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct PairingInfo {
+    pub code: String,
+    /// 네트워크 공유가 켜져 있을 때만 Some — 폰이 QR 로 스캔할 페이로드다.
+    /// BLE 만 켜져 있으면 QR 을 그릴 이유가 없다.
+    pub qr_payload: Option<String>,
 }
 
 pub struct BleHandle {
@@ -77,60 +94,33 @@ async fn ble_status(state: tauri::State<'_, Arc<BleHandle>>) -> Result<BleStatus
         .collect();
     #[cfg(not(target_os = "macos"))]
     let peers = Vec::new();
-    let now = std::time::SystemTime::now();
     Ok(BleStatus {
         supported: BLE_SUPPORTED,
         enabled: bridge.is_enabled(),
         advertising: state.advertising.load(Ordering::Relaxed),
         peers,
         last_error: state.last_error.lock().unwrap().clone(),
-        pairing_window: bridge.pairing_window(now),
-        paired_peers: bridge.paired_peers(),
     })
-}
-
-/// 사용자가 Devices 탭에서 [페어링 시작] 을 눌렀을 때만 호출한다. 이 버튼이
-/// 없으면 3단계의 보안 근거(스펙 5.1: 코드는 사용자 제스처에서만 발급)가
-/// 성립하지 않는다 — 반환된 코드는 `BleStatus.pairing_window` 로만 화면에
-/// 흐르고, BLE 로는 절대 나가지 않는다.
-#[tauri::command]
-async fn ble_begin_pairing(state: tauri::State<'_, Arc<BleHandle>>) -> Result<(), String> {
-    let mut bridge = state.bridge.lock().await;
-    bridge.begin_pairing(std::time::SystemTime::now());
-    Ok(())
-}
-
-/// 기기 하나만 해제한다(스펙 6장). `peer_id` 는 토큰에서 파생된 8자 hex 이며,
-/// 토큰 자체는 프론트엔드로 나가지 않는다.
-#[tauri::command]
-async fn ble_unpair(peer_id: String, state: tauri::State<'_, Arc<BleHandle>>) -> Result<(), String> {
-    let mut bridge = state.bridge.lock().await;
-    bridge.unpair_peer(&peer_id);
-    let path = ble::peers::PeerStore::path();
-    ble::peers::PeerStore::save_to(&path, &bridge.stored_peers()).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn ble_unpair_all(state: tauri::State<'_, Arc<BleHandle>>) -> Result<(), String> {
-    let mut bridge = state.bridge.lock().await;
-    bridge.unpair_all();
-    let path = ble::peers::PeerStore::path();
-    ble::peers::PeerStore::save_to(&path, &[]).map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 #[tauri::command]
 async fn ble_set_enabled(
     enabled: bool,
     state: tauri::State<'_, Arc<BleHandle>>,
-    network_state: tauri::State<'_, Arc<NetworkHandle>>,
+    pairing: tauri::State<'_, SharedPairing>,
 ) -> Result<(), String> {
-    if enabled && network_state.bridge.lock().await.is_enabled() {
-        return Err("네트워크 공유가 켜져 있습니다. 먼저 꺼주세요.".to_string());
-    }
-    let result = state.bridge.lock().await.set_enabled(enabled);
+    // 네트워크와 동시에 켤 수 있다(2026-08-25 스펙) — 예전의 상호 배타 가드는
+    // 페어링 창이 전송별로 쪼개지는 걸 막으려던 것인데, 이제 창을 공유하므로
+    // 그 이유가 사라졌다.
+    let mut bridge = state.bridge.lock().await;
+    // 끄기 전에 이 전송이 서비스 중이던 central 을 받아둔다 — stop() 뒤에는
+    // 구독자 목록이 비어 알 수 없다. 공유 매니저에서 **이 전송의 세션만**
+    // 내려야 네트워크 세션이 살아남는다(스펙 4장).
+    let served = if enabled { Vec::new() } else { bridge.served_centrals() };
+    let result = bridge.set_enabled(enabled);
+    drop(bridge);
     if !enabled {
+        pairing.lock().await.end_sessions(&served);
         state.advertising.store(false, Ordering::Relaxed);
         *state.last_error.lock().unwrap() = None;
     }
@@ -156,16 +146,6 @@ pub struct NetworkStatus {
     /// 이 Mac의 iroh EndpointId(공개키). QR 없이도 디버그용으로 노출한다.
     pub endpoint_id: String,
     pub last_error: Option<String>,
-    pub pairing_window: ble::pairing::PairingWindow,
-    pub paired_peers: Vec<ble::pairing::PairedPeer>,
-}
-
-#[derive(Clone, serde::Serialize)]
-pub struct NetworkPairingInfo {
-    pub code: String,
-    /// iOS가 스캔해 파싱할 페이로드 — EndpointId와 그 순간의 페어링 코드를
-    /// 함께 담아, 스캔 한 번으로 dial과 CODE: 제출이 자동으로 끝나게 한다.
-    pub qr_payload: String,
 }
 
 pub struct NetworkHandle {
@@ -177,14 +157,11 @@ pub struct NetworkHandle {
 #[tauri::command]
 async fn network_status(state: tauri::State<'_, Arc<NetworkHandle>>) -> Result<NetworkStatus, String> {
     let bridge = state.bridge.lock().await;
-    let now = std::time::SystemTime::now();
     Ok(NetworkStatus {
         supported: NETWORK_SUPPORTED,
         enabled: bridge.is_enabled(),
         endpoint_id: state.endpoint.id().to_string(),
         last_error: state.last_error.lock().unwrap().clone(),
-        pairing_window: bridge.pairing_window(now),
-        paired_peers: bridge.paired_peers(),
     })
 }
 
@@ -212,24 +189,27 @@ async fn wait_for_addr(ep: &iroh::Endpoint) -> iroh::EndpointAddr {
     ep.addr()
 }
 
-/// BLE `ble_begin_pairing` 과 같은 제약 — 사용자가 명시적으로 페어링을
-/// 시작할 때만 호출한다.
-#[tauri::command]
-async fn network_begin_pairing(
-    state: tauri::State<'_, Arc<NetworkHandle>>,
-) -> Result<NetworkPairingInfo, String> {
-    let mut bridge = state.bridge.lock().await;
-    let code = bridge.begin_pairing(std::time::SystemTime::now());
-    drop(bridge);
+/// 공유 페어링 저장소를 디스크에 쓴다. 실패는 호출자가 last_error 로 올린다.
+async fn save_paired_peers(pairing: &SharedPairing) -> Result<(), String> {
+    let stored: Vec<peers::StoredPeer> = pairing
+        .lock()
+        .await
+        .issued_peers()
+        .into_iter()
+        .map(|(token, paired_at)| peers::StoredPeer { token, paired_at })
+        .collect();
+    peers::PeerStore::save_to(&peers::PeerStore::path(), &stored).map_err(|e| e.to_string())
+}
 
+/// QR 페이로드를 만든다. 네트워크 공유가 켜져 있을 때만 부른다.
+async fn build_qr_payload(handle: &NetworkHandle, code: &str) -> String {
     // iOS 의 EndpointId 는 raw 32바이트로만 만들 수 있어(fromBytes) hex 로
     // 인코딩한다 — iroh 의 z32 Display 포맷을 Swift 쪽에서 다시 파싱할 필요가
     // 없어지고, 기존 PairingClient.swift 의 Data(hexString:) 를 그대로 재사용한다.
     // relay URL/주소 문자열도 같은 이유로 전부 hex 로 실어 퍼센트 인코딩을
     // 아예 피한다.
-    let endpoint_id_hex = hex_encode(state.endpoint.id().as_bytes());
-
-    let addr = wait_for_addr(&state.endpoint).await;
+    let endpoint_id_hex = hex_encode(handle.endpoint.id().as_bytes());
+    let addr = wait_for_addr(&handle.endpoint).await;
     let mut params = vec![format!("endpoint={endpoint_id_hex}"), format!("code={code}")];
     for a in &addr.addrs {
         match a {
@@ -242,34 +222,81 @@ async fn network_begin_pairing(
             _ => {}
         }
     }
-    let qr_payload = format!("aim://pair?{}", params.join("&"));
-    Ok(NetworkPairingInfo { code, qr_payload })
+    format!("aim://pair?{}", params.join("&"))
 }
 
+/// 공유 페어링 상태를 읽는다. 창도 기기 목록도 하나뿐이라 전송별 status 와
+/// 분리해 여기서만 내보낸다(2026-08-25 스펙 6장).
 #[tauri::command]
-async fn network_unpair(
-    peer_id: String,
-    state: tauri::State<'_, Arc<NetworkHandle>>,
+async fn pairing_status(
+    pairing: tauri::State<'_, SharedPairing>,
+) -> Result<PairingStatus, String> {
+    let now = std::time::SystemTime::now();
+    let p = pairing.lock().await;
+    Ok(PairingStatus {
+        pairing_window: p.pairing_window(now),
+        paired_peers: p.paired_peers(),
+    })
+}
+
+/// 사용자가 Devices 탭에서 [페어링 시작] 을 눌렀을 때만 호출한다. 이 버튼이
+/// 없으면 보안 근거(스펙 5.1: 코드는 사용자 제스처에서만 발급)가 성립하지
+/// 않는다 — 코드는 `pairing_status` 로만 화면에 흐르고 링크로는 나가지 않는다.
+///
+/// 창은 **두 전송이 공유한다**. 켜져 있는 전송에 맞는 것만 돌려준다 — BLE 만
+/// 켜져 있으면 QR 은 None 이다(그릴 이유가 없다).
+#[tauri::command]
+async fn begin_pairing(
+    pairing: tauri::State<'_, SharedPairing>,
+    network_state: tauri::State<'_, Arc<NetworkHandle>>,
+) -> Result<PairingInfo, String> {
+    let code = pairing.lock().await.begin_pairing(std::time::SystemTime::now());
+    let network_on = network_state.bridge.lock().await.is_enabled();
+    let qr_payload = if network_on {
+        Some(build_qr_payload(&network_state, &code).await)
+    } else {
+        None
+    };
+    Ok(PairingInfo { code, qr_payload })
+}
+
+/// 저장소를 갱신하고, 내려간 세션을 **두 브릿지 모두**에 알린다. 그 central 이
+/// 어느 전송에 붙어 있었는지 앱은 모르고 알 필요도 없다 — 모르는 id 는 무시된다.
+async fn persist_and_drop(
+    pairing: &SharedPairing,
+    ble_state: &Arc<BleHandle>,
+    network_state: &Arc<NetworkHandle>,
+    dropped: Vec<ble::peripheral::CentralId>,
 ) -> Result<(), String> {
-    let mut bridge = state.bridge.lock().await;
-    bridge.unpair_peer(&peer_id);
-    let path = network::peers::path();
-    network::peers::PeerStore::save_to(&path, &bridge.stored_peers()).map_err(|e| e.to_string())?;
+    save_paired_peers(pairing).await?;
+    ble_state.bridge.lock().await.drop_sessions(&dropped);
+    network_state.bridge.lock().await.drop_sessions(&dropped);
     Ok(())
+}
+
+/// 기기 하나만 해제한다(스펙 6장). `peer_id` 는 토큰에서 파생된 8자 hex 이며,
+/// 토큰 자체는 프론트엔드로 나가지 않는다.
+#[tauri::command]
+async fn unpair(
+    peer_id: String,
+    pairing: tauri::State<'_, SharedPairing>,
+    ble_state: tauri::State<'_, Arc<BleHandle>>,
+    network_state: tauri::State<'_, Arc<NetworkHandle>>,
+) -> Result<(), String> {
+    let dropped = pairing.lock().await.revoke_peer(&peer_id);
+    persist_and_drop(&pairing, &ble_state, &network_state, dropped).await
 }
 
 #[tauri::command]
-async fn network_unpair_all(state: tauri::State<'_, Arc<NetworkHandle>>) -> Result<(), String> {
-    let mut bridge = state.bridge.lock().await;
-    bridge.unpair_all();
-    let path = network::peers::path();
-    network::peers::PeerStore::save_to(&path, &[]).map_err(|e| e.to_string())?;
-    Ok(())
+async fn unpair_all(
+    pairing: tauri::State<'_, SharedPairing>,
+    ble_state: tauri::State<'_, Arc<BleHandle>>,
+    network_state: tauri::State<'_, Arc<NetworkHandle>>,
+) -> Result<(), String> {
+    let dropped = pairing.lock().await.revoke_all();
+    persist_and_drop(&pairing, &ble_state, &network_state, dropped).await
 }
 
-/// "공유"는 BLE/네트워크 중 하나만 켤 수 있다 — 둘 다 동시에 켜지면 사용자가
-/// 어느 쪽으로 페어링했는지 헷갈리고, 페어링 창(코드)이 두 화면에 따로
-/// 떠서 스펙 5.1의 "창은 하나" 전제가 전송별로 두 개가 된다.
 #[tauri::command]
 async fn network_set_enabled(
     enabled: bool,
@@ -577,6 +604,10 @@ pub fn run() {
     let settings_state = Arc::new(Mutex::new(
         settings::SettingsStore::load_from(&settings::SettingsStore::path()),
     ));
+    // BLE 와 네트워크가 공유하는 페어링 상태(2026-08-25 스펙). 창 하나, 코드 하나,
+    // 시도 예산 하나 — 그래야 원 스펙 5.2 의 무차별 대입 근거가 두 전송에 걸쳐
+    // 그대로 성립한다(공격자는 어느 전송으로 오든 같은 5회를 나눠 쓴다).
+    let shared_pairing: SharedPairing = Arc::new(Mutex::new(ble::pairing::PairingManager::new()));
 
     // 앱 시작 시 즉시 한 번 핑 (persisted 캐시가 낡았을 수 있으므로)
     tauri::async_runtime::spawn(async move {
@@ -652,14 +683,14 @@ pub fn run() {
             sync_quota,
             ble_status,
             ble_set_enabled,
-            ble_begin_pairing,
-            ble_unpair,
-            ble_unpair_all,
             network_status,
             network_set_enabled,
-            network_begin_pairing,
-            network_unpair,
-            network_unpair_all,
+            // 페어링은 두 전송이 공유한다(2026-08-25 스펙) — 전송별 커맨드가
+            // 아니라 앱 레벨 커맨드 하나씩이다.
+            pairing_status,
+            begin_pairing,
+            unpair,
+            unpair_all,
             get_settings,
             set_enabled_agents,
         ])
@@ -670,9 +701,11 @@ pub fn run() {
             let codex_quota = codex_quota.clone();
             let antigravity_quota = antigravity_quota.clone();
             let settings_state = settings_state.clone();
+            let shared_pairing = shared_pairing.clone();
             move |app| {
                 use tauri::Manager;
                 app.manage(settings_state.clone());
+                app.manage(shared_pairing.clone());
                 // Dock 아이콘 숨김 — setup 초반에 호출
                 #[cfg(target_os = "macos")]
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -743,24 +776,6 @@ pub fn run() {
                     app.manage(ble_handle.clone());
                 }
 
-                // 앱 시작 시 이미 페어링한 기기 목록을 복원한다. 파일이 없으면(첫 실행)
-                // 조용히 넘어가고, 손상됐으면(Task 2) tracing 이 전부 버려지는 이
-                // 앱에서 사용자가 알 수 있는 유일한 경로인 last_error 에 싣는다.
-                {
-                    let path = ble::peers::PeerStore::path();
-                    match ble::peers::PeerStore::load_from(&path) {
-                        ble::peers::LoadOutcome::Missing => {}
-                        ble::peers::LoadOutcome::Loaded(peers) => {
-                            ble_handle.bridge.blocking_lock().load_peers(peers);
-                        }
-                        ble::peers::LoadOutcome::Corrupt { detail } => {
-                            ble_handle.last_error.lock().unwrap().replace(format!(
-                                "저장된 페어링 목록이 손상돼 초기화됐습니다: {detail}"
-                            ));
-                        }
-                    }
-                }
-
                 // 네트워크(iroh) Endpoint 는 앱 시작 시 한 번만 bind 한다 — BLE 의
                 // advertise on/off 와 달리 iroh 소켓 자체를 껐다 켜는 개념이 없고,
                 // "공유"가 꺼져 있는 동안은 아래 accept 루프가 들어오는 연결을
@@ -787,17 +802,26 @@ pub fn run() {
                     app.manage(network_handle.clone());
                 }
 
-                // 앱 시작 시 이미 페어링한 기기 목록을 복원한다(BLE와 같은 규약, 별도 파일).
+                // 앱 시작 시 이미 페어링한 기기 목록을 복원한다. 저장소는 두 전송이
+                // 공유하며(2026-08-25 스펙 5장), 통합 파일이 아직 없으면 옛 두 파일을
+                // 합쳐 만든다 — 기존 사용자가 재페어링하지 않아도 되도록.
+                // 파일이 없으면(첫 실행) 조용히 넘어가고, 손상됐으면 tracing 이 전부
+                // 버려지는 이 앱에서 사용자가 알 수 있는 유일한 경로인 last_error 에 싣는다.
                 {
-                    let path = network::peers::path();
-                    match network::peers::PeerStore::load_from(&path) {
-                        network::peers::LoadOutcome::Missing => {}
-                        network::peers::LoadOutcome::Loaded(peers) => {
-                            network_handle.bridge.blocking_lock().load_peers(peers);
+                    match peers::PeerStore::load_or_migrate(
+                        &peers::PeerStore::path(),
+                        &peers::PeerStore::legacy_ble_path(),
+                        &peers::PeerStore::legacy_network_path(),
+                    ) {
+                        peers::LoadOutcome::Missing => {}
+                        peers::LoadOutcome::Loaded(stored) => {
+                            shared_pairing.blocking_lock().load_peers(
+                                stored.into_iter().map(|p| (p.token, p.paired_at)).collect(),
+                            );
                         }
-                        network::peers::LoadOutcome::Corrupt { detail } => {
-                            network_handle.last_error.lock().unwrap().replace(format!(
-                                "저장된 네트워크 페어링 목록이 손상돼 초기화됐습니다: {detail}"
+                        peers::LoadOutcome::Corrupt { detail } => {
+                            ble_handle.last_error.lock().unwrap().replace(format!(
+                                "저장된 페어링 목록이 손상돼 초기화됐습니다: {detail}"
                             ));
                         }
                     }
@@ -810,6 +834,7 @@ pub fn run() {
                 {
                     let h = network_handle.clone();
                     let app_for_net = app.handle().clone();
+                    let pairing_for_net = shared_pairing.clone();
                     tauri::async_runtime::spawn(async move {
                         loop {
                             let Some(incoming) = h.endpoint.accept().await else {
@@ -817,6 +842,7 @@ pub fn run() {
                             };
                             let h = h.clone();
                             let app_for_net = app_for_net.clone();
+                            let pairing_for_net = pairing_for_net.clone();
                             tauri::async_runtime::spawn(async move {
                                 let conn = match incoming.await {
                                     Ok(c) => c,
@@ -838,18 +864,17 @@ pub fn run() {
                                         Err(_) => break,
                                     };
                                     let now = std::time::SystemTime::now();
-                                    let outcome =
-                                        h.bridge.lock().await.handle_auth(&central, &req, now);
+                                    let outcome = {
+                                        let mut p = pairing_for_net.lock().await;
+                                        h.bridge.lock().await.handle_auth(&central, &req, now, &mut p)
+                                    };
                                     let _ = send.write_all(&outcome.payload).await;
                                     let _ = send.finish();
 
-                                    if let Some(peers) = outcome.persist {
-                                        let path = network::peers::path();
-                                        if let Err(e) =
-                                            network::peers::PeerStore::save_to(&path, &peers)
-                                        {
+                                    if outcome.granted {
+                                        if let Err(e) = save_paired_peers(&pairing_for_net).await {
                                             *h.last_error.lock().unwrap() =
-                                                Some(format!("네트워크 페어링 토큰 저장 실패: {e}"));
+                                                Some(format!("페어링 토큰 저장 실패: {e}"));
                                         }
                                     }
                                     if outcome.now_authorized
@@ -875,6 +900,7 @@ pub fn run() {
                 {
                     let h = ble_handle.clone();
                     let app_for_ble = app.handle().clone();
+                    let pairing_for_ble = shared_pairing.clone();
                     tauri::async_runtime::spawn(async move {
                         while let Some(ev) = ble_rx.recv().await {
                             #[cfg(target_os = "macos")]
@@ -890,7 +916,10 @@ pub fn run() {
                                     // 세션 인가가 실제 연결보다 오래 살아남는다(전체 브랜치
                                     // 리뷰 I-2) — 기기 목록의 "연결됨" 배지가 계속 거짓말하고,
                                     // 전원을 반복해서 껐다 켤 때마다 죽은 central id 가 쌓인다.
-                                    h.bridge.lock().await.end_all_sessions();
+                                    // 공유 매니저이므로 **BLE 가 서비스 중이던 central 만**
+                                    // 내린다 — 전체를 지우면 네트워크 세션까지 죽는다.
+                                    let served = h.bridge.lock().await.served_centrals();
+                                    pairing_for_ble.lock().await.end_sessions(&served);
                                 }
                                 ble::peripheral::PeripheralEvent::Error(e) => {
                                     h.advertising.store(false, Ordering::Relaxed);
@@ -899,22 +928,25 @@ pub fn run() {
                                 }
                                 ble::peripheral::PeripheralEvent::AuthWrite { central, data } => {
                                     let now = std::time::SystemTime::now();
-                                    let saved = h.bridge.lock().await.handle_auth(central, data, now);
-                                    if let Some(tokens) = saved {
-                                        let path = ble::peers::PeerStore::path();
-                                        if let Err(e) = ble::peers::PeerStore::save_to(&path, &tokens) {
-                                            // ble_unpair 류는 Result 로 프론트에 실패를 알리지만, 이
+                                    let granted = {
+                                        let mut p = pairing_for_ble.lock().await;
+                                        h.bridge.lock().await.handle_auth(central, data, now, &mut p)
+                                    };
+                                    if granted {
+                                        if let Err(e) = save_paired_peers(&pairing_for_ble).await {
+                                            // unpair 류는 Result 로 프론트에 실패를 알리지만, 이
                                             // 경로는 사용자 커맨드가 아니라 이벤트 루프라 그 통로가
                                             // 없다 — PeripheralEvent::Error 와 같은 방식으로
                                             // last_error 에 실어야 사용자가 알 수 있다(tracing 출력은
                                             // 이 앱에서 전부 유실된다).
                                             *h.last_error.lock().unwrap() =
                                                 Some(format!("페어링 토큰 저장 실패: {e}"));
-                                            tracing::error!(%e, "ble-peers.json 저장 실패");
                                         }
                                     }
                                 }
                                 ble::peripheral::PeripheralEvent::Disconnected(central) => {
+                                    // 세션 인가는 공유 매니저에서, 전송 자원은 브릿지에서.
+                                    pairing_for_ble.lock().await.end_session(central);
                                     h.bridge.lock().await.forget_central(central);
                                 }
                                 _ => {}
@@ -941,6 +973,7 @@ pub fn run() {
                 let ble_for_tick = ble_handle.clone();
                 let network_for_tick = network_handle.clone();
                 let settings_for_tick = settings_state.clone();
+                let pairing_for_tick = shared_pairing.clone();
                 tauri::async_runtime::spawn(async move {
                     let clock = SystemClock;
                     let mut ticker = tokio::time::interval(Duration::from_millis(250));
@@ -1011,7 +1044,12 @@ pub fn run() {
                         }
                         drop(g);
                         // BLE 미러는 자체 게이트(1Hz)를 가지며, 꺼져 있거나 구독자가 없으면 즉시 반환한다.
-                        ble_for_tick.bridge.lock().await.on_snapshot(&snap, now);
+                        {
+                            // 인가 필터에 공유 페어링 상태가 필요하다. 네트워크는
+                            // snapshot_senders 가 이미 인가된 것만 들고 있어 불필요하다.
+                            let p = pairing_for_tick.lock().await;
+                            ble_for_tick.bridge.lock().await.on_snapshot(&snap, now, &p);
+                        }
                         network_for_tick.bridge.lock().await.on_snapshot(&snap, now).await;
                     }
                 });
