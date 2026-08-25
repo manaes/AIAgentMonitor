@@ -1062,17 +1062,24 @@ pub fn run() {
                         // BLE 미러는 자체 게이트(1Hz)를 가지며, 꺼져 있거나 구독자가 없으면 즉시 반환한다.
                         {
                             // 두 전송 모두 공유 페어링 상태를 **가변으로** 받는다 —
-                            // BLE 는 인가 필터에 더해, 네트워크는 인가 필터 없이도,
-                            // v2 세션의 봉인 카운터를 전진시켜야 하기 때문이다.
-                            // 잠금 순서는 페어링 → 브릿지로, 인증 경로와 같다.
+                            // 인가 필터에 더해 v2 세션의 봉인 카운터를 전진시켜야
+                            // 하기 때문이다. 잠금 순서는 페어링 → 브릿지로,
+                            // 인증 경로와 같다.
                             let mut p = pairing_for_tick.lock().await;
+                            // BLE 는 큐에 넘기고 끝나는 동기 호출이라 잠금 안에서
+                            // 마쳐도 된다. 네트워크는 봉인까지만 여기서 한다.
                             ble_for_tick.bridge.lock().await.on_snapshot(&snap, now, &mut p);
-                            network_for_tick
+                            let lines = network_for_tick
                                 .bridge
                                 .lock()
                                 .await
-                                .on_snapshot(&snap, now, &mut p)
-                                .await;
+                                .prepare_snapshot(&snap, now, &mut p);
+                            // **쓰기 전에 반드시 놓는다.** QUIC 흐름 제어에 막히면
+                            // write_all 이 수십 초 걸릴 수 있고(폰이 백그라운드로
+                            // 가면 흔하다), 그동안 잠금을 쥐고 있으면 페어링
+                            // 시작·BLE/네트워크 인증 처리가 전부 멈춘다.
+                            drop(p);
+                            network_for_tick.bridge.lock().await.send_prepared(lines).await;
                         }
                     }
                 });

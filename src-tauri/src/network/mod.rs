@@ -142,22 +142,27 @@ impl NetworkBridge {
         self.snapshot_senders.contains_key(central)
     }
 
-    /// 스냅샷 틱마다 호출한다. 인가된 central 이 하나도 없거나 꺼져 있으면
-    /// 즉시 반환 — BLE 의 "구독자 없으면 직렬화도 안 함" 과 같은 절약.
+    /// 스냅샷 틱의 **앞쪽 절반** — 이번 틱에 각 central 에게 나갈 줄을 만든다.
+    /// 인가된 central 이 하나도 없거나 꺼져 있으면 빈 목록(BLE 의 "구독자 없으면
+    /// 직렬화도 안 함" 과 같은 절약).
     ///
-    /// `pairing` 이 `&mut` 인 이유는 BLE 쪽과 같다 — 봉인이 채널의 송신 카운터를
-    /// 전진시킨다.
-    pub async fn on_snapshot(
+    /// 쓰기와 나눠 둔 이유는 **페어링 잠금 시간**이다. 봉인에는 `&mut
+    /// PairingManager` 가 필요하지만(카운터가 전진한다) 실제 쓰기에는 필요 없고,
+    /// `SendStream::write_all` 은 QUIC 흐름 제어에 막혀 수십 초씩 걸릴 수 있다 —
+    /// 폰이 백그라운드로 가서 읽기를 멈추면 idle timeout 까지 그렇다. 그동안
+    /// 잠금을 쥐고 있으면 페어링 시작·인증 처리가 통째로 멈춘다. 그래서 호출부는
+    /// 이 함수까지만 잠금 안에서 부르고, 잠금을 놓은 뒤 `send_prepared` 를 부른다.
+    pub fn prepare_snapshot(
         &mut self,
         snap: &Snapshot,
         now: SystemTime,
         pairing: &mut PairingManager,
-    ) {
+    ) -> Vec<(CentralId, Vec<u8>)> {
         if !self.enabled || self.snapshot_senders.is_empty() {
-            return;
+            return Vec::new();
         }
         if !self.gate.should_emit(snap, now) {
-            return;
+            return Vec::new();
         }
 
         let dto = MirrorSnapshot::from(snap);
@@ -166,7 +171,7 @@ impl NetworkBridge {
             Err(e) => {
                 tracing::error!("네트워크 스냅샷 직렬화 실패: {e}");
                 self.gate.reset();
-                return;
+                return Vec::new();
             }
         };
 
@@ -174,10 +179,32 @@ impl NetworkBridge {
         // 만든다. 대상 목록을 먼저 뜨는 것은 `pairing` 을 `&mut` 로 빌리는 동안
         // `snapshot_senders` 를 함께 빌릴 수 없기 때문이다.
         let targets: Vec<CentralId> = self.snapshot_senders.keys().cloned().collect();
-        let mut dead = Vec::new();
+        let mut out = Vec::with_capacity(targets.len());
         for central in targets {
-            let mut line = snapshot_line(pairing, &central, &json);
-            line.push(b'\n');
+            match snapshot_line(pairing, &central, &json) {
+                Some(mut line) => {
+                    line.push(b'\n');
+                    out.push((central, line));
+                }
+                // 인가를 잃은 central 은 스트림에서도 즉시 뺀다 — 다음 틱까지
+                // 기다릴 이유가 없고, 남겨두면 매 틱 같은 판단을 반복한다.
+                None => {
+                    self.snapshot_senders.remove(&central);
+                }
+            }
+        }
+        out
+    }
+
+    /// 스냅샷 틱의 **뒤쪽 절반** — 준비된 줄을 각 스트림에 쓴다. 페어링 잠금
+    /// 없이 돈다(`prepare_snapshot` 의 doc).
+    ///
+    /// 줄을 만든 뒤 여기 오기까지 잠금이 풀려 있으므로 그 사이에 언페어링이
+    /// 끼어들 수 있다. 그때는 `drop_sessions` 가 이미 스트림을 지웠고, 여기서는
+    /// 없는 대상을 조용히 건너뛴다 — 이 조회가 fail-closed 의 두 번째 겹이다.
+    pub async fn send_prepared(&mut self, lines: Vec<(CentralId, Vec<u8>)>) {
+        let mut dead = Vec::new();
+        for (central, line) in lines {
             let Some(sender) = self.snapshot_senders.get_mut(&central) else {
                 continue;
             };
@@ -191,10 +218,21 @@ impl NetworkBridge {
     }
 }
 
-/// 이 central 에게 실제로 나갈 한 줄(줄바꿈은 붙이지 않는다).
+/// 이 central 에게 실제로 나갈 한 줄(줄바꿈은 붙이지 않는다). 인가되지 않았으면
+/// `None` — 한 바이트도 나가면 안 된다.
+///
+/// **인가 검사가 여기 있어야 하는 이유.** `snapshot_senders` 에 들어 있다는 것은
+/// "등록될 당시 인가돼 있었다"는 뜻일 뿐 지금도 그렇다는 보장이 아니다. 언페어링
+/// 경로(`unpair` → `persist_and_drop`)는 페어링 잠금을 놓은 채 저장을 기다린 뒤에야
+/// `drop_sessions` 를 부르므로, 그 사이에 낀 틱은 이미 인가가 사라진 central 을
+/// 여전히 스트림 목록에서 본다. 게다가 그 시점엔 채널도 함께 지워져 있어
+/// `channel_mut` 이 `None` 이다 — 아래 v1 분기로 떨어져 **평문 JSON** 이 나간다.
+/// 방금 해제한 기기에게, 그것도 평문으로. BLE 는 `authorized_subscribers` 필터가
+/// 루프 안에 있어 이 창이 없다. 두 전송이 같은 규칙을 따르게 한다.
 ///
 /// v2 세션이면 봉인하고, v1 세션이면 평문 JSON 그대로 보낸다 — 채널이 없다는
 /// 것이 곧 v1 이라는 뜻이고, 전환 기간 동안 두 세대가 공존한다(스펙 8장).
+/// **이 등식은 인가가 살아 있을 때만 참이다** — 그래서 인가 검사가 먼저다.
 ///
 /// **v2 는 봉인 프레임을 hex 로 싣는다.** 이 스트림은 줄바꿈으로 프레임 경계를
 /// 나누는데(모듈 머리말의 NDJSON) 봉인 프레임은 임의의 이진 바이트라 0x0A 를
@@ -202,11 +240,18 @@ impl NetworkBridge {
 /// 수신 측 경계 인식이 무너진다. 스냅샷 한 건 크기라면 사실상 매번 일어난다.
 /// hex 는 이 프로토콜이 이미 `Granted2.sealed`·`epk`·`nonce` 에 쓰는 표기이고,
 /// `{` 로 시작하지 않으므로 v1 평문 줄과도 한눈에 구분된다.
-fn snapshot_line(pairing: &mut PairingManager, central: &CentralId, json: &[u8]) -> Vec<u8> {
-    match pairing.channel_mut(central) {
+fn snapshot_line(
+    pairing: &mut PairingManager,
+    central: &CentralId,
+    json: &[u8],
+) -> Option<Vec<u8>> {
+    if !pairing.is_authorized(central) {
+        return None;
+    }
+    Some(match pairing.channel_mut(central) {
         Some(ch) => pairing::hex_encode_bytes(&ch.seal(json)).into_bytes(),
         None => json.to_vec(),
-    }
+    })
 }
 
 impl Default for NetworkBridge {
@@ -348,8 +393,8 @@ mod tests {
     }
 
     /// BLE 와 같은 성질 — v2 세션에는 평문 JSON 이 나가면 안 된다.
-    /// `on_snapshot` 은 실제 `SendStream` 을 요구하지만 줄을 만드는 판단 자체는
-    /// `snapshot_line` 에 있으므로, I/O 없이 그 판단만 곧바로 확인한다.
+    /// `prepare_snapshot` 은 실제 `SendStream` 을 요구하지만 줄을 만드는 판단
+    /// 자체는 `snapshot_line` 에 있으므로, I/O 없이 그 판단만 곧바로 확인한다.
     #[test]
     fn v2_session_gets_a_sealed_line_the_client_can_open() {
         let mut b = NetworkBridge::new();
@@ -359,7 +404,7 @@ mod tests {
         let (_out, mut client) = v2_pair(&mut b, &mut p, &central, now);
 
         let json = br#"{"v":1,"agents":[]}"#;
-        let line = snapshot_line(&mut p, &central, json);
+        let line = snapshot_line(&mut p, &central, json).expect("인가된 세션이다");
 
         assert!(!line.starts_with(b"{"), "평문 JSON 이 나갔다");
         assert!(
@@ -385,7 +430,48 @@ mod tests {
         assert!(p.is_authorized(&central));
 
         let json = br#"{"v":1,"agents":[]}"#;
-        assert_eq!(snapshot_line(&mut p, &central, json), json.to_vec());
+        assert_eq!(snapshot_line(&mut p, &central, json), Some(json.to_vec()));
+    }
+
+    /// **인가되지 않은 central 은 0바이트다.** 이 성질을 지키는 코드가 여태
+    /// `lib.rs` 의 accept 루프(uni-stream 을 아예 열지 않는 것)에만 있어서
+    /// 테스트로 닿을 수 없었다. 이제 `snapshot_line` 이 직접 막으므로 검증된다.
+    #[test]
+    fn an_unauthorized_central_gets_no_line_at_all() {
+        let mut p = PairingManager::new();
+        assert_eq!(
+            snapshot_line(&mut p, &CentralId("N".into()), br#"{"v":1}"#),
+            None,
+            "인가되지 않은 기기에는 한 바이트도 나가면 안 된다"
+        );
+    }
+
+    /// I-1 회귀 테스트. `unpair` 는 페어링 잠금을 놓은 채 `save_paired_peers` 를
+    /// 기다린 **뒤에야** `drop_sessions` 를 부른다. 그 사이(250ms 틱이 충분히
+    /// 들어간다)에 이 central 은 여전히 `snapshot_senders` 에 있고, 인가와 함께
+    /// v2 채널도 이미 지워져 `channel_mut` 이 `None` 이다 — 인가 검사가 없으면
+    /// v1 분기로 떨어져 방금 해제한 기기에게 **평문 스냅샷 한 장**이 나간다.
+    #[test]
+    fn a_just_unpaired_v2_central_gets_nothing_not_plaintext() {
+        let mut b = NetworkBridge::new();
+        let mut p = PairingManager::new();
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let central = CentralId("N".into());
+        v2_pair(&mut b, &mut p, &central, now);
+
+        let peer_id = p.paired_peers()[0].peer_id.clone();
+        p.revoke_peer(&peer_id);
+        // 여기가 `save_paired_peers` 를 기다리는 그 순간이다 — `drop_sessions` 는
+        // 아직 불리지 않았다.
+
+        let json = br#"{"v":1,"agents":[]}"#;
+        let line = snapshot_line(&mut p, &central, json);
+        assert_eq!(line, None, "해제 직후의 틱은 아무것도 내보내면 안 된다");
+        assert_ne!(
+            line,
+            Some(json.to_vec()),
+            "특히 평문이어서는 안 된다 — 채널이 함께 지워져 v1 로 오인되는 자리다"
+        );
     }
 
     /// 카운터는 줄마다 전진해야 한다 — 같은 (키, 논스) 로 두 번 봉인하면
@@ -399,13 +485,84 @@ mod tests {
         let (_out, mut client) = v2_pair(&mut b, &mut p, &central, now);
 
         let json = br#"{"v":1,"agents":[]}"#;
-        let first = snapshot_line(&mut p, &central, json);
-        let second = snapshot_line(&mut p, &central, json);
+        let first = snapshot_line(&mut p, &central, json).expect("인가된 세션이다");
+        let second = snapshot_line(&mut p, &central, json).expect("인가된 세션이다");
         assert_ne!(first, second, "같은 내용이라도 카운터가 달라 바이트가 달라야 한다");
 
         let de = |l: Vec<u8>| test_client::hex_decode(&String::from_utf8(l).unwrap());
         assert!(client.open(&de(first)).is_ok());
         assert!(client.open(&de(second)).is_ok(), "재전송으로 오인되면 안 된다");
+    }
+
+    fn snap(rate: f32, at: u64) -> Snapshot {
+        use crate::types::{AgentKind, AgentState, TokenCounts};
+        Snapshot {
+            emitted_at: UNIX_EPOCH + Duration::from_secs(at),
+            agents: vec![AgentState {
+                kind: AgentKind::Claude,
+                rate_tok_per_sec: rate,
+                tokens_5h: TokenCounts::default(),
+                quota_limit: None,
+                quota_reset_at: None,
+                quota_used_pct: None,
+                quota_reset_at_weekly: None,
+                quota_used_pct_weekly: None,
+                projects: vec![],
+            }],
+        }
+    }
+
+    /// 위의 순수 테스트들은 `snapshot_line` 만 본다. 이 테스트는 `prepare_snapshot`
+    /// 이 실제로 그 판단을 쓰는지, 그리고 인가를 잃은 central 을 스트림 목록에서
+    /// 빼는지까지 확인한다 — `snapshot_senders` 에 넣으려면 진짜 `SendStream` 이
+    /// 필요해서 로컬 엔드포인트 두 개를 쓴다(위 왕복 테스트와 같은 의도적 예외).
+    #[tokio::test]
+    async fn prepare_snapshot_drops_a_central_that_lost_authorization() {
+        let server_ep = local_endpoint().await;
+        let client_ep = local_endpoint().await;
+        let server_addr = wait_for_direct_addr(&server_ep).await;
+
+        let client_task = tokio::spawn(async move {
+            let conn = client_ep.connect(server_addr, ALPN).await.expect("client connect");
+            // 연결을 살려 둔다 — 여기서 떨어뜨리면 서버의 open_uni 가 실패한다.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            drop(conn);
+        });
+
+        let incoming = server_ep.accept().await.expect("incoming");
+        let conn = incoming.await.expect("connection established");
+        let central = CentralId(conn.remote_id().to_string());
+        let snap_send = conn.open_uni().await.expect("open_uni");
+
+        let mut b = NetworkBridge::new();
+        b.set_enabled(true);
+        b.register_snapshot_sender(central.clone(), snap_send);
+
+        let mut p = PairingManager::new();
+        let t0 = UNIX_EPOCH + Duration::from_secs(1000);
+        let code = p.begin_pairing(t0);
+        p.handle(&central, pairing::AuthRequest::Code(code), t0);
+        assert!(p.is_authorized(&central));
+
+        let lines = b.prepare_snapshot(&snap(1.0, 1000), t0, &mut p);
+        assert_eq!(lines.len(), 1, "인가된 동안에는 줄이 나온다");
+        assert_eq!(lines[0].0, central);
+        assert!(lines[0].1.ends_with(b"\n"), "줄바꿈이 프레임 경계다");
+
+        // 언페어링. `drop_sessions` 는 아직 부르지 않는다 — 저장을 기다리는
+        // 그 창을 그대로 흉내낸다(I-1).
+        let peer_id = p.paired_peers()[0].peer_id.clone();
+        p.revoke_peer(&peer_id);
+
+        let lines = b.prepare_snapshot(&snap(2.0, 1000), t0 + Duration::from_secs(2), &mut p);
+        assert!(lines.is_empty(), "인가를 잃으면 한 줄도 나오지 않는다");
+        assert!(
+            !b.has_snapshot_sender(&central),
+            "그 자리에서 스트림 목록에서도 빠져야 한다"
+        );
+
+        client_task.abort();
+        server_ep.close().await;
     }
 
     /// 회귀 방지: Mac 이 자기 주소를 discovery 에 **게시**하지 않으면, 폰은 QR 을
