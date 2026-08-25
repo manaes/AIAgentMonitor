@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import BLETransport
 
@@ -241,6 +242,53 @@ final class BLEClientTests: XCTestCase {
         func codeBinding(code: String) -> Data? { agrees ? Data("bind-\(code)".utf8) : nil }
         func sessionProof(tokenHex: String) -> Data? { agrees ? Data("proof-\(tokenHex)".utf8) : nil }
         func openSealedToken(sealedHex: String) -> String? { opensSealed }
+
+        /// 진짜 `V2Handshake` 와 **같은 전제조건**을 흉내 낸다 — 토큰이 hex 로
+        /// 디코드되지 않으면 세션 키를 만들 수 없다.
+        func sessionChannel(tokenHex: String) -> SealedChannel? {
+            guard let key = Data(hexString: tokenHex) else { return nil }
+            let sym = SymmetricKey(data: key.count == 32 ? key : Data(repeating: 0, count: 32))
+            return SealedChannel(sendKey: sym, recvKey: sym)
+        }
+    }
+
+    /// 봉인 안의 토큰은 그냥 JSON 문자열 필드다 — hex 라는 보장이 없다.
+    /// 그런 토큰이 오면 **성공을 알리기 전에** 멈춰야 한다. `.openSession` 을
+    /// 먼저 내고 나중에 실패하면, 그 사이에 호출부가 쓸 수 없는 자격 증명을
+    /// Keychain 에 썼다가 지우게 된다.
+    ///
+    /// Keychain 자체는 이 번들에서 관측할 수 없다(호스트 앱이 없어 `SecItemAdd`
+    /// 가 항상 -34018 로 실패한다, `testTokenStoreRoundTrip` 의 skip 사유).
+    /// 그래서 저장이 **일어날 수 없다**는 성질로 고정한다 — `TokenStore.save` 는
+    /// `.openSession` 갈래 안에서만 불리고, 이 입력은 그 갈래를 만들지 못한다.
+    func testANonHexTokenStopsBeforeAnySessionIsReported() {
+        var state = BLEClient.V2ClientState()
+        state.sent = .code2
+        let fake = FakeHandshake()
+        fake.opensSealed = "not-hex-at-all"
+
+        let step = BLEClient.advance(
+            state: &state, decision: .openSealedToken(sealed: "s"),
+            handshake: fake, storedToken: nil
+        )
+
+        XCTAssertEqual(step, .stop, "세션 키를 만들 수 없는 토큰으로 성공을 알리면 안 된다")
+        if case .openSession = step {
+            XCTFail("여기서 openSession 이 나오면 호출부가 그 토큰을 저장한다")
+        }
+    }
+
+    /// 재연결 경로도 같다 — 저장된 토큰이 손상됐으면 `Authorized2` 를 받고도 멈춘다.
+    func testACorruptStoredTokenStopsOnReconnect() {
+        var state = BLEClient.V2ClientState()
+        state.sent = .proof2
+        XCTAssertEqual(
+            BLEClient.advance(
+                state: &state, decision: .openSession,
+                handshake: FakeHandshake(), storedToken: "not-hex-at-all"
+            ),
+            .stop
+        )
     }
 
     /// `AwaitingCode2` 인데 코드가 없으면 사용자를 기다린다. **`CODE2` 는
@@ -343,24 +391,22 @@ final class BLEClientTests: XCTestCase {
     func testGranted2StoresTheTokenAndAuthorized2DoesNot() {
         var pairing = BLEClient.V2ClientState()
         pairing.sent = .code2
-        XCTAssertEqual(
-            BLEClient.advance(
-                state: &pairing, decision: .openSealedToken(sealed: "s"),
-                handshake: FakeHandshake(), storedToken: nil
-            ),
-            .openSession(tokenHex: "aabb", storeToken: true)
-        )
+        guard case .openSession(let token, _, let store) = BLEClient.advance(
+            state: &pairing, decision: .openSealedToken(sealed: "s"),
+            handshake: FakeHandshake(), storedToken: nil
+        ) else { return XCTFail("Granted2 는 세션을 연다") }
+        XCTAssertEqual(token, "aabb")
+        XCTAssertTrue(store, "Granted2 의 토큰은 새 토큰이라 저장해야 한다")
         XCTAssertNil(pairing.sent, "인가된 뒤에는 기다리는 응답이 없다")
 
         var reconnect = BLEClient.V2ClientState()
         reconnect.sent = .proof2
-        XCTAssertEqual(
-            BLEClient.advance(
-                state: &reconnect, decision: .openSession,
-                handshake: FakeHandshake(), storedToken: "cafe"
-            ),
-            .openSession(tokenHex: "cafe", storeToken: false)
-        )
+        guard case .openSession(let token2, _, let store2) = BLEClient.advance(
+            state: &reconnect, decision: .openSession,
+            handshake: FakeHandshake(), storedToken: "cafe"
+        ) else { return XCTFail("Authorized2 는 세션을 연다") }
+        XCTAssertEqual(token2, "cafe")
+        XCTAssertFalse(store2, "이미 저장된 토큰을 다시 쓰면 재연결마다 Keychain 을 덮어쓴다")
     }
 
     /// 코드가 틀렸다. 맥은 `CODE2` 하나로 핸드셰이크를 소비했으므로 다시 넣으려면

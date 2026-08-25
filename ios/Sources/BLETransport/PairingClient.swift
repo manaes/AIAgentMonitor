@@ -86,6 +86,12 @@ public protocol V2Handshaking: AnyObject {
     func codeBinding(code: String) -> Data?
     func sessionProof(tokenHex: String) -> Data?
     func openSealedToken(sealedHex: String) -> String?
+    /// 세션 채널 만들기도 **전이가 직접 검증해야 한다.** 토큰은 봉인 JSON 안의
+    /// 문자열 필드일 뿐이라 hex 라는 보장이 없고, hex 가 아니면 여기서 nil 이
+    /// 난다. 이 검사가 전이 밖에 있으면 호출부가 "토큰부터 저장하고 나중에
+    /// 실패" 하는 순서를 만들 수 있다 — 쓸 수 없는 자격 증명을 Keychain 에
+    /// 잠깐 썼다 지우는 셈이다.
+    func sessionChannel(tokenHex: String) -> SealedChannel?
 }
 
 /// v2 핸드셰이크의 **클라이언트 절반**. 임시 X25519 키를 만들고, 맥의 응답에서

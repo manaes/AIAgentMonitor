@@ -552,15 +552,39 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
     }
 
     /// 전이 하나의 결과.
-    public enum V2Step: Equatable, Sendable {
+    ///
+    /// `Sendable` 이 아니다 — `openSession` 이 `SealedChannel` 을 들고 있고, 그
+    /// 채널은 카운터가 가변 상태라 한 곳에서만 만져야 한다.
+    public enum V2Step: Equatable {
         case send(V2Send)
         /// 인가됐다. `storeToken` 이면 `Granted2` 로 새로 받은 토큰이라 저장해야 한다.
-        case openSession(tokenHex: String, storeToken: Bool)
+        ///
+        /// **채널을 여기 실어 보내는 것이 요점이다.** 세션 키를 못 만드는 경우
+        /// (토큰이 hex 가 아니다)는 이 값이 만들어지기 전에 `.stop` 으로 걸러지므로,
+        /// 호출부가 "저장부터 하고 나중에 실패" 하는 순서를 **만들 수 없다**.
+        /// 채널 없는 `.openSession` 은 타입상 존재하지 않는다.
+        case openSession(tokenHex: String, channel: SealedChannel, storeToken: Bool)
         /// 사용자가 맥 화면의 6자리를 넣기를 기다린다.
         case awaitUserCode
         case failed(left: Int)
         /// 더 진행할 수 없다. **프레임을 만들지 않는다** — 아래 `stop` 참고.
         case stop
+
+        /// 채널은 참조로 비교한다 — 값이 같은 두 채널이란 것이 없다(카운터가 있다).
+        public static func == (lhs: V2Step, rhs: V2Step) -> Bool {
+            switch (lhs, rhs) {
+            case (.send(let a), .send(let b)):
+                return a == b
+            case (.openSession(let t1, let c1, let s1), .openSession(let t2, let c2, let s2)):
+                return t1 == t2 && c1 === c2 && s1 == s2
+            case (.awaitUserCode, .awaitUserCode), (.stop, .stop):
+                return true
+            case (.failed(let a), .failed(let b)):
+                return a == b
+            default:
+                return false
+            }
+        }
     }
 
     /// v2 인증의 첫 프레임. **두 전송이 이 한 곳만 부른다.**
@@ -611,17 +635,26 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
             return .send(V2Send(verb: .proof2, frame: PairingClient.proof2Frame(proof: proof)))
         case .openSealedToken(let sealed):
             // 봉인이 안 열렸다는 건 우리가 만든 키가 맥의 키와 다르다는 뜻이다.
-            guard let token = handshake.openSealedToken(sealedHex: sealed) else { return stop(&state) }
+            // 세션 채널까지 **여기서** 만들어 본다 — 성공을 알리기 전에 토큰이
+            // 실제로 쓸 수 있는 값인지 확인해야, 호출부가 저장부터 하는 순서를
+            // 만들 수 없다.
+            guard let token = handshake.openSealedToken(sealedHex: sealed),
+                  let channel = handshake.sessionChannel(tokenHex: token) else {
+                return stop(&state)
+            }
             state.sent = nil
             state.awaitingUserCode = false
             state.pendingCode = nil
-            return .openSession(tokenHex: token, storeToken: true)
+            return .openSession(tokenHex: token, channel: channel, storeToken: true)
         case .openSession:
             // 재인증 성공 — 되돌아온 토큰이 없다(스펙 5.1).
-            guard let token = storedToken else { return stop(&state) }
+            guard let token = storedToken,
+                  let channel = handshake.sessionChannel(tokenHex: token) else {
+                return stop(&state)
+            }
             state.sent = nil
             state.awaitingUserCode = false
-            return .openSession(tokenHex: token, storeToken: false)
+            return .openSession(tokenHex: token, channel: channel, storeToken: false)
         case .failed(let left):
             // 맥은 `CODE2` 하나로 핸드셰이크를 소비했다 — 다시 넣으려면 `HELLO2` 부터다.
             state.sent = nil
@@ -702,18 +735,15 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         ) {
         case .send(let send):
             peripheral.writeValue(send.frame, for: authCh, type: .withResponse)
-        case .openSession(let token, let storeToken):
-            // 저장이 실패해도(디스크 꽉 참 등) 스트리밍은 계속한다 — 지금 세션은
-            // 인가된 상태다. 다만 다음 재연결부터는 저장된 토큰이 없어 코드를
-            // 다시 요구하게 되므로 로그를 남긴다(TokenStore.save 가 이제
-            // SecItemAdd 결과를 그대로 돌려준다, Task 6 리뷰 반영).
+        case .openSession(let token, let channel, let storeToken):
+            // `advance` 가 채널까지 만들어 본 뒤에야 이 갈래를 낸다 — 그래서
+            // 여기 저장은 "쓸 수 있는 토큰" 임이 확인된 뒤다. 저장이 실패해도
+            // (디스크 꽉 참 등) 스트리밍은 계속한다 — 지금 세션은 인가된 상태다.
+            // 다만 다음 재연결부터는 저장된 토큰이 없어 코드를 다시 요구하게
+            // 되므로 로그를 남긴다(TokenStore.save 가 이제 SecItemAdd 결과를
+            // 그대로 돌려준다, Task 6 리뷰 반영).
             if storeToken, !TokenStore.save(token) {
                 NSLog("페어링 토큰 저장 실패 — 다음 재연결부터 코드를 다시 요구합니다")
-            }
-            guard let channel = handshake.sessionChannel(tokenHex: token) else {
-                // 토큰이 hex 가 아니다 — 세션 키를 만들 수 없으니 페어링부터다.
-                failV2()
-                return
             }
             // 채널을 먼저 세운다 — 구독보다 늦으면 첫 스냅샷이 채널 없이 도착해
             // 버려진다.
