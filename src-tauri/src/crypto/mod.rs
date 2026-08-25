@@ -260,4 +260,59 @@ mod tests {
         assert!(verify_session_proof(&token, &nonce, &t, &given));
         assert!(!verify_session_proof(&[9u8; 16], &nonce, &t, &given), "다른 토큰은 통과 못 한다");
     }
+
+    /// Swift·C 와 공유하는 골든 벡터.
+    /// 갱신: UPDATE_GOLDEN=1 cargo test --manifest-path src-tauri/Cargo.toml crypto::tests::golden
+    #[test]
+    fn golden_e2ee_v2_matches() {
+        use crate::crypto::channel::SealedChannel;
+        use std::path::PathBuf;
+
+        // 고정 입력 — 세 언어가 이 값들로 시작한다.
+        let ss = [0x11u8; 32];
+        let cpk = [0x22u8; 32];
+        let spk = [0x33u8; 32];
+        let nonce_bytes = [0x44u8; 16];
+        let token_bytes = [0x55u8; 16];
+        let code = "123456";
+
+        let tr = transcript(&cpk, &spk);
+        let (s2c, c2s) = derive_session_keys(&ss, &token_bytes, &nonce_bytes);
+        let mut server = SealedChannel::new(s2c, c2s);
+
+        let actual = serde_json::json!({
+            "note": "모든 hex 는 소문자다. HMAC 의 키와 메시지는 hex 문자열의 \
+                     UTF-8 바이트가 아니라 디코드한 원시 바이트다.",
+            "input": {
+                "shared_secret": hex(&ss),
+                "client_pub": hex(&cpk),
+                "server_pub": hex(&spk),
+                "nonce": hex(&nonce_bytes),
+                "token": hex(&token_bytes),
+                "code": code,
+            },
+            "transcript": hex(&tr),
+            "code_binding": hex(&code_binding(code, &tr)),
+            "session_proof": hex(&session_proof(&token_bytes, &nonce_bytes, &tr)),
+            "pair_key": hex(&derive_pair_key(&ss, &nonce_bytes)),
+            "k_s2c": hex(&s2c),
+            "k_c2s": hex(&c2s),
+            // 서버가 카운터 0 으로 봉인한 첫 프레임.
+            "sealed_frame_0": hex(&server.seal(b"{\"v\":2}")),
+        });
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/ble-protocol/golden/e2ee-v2-sample.json");
+        if std::env::var("UPDATE_GOLDEN").is_ok() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, serde_json::to_string_pretty(&actual).unwrap() + "\n").unwrap();
+            return;
+        }
+        let expected: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .expect("골든 벡터가 없다. UPDATE_GOLDEN=1 로 생성하고 커밋하라"),
+        )
+        .unwrap();
+        assert_eq!(actual, expected, "E2EE v2 골든 벡터가 어긋났다");
+    }
 }
