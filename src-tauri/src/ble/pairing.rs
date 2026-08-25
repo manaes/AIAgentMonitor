@@ -35,6 +35,7 @@
 //! 이미 상수 시간 비교를 구현하므로(RustCrypto `hmac`), 별도로 `subtle` 을
 //! 끌어오지 않았다.
 use crate::ble::peripheral::CentralId;
+use crate::crypto::{self, channel::SealedChannel};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -86,6 +87,11 @@ pub enum AuthReply {
     /// `PROOF:` 성공. 클라이언트가 이미 아는 토큰을 그대로 검증했을
     /// 뿐이므로, 되돌려보낼 비밀이 없다 — 그래서 아무 필드도 없다.
     Authorized,
+    /// v2 의 `AwaitingCode`. 맥의 임시 공개키와 논스를 함께 싣는다.
+    /// **코드는 여전히 담지 않는다** — 코드는 맥 화면으로만 간다.
+    AwaitingCode2 { epk: String, nonce: String },
+    /// v2 의 `Granted`. 토큰을 평문 필드가 아니라 봉인 프레임으로 싣는다.
+    Granted2 { sealed: String },
 }
 
 impl AuthReply {
@@ -106,6 +112,13 @@ impl AuthReply {
             }
             AuthReply::Denied { left } => format!(r#"{{"ok":false,"left":{left}}}"#).into_bytes(),
             AuthReply::Rejected => br#"{"ok":false}"#.to_vec(),
+            AuthReply::AwaitingCode2 { epk, nonce } => {
+                format!(r#"{{"ok":false,"v":2,"await":"code","epk":"{epk}","nonce":"{nonce}"}}"#)
+                    .into_bytes()
+            }
+            AuthReply::Granted2 { sealed } => {
+                format!(r#"{{"ok":true,"v":2,"sealed":"{sealed}"}}"#).into_bytes()
+            }
         }
     }
 }
@@ -168,6 +181,17 @@ struct PendingNonce {
     issued_at: SystemTime,
 }
 
+/// v2 핸드셰이크 중간 상태. central 마다 하나이며, CODE2/PROOF2 를 받는
+/// 순간 소비된다. 임시 개인키는 `EphemeralKeyPair` 안에 있고 한 번만 쓰인다.
+#[derive(Debug)]
+struct PendingHandshake {
+    /// 이 핸드셰이크로 만든 공유 비밀.
+    ss: [u8; 32],
+    transcript: [u8; 64],
+    /// 이 핸드셰이크에 쓰인 논스(hex). 세션 키 파생의 salt 다.
+    nonce: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PairedPeer {
     pub peer_id: String,
@@ -192,7 +216,7 @@ pub enum PairingWindow {
     Closed,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct PairingManager {
     pending: Option<PendingCode>,
     /// 토큰 → 페어링된 시각(unix secs). 토큰이 곧 기기 정체성이다 —
@@ -208,6 +232,27 @@ pub struct PairingManager {
     /// 따로 두는 이유는 여러 기기가 동시에 재연결을 시도할 수 있어서다.
     /// 새 `AUTH` 는 이전 논스를 덮어써 무효화한다.
     nonces: HashMap<String, PendingNonce>,
+    /// v2 핸드셰이크 중간 상태. central 마다 하나이며, CODE2/PROOF2 를 받는
+    /// 순간 소비된다. 임시 개인키는 `EphemeralKeyPair` 안에 있고 한 번만 쓰인다.
+    handshakes: HashMap<String, PendingHandshake>,
+    /// 인가된 세션의 봉인 채널. `authorized` 와 수명이 같다.
+    channels: HashMap<String, SealedChannel>,
+}
+
+/// `#[derive(Debug)]` 를 쓰지 않는다 — `SealedChannel` 은 대칭키를 들고
+/// 있어서 일부러 `Debug` 를 구현하지 않았고(로그에 키가 찍히면 안 된다),
+/// `handshakes` 의 공유 비밀도 마찬가지로 민감하다. 개수만 보여준다.
+impl std::fmt::Debug for PairingManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairingManager")
+            .field("pending", &self.pending)
+            .field("tokens", &self.tokens.len())
+            .field("authorized", &self.authorized.len())
+            .field("nonces", &self.nonces.len())
+            .field("handshakes", &self.handshakes.len())
+            .field("channels", &self.channels.len())
+            .finish()
+    }
 }
 
 impl PairingManager {
@@ -278,6 +323,13 @@ impl PairingManager {
         self.authorized.contains_key(&id.0)
     }
 
+    /// 이 central 의 v2 봉인 채널. 인가된 세션에만 존재한다 — 채널이 없으면
+    /// v1 세션이거나, 아직 v2 핸드셰이크가 끝나지 않았거나, 세션이 이미
+    /// 끝났다는 뜻이다.
+    pub fn channel_mut(&mut self, id: &CentralId) -> Option<&mut SealedChannel> {
+        self.channels.get_mut(&id.0)
+    }
+
     /// 이 central 의 세션 인가와, 그 central 이 갖고 있던 미사용 논스를
     /// 지운다(연결이 끊겼을 때, 또는 사용자가 세션만 끊고 싶을 때 호출).
     /// 저장된 토큰 자체는 지우지 않으므로, 같은 토큰으로 다시
@@ -291,6 +343,10 @@ impl PairingManager {
     pub fn end_session(&mut self, id: &CentralId) {
         self.authorized.remove(&id.0);
         self.nonces.remove(&id.0);
+        // v2 봉인 채널·핸드셰이크도 `authorized` 와 수명을 맞춘다 — 남겨두면
+        // 방금 언페어링된 기기용 채널로 다음 프레임을 봉인하게 된다.
+        self.channels.remove(&id.0);
+        self.handshakes.remove(&id.0);
     }
 
     /// 토큰 하나를 완전히 폐기한다 — 이후 이 토큰으로의 재연결 인증은
@@ -309,6 +365,8 @@ impl PairingManager {
             .collect();
         for cid in &dropped {
             self.authorized.remove(cid);
+            self.channels.remove(cid);
+            self.handshakes.remove(cid);
         }
         dropped.into_iter().map(CentralId).collect()
     }
@@ -334,6 +392,10 @@ impl PairingManager {
         self.tokens.clear();
         let dropped: Vec<String> = self.authorized.keys().cloned().collect();
         self.authorized.clear();
+        // `authorized` 를 통째로 지우므로, 거기 딸려 있던 v2 채널·핸드셰이크도
+        // 통째로 지운다 — 하나씩 골라 지울 이유가 없다.
+        self.channels.clear();
+        self.handshakes.clear();
         dropped.into_iter().map(CentralId).collect()
     }
 
@@ -346,6 +408,8 @@ impl PairingManager {
     /// 공유를 켜면 같은 토큰으로 즉시 재인가되므로 사용자 경험은 그대로다.
     pub fn end_all_sessions(&mut self) {
         self.authorized.clear();
+        self.channels.clear();
+        self.handshakes.clear();
     }
 
     /// 주어진 central 들의 세션 인가만 내린다. 저장된 토큰은 남긴다.
@@ -520,17 +584,88 @@ impl PairingManager {
                     AuthReply::Rejected
                 }
             }
-            // v2 동사는 아직 파싱만 한다 — 실제 동작은 Task 6·7 에서 채운다.
-            AuthRequest::Hello2(_)
-            | AuthRequest::Code2(_)
-            | AuthRequest::Auth2(_)
-            | AuthRequest::Proof2(_) => AuthReply::Rejected,
+            AuthRequest::Hello2(cpk_hex) => {
+                let Some(cpk) = Self::hex32(&cpk_hex) else {
+                    // 형식 오류는 코드 추측이 아니므로 예산을 소모하지 않는다.
+                    return AuthReply::Rejected;
+                };
+                if self.open_window(now).is_none() {
+                    return AuthReply::Rejected;
+                }
+                let kp = crypto::ephemeral_keypair();
+                let spk = kp.public;
+                let Some(ss) = crypto::agree(kp, &cpk) else {
+                    // 저차 점 — 공유 비밀이 상수가 된다.
+                    return AuthReply::Rejected;
+                };
+                let nonce = Self::random_hex128();
+                self.handshakes.insert(
+                    id.0.clone(),
+                    PendingHandshake {
+                        ss,
+                        transcript: crypto::transcript(&cpk, &spk),
+                        nonce: nonce.clone(),
+                    },
+                );
+                AuthReply::AwaitingCode2 { epk: hex_encode_bytes(&spk), nonce }
+            }
+            AuthRequest::Code2(given) => {
+                // 핸드셰이크는 성공·실패와 무관하게 소비한다 — 같은 transcript
+                // 로 여러 번 추측하지 못하게 한다. 재시도하려면 HELLO2 부터다.
+                let Some(hs) = self.handshakes.remove(&id.0) else {
+                    return AuthReply::Rejected;
+                };
+                let Some(p) = self.open_window(now) else {
+                    return AuthReply::Rejected;
+                };
+                if !crypto::verify_code_binding(&p.code, &hs.transcript, &given) {
+                    p.attempts_left -= 1;
+                    return AuthReply::Denied { left: p.attempts_left };
+                }
+                let token = Self::random_hex128();
+                let paired_at = now
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let token_bytes = Self::hex_decode(&token).expect("방금 만든 hex 다");
+                let nonce_bytes = Self::hex_decode(&hs.nonce).expect("방금 만든 hex 다");
+
+                // 토큰 한 건만 k_pair 로 봉인한다.
+                let k_pair = crypto::derive_pair_key(&hs.ss, &nonce_bytes);
+                let mut pair_ch = SealedChannel::new(k_pair, k_pair);
+                let payload = format!(r#"{{"token":"{token}"}}"#);
+                let sealed = hex_encode_bytes(&pair_ch.seal(payload.as_bytes()));
+
+                // 그 즉시 세션 키로 전환한다(스펙 6.1) — 왕복이 더 필요 없다.
+                let (s2c, c2s) = crypto::derive_session_keys(&hs.ss, &token_bytes, &nonce_bytes);
+                self.channels.insert(id.0.clone(), SealedChannel::new(s2c, c2s));
+
+                self.tokens.insert(token.clone(), paired_at);
+                self.authorized.insert(id.0.clone(), token);
+                self.pending = None;
+                AuthReply::Granted2 { sealed }
+            }
+            // Auth2/Proof2(v2 재연결)는 아직 파싱만 한다 — 실제 동작은 Task 7 에서 채운다.
+            AuthRequest::Auth2(_) | AuthRequest::Proof2(_) => AuthReply::Rejected,
             AuthRequest::Malformed => AuthReply::Rejected,
         }
     }
 
     fn is_valid_lowercase_hex(s: &str, len: usize) -> bool {
         s.len() == len && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    }
+
+    /// v2 임시 공개키(64자 소문자 hex)를 32바이트로 디코드한다. 형식이
+    /// 다르면 `hex_decode` 를 시도조차 하지 않는다 — 다른 hex 필드와 같은
+    /// 기준.
+    fn hex32(s: &str) -> Option<[u8; 32]> {
+        if !Self::is_valid_lowercase_hex(s, 64) {
+            return None;
+        }
+        let v = Self::hex_decode(s)?;
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&v);
+        Some(out)
     }
 
     /// HMAC-SHA256(key=token, msg=nonce) 를 계산해 클라이언트가 보낸
@@ -610,6 +745,12 @@ impl PairingManager {
     }
 }
 
+/// 모듈 수준 hex 인코더. 기존 `hex_encode` 는 `mod tests` 안에만 있어
+/// 프로덕션 코드에서 쓸 수 없다.
+fn hex_encode_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,6 +777,151 @@ mod tests {
     fn hex_encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
+
+    use crate::crypto::{self, channel::SealedChannel};
+
+    /// 테스트에서 "v2 클라이언트" 역할을 한다.
+    struct V2Client {
+        kp: Option<crypto::EphemeralKeyPair>,
+        public: [u8; 32],
+    }
+
+    impl V2Client {
+        fn new() -> Self {
+            let kp = crypto::ephemeral_keypair();
+            let public = kp.public;
+            Self { kp: Some(kp), public }
+        }
+        /// 서버 응답으로부터 공유 비밀과 transcript 를 만든다.
+        fn agree(&mut self, epk_hex: &str) -> ([u8; 32], [u8; 64]) {
+            let spk = hex32(epk_hex);
+            let kp = self.kp.take().expect("임시 키는 한 번만 쓴다");
+            let ss = crypto::agree(kp, &spk).expect("정상 키끼리는 합의된다");
+            (ss, crypto::transcript(&self.public, &spk))
+        }
+    }
+
+    fn hex32(s: &str) -> [u8; 32] {
+        let v = PairingManager::hex_decode(s).expect("유효한 hex");
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&v);
+        out
+    }
+
+    fn epk_and_nonce(reply: &AuthReply) -> (String, String) {
+        match reply {
+            AuthReply::AwaitingCode2 { epk, nonce } => (epk.clone(), nonce.clone()),
+            other => panic!("AwaitingCode2 를 기대했다: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v2_pairing_delivers_the_token_sealed() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let mut c = V2Client::new();
+
+        let reply = m.handle(&id("A"), AuthRequest::Hello2(hex_encode(&c.public)), t(1001));
+        let (epk, nonce) = epk_and_nonce(&reply);
+        let (ss, tr) = c.agree(&epk);
+
+        let cbind = hex_encode(&crypto::code_binding(&code, &tr));
+        let reply = m.handle(&id("A"), AuthRequest::Code2(cbind), t(1002));
+        let AuthReply::Granted2 { sealed } = reply else {
+            panic!("Granted2 를 기대했다: {reply:?}")
+        };
+
+        // 클라이언트가 토큰을 꺼낸다.
+        let nonce_bytes = PairingManager::hex_decode(&nonce).unwrap();
+        let k_pair = crypto::derive_pair_key(&ss, &nonce_bytes);
+        let mut ch = SealedChannel::new(k_pair, k_pair);
+        let frame = PairingManager::hex_decode(&sealed).unwrap();
+        let plain = ch.open(&frame).expect("k_pair 로 열려야 한다");
+        let json: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+        let token = json["token"].as_str().expect("토큰이 들어 있어야 한다");
+
+        assert_eq!(token.len(), 32, "토큰은 128비트 소문자 hex 다");
+        assert!(m.is_authorized(&id("A")));
+        assert_eq!(m.issued_peers().len(), 1);
+    }
+
+    /// **이 스펙의 존재 이유다.** 토큰이 평문으로 나가면 안 된다.
+    #[test]
+    fn v2_never_puts_the_token_in_cleartext() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let mut c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Hello2(hex_encode(&c.public)), t(1001));
+        let (epk, _nonce) = epk_and_nonce(&reply);
+        let (_ss, tr) = c.agree(&epk);
+        let cbind = hex_encode(&crypto::code_binding(&code, &tr));
+        let reply = m.handle(&id("A"), AuthRequest::Code2(cbind), t(1002));
+
+        let bytes = reply.to_json_bytes();
+        let text = String::from_utf8(bytes).unwrap();
+        let token = m.issued_peers()[0].0.clone();
+        assert!(!text.contains(&token), "토큰이 평문으로 나갔다: {text}");
+        assert!(!text.contains("\"token\""), "token 필드 자체가 없어야 한다: {text}");
+    }
+
+    /// 6자리 코드도 어느 방향으로도 나가지 않는다.
+    #[test]
+    fn v2_never_puts_the_code_on_the_wire() {
+        let mut m = PairingManager::new();
+        let code = m.begin_pairing(t(1000));
+        let c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Hello2(hex_encode(&c.public)), t(1001));
+        let text = String::from_utf8(reply.to_json_bytes()).unwrap();
+        assert!(!text.contains(&code), "코드가 응답에 실렸다: {text}");
+    }
+
+    #[test]
+    fn v2_wrong_code_binding_spends_an_attempt() {
+        let mut m = PairingManager::new();
+        let _code = m.begin_pairing(t(1000));
+        let mut c = V2Client::new();
+        let reply = m.handle(&id("A"), AuthRequest::Hello2(hex_encode(&c.public)), t(1001));
+        let (epk, _) = epk_and_nonce(&reply);
+        let (_ss, tr) = c.agree(&epk);
+
+        let wrong = hex_encode(&crypto::code_binding("999999", &tr));
+        let reply = m.handle(&id("A"), AuthRequest::Code2(wrong), t(1002));
+        assert!(matches!(reply, AuthReply::Denied { left: 4 }), "시도를 소모한다: {reply:?}");
+    }
+
+    /// 형식 오류는 코드 추측이 아니므로 예산을 소모하지 않는다.
+    #[test]
+    fn v2_malformed_public_key_does_not_spend_an_attempt() {
+        let mut m = PairingManager::new();
+        m.begin_pairing(t(1000));
+        let reply = m.handle(&id("A"), AuthRequest::Hello2("짧다".into()), t(1001));
+        assert!(matches!(reply, AuthReply::Rejected));
+        match m.pairing_window(t(1002)) {
+            PairingWindow::Open { attempts_left, .. } => {
+                assert_eq!(attempts_left, MAX_ATTEMPTS, "형식 오류는 예산을 안 깎는다")
+            }
+            other => panic!("창이 열려 있어야 한다: {other:?}"),
+        }
+    }
+
+    /// 저차 점을 보내면 공유 비밀이 상수가 된다. 거부해야 한다.
+    #[test]
+    fn v2_rejects_low_order_public_key() {
+        let mut m = PairingManager::new();
+        m.begin_pairing(t(1000));
+        let reply = m.handle(&id("A"), AuthRequest::Hello2(hex_encode(&[0u8; 32])), t(1001));
+        assert!(matches!(reply, AuthReply::Rejected), "저차 점 거부: {reply:?}");
+    }
+
+    /// HELLO2 없이 온 CODE2 는 transcript 가 없으므로 검증할 수 없다.
+    #[test]
+    fn v2_code_without_hello_is_rejected() {
+        let mut m = PairingManager::new();
+        m.begin_pairing(t(1000));
+        let reply = m.handle(&id("A"), AuthRequest::Code2("ab".repeat(32)), t(1001));
+        assert!(matches!(reply, AuthReply::Rejected));
+    }
+
 
     /// 테스트에서 "iOS 클라이언트" 역할을 대신한다 — 토큰으로 논스에
     /// 서명해 올바른 PROOF 값을 만든다.
@@ -693,6 +979,8 @@ mod tests {
     fn hello2_without_payload_is_malformed() {
         assert!(matches!(parse_auth_request(b"HELLO2"), AuthRequest::Malformed));
         assert!(matches!(parse_auth_request(b"AUTH2"), AuthRequest::Malformed));
+        assert!(matches!(parse_auth_request(b"CODE2"), AuthRequest::Malformed));
+        assert!(matches!(parse_auth_request(b"PROOF2"), AuthRequest::Malformed));
     }
 
     #[test]
