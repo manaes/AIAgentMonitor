@@ -53,26 +53,38 @@ pub enum PeripheralEvent {
 pub trait BlePeripheral: Send + Sync {
     fn start(&self) -> anyhow::Result<()>;
     fn stop(&self);
-    /// 프레임을 넘긴다. 실제 전송과 백프레셔는 구현체가 책임진다(fire-and-forget).
-    /// `authorized` 는 이 프레임을 받아도 되는 central id 목록이다 — 구현체는
-    /// 실제 notify 를 이 목록으로만 좁혀야 한다. 그 특성을 구독했더라도 이
-    /// 목록에 없는 central 은 받아서는 안 된다(스펙 5.1).
-    fn offer_frame(&self, ch: CharId, chunks: Vec<Vec<u8>>, authorized: &[CentralId]);
+    /// 한 central 에게 프레임을 넘긴다. 실제 전송과 백프레셔는 구현체가
+    /// 책임진다(fire-and-forget).
+    ///
+    /// **central 마다 따로 부른다.** E2EE v2 에서는 세션 키가 central 마다
+    /// 다르므로 바이트도 달라진다. 덤으로 청크 크기를 그 central 의 MTU 에
+    /// 맞출 수 있어, MTU 가 작은 기기 하나가 모두의 청크를 잘게 만들던 문제가
+    /// 사라진다.
+    ///
+    /// 대상이 인자로 하나 들어오므로 구현체가 인가 목록을 따로 들고 있을
+    /// 필요가 없다 — 호출자(`BleBridge::on_snapshot`)가 인가된 구독자에게만
+    /// 부르는 것이 곧 스펙 5.1 의 "인가된 central 에만 notify" 다.
+    fn offer_frame_to(&self, ch: CharId, central: &CentralId, chunks: Vec<Vec<u8>>);
     fn subscribers(&self) -> Vec<Subscriber>;
     /// 모든 구독자가 받을 수 있는 최대 청크 크기. 구독자가 없으면 None.
+    ///
+    /// **프레이밍에는 쓰지 않는다.** 청크 크기는 `offer_frame_to` 를 부르는
+    /// 쪽이 그 central 의 `max_notify_len` 으로 정한다 — 여기로 되돌아가면
+    /// MTU 가 작은 기기 하나가 모두의 청크를 잘게 만드는 결함이 되살아난다.
     fn min_notify_len(&self) -> Option<usize> {
         self.subscribers().iter().map(|s| s.max_notify_len).min()
     }
     /// Auth 특성으로 한 central 에만 응답한다.
     fn notify_auth(&self, central: &CentralId, payload: Vec<u8>);
 
-    /// 인가가 철회된 central 을 이후의 모든 전송 대상에서 즉시 제거한다.
-    /// `authorized_targets` 는 `offer_frame` 때만 갱신되는데, 인가된 구독자가
-    /// 0명이 되면 `on_snapshot` 이 `offer_frame` 호출 전에 조기 반환해 그 뒤로
-    /// 영원히 갱신되지 않는다 — 그 사이 backpressure 가 풀려 `pump()` 가 다시
-    /// 불리면(`peripheralManagerIsReadyToUpdateSubscribers:`) 스테일한 대상
-    /// 목록으로 방금 철회된 central 에게 남은 청크를 계속 보낸다. `forget_central`/
-    /// `unpair_peer`/`unpair_all` 은 그래서 이 호출을 반드시 함께 해야 한다.
+    /// 인가가 철회된 central 에게 아직 보내지 못한 청크를 버린다.
+    ///
+    /// 프레임은 이미 `offer_frame_to` 로 그 central 의 큐에 들어가 있고,
+    /// backpressure 로 멈춘 큐는 `on_snapshot` 을 다시 거치지 않고도
+    /// 재개 콜백(`peripheralManagerIsReadyToUpdateSubscribers:`)만으로 마저
+    /// 나간다. 철회 시점에 큐를 비우지 않으면 방금 인가를 잃은 central 이
+    /// 남은 청크를 계속 받는다. `forget_central`/`unpair_peer`/`unpair_all` 은
+    /// 그래서 이 호출을 반드시 함께 해야 한다.
     fn revoke_targets(&self, ids: &[CentralId]);
 
     /// 인가된 구독자만 추린다. 청크 크기 계산도 이 목록으로 해야
@@ -88,7 +100,9 @@ pub trait BlePeripheral: Send + Sync {
 /// 테스트용 구현. 넘어온 프레임을 기록만 한다.
 #[derive(Debug, Default)]
 pub struct FakePeripheral {
-    frames: Mutex<Vec<(CharId, Vec<Vec<u8>>, Vec<CentralId>)>>,
+    /// 넘어온 프레임을 받은 순서대로. 이제 호출이 central 단위이므로
+    /// 대상이 튜플 안에 하나씩 들어간다.
+    frames: Mutex<Vec<(CentralId, CharId, Vec<Vec<u8>>)>>,
     subs: Mutex<Vec<Subscriber>>,
     started: Mutex<bool>,
     /// Some 이면 start() 가 이 메시지로 실패한다(오류 전파 테스트용).
@@ -104,9 +118,17 @@ impl FakePeripheral {
     pub fn set_subscribers(&self, subs: Vec<Subscriber>) {
         *self.subs.lock().unwrap() = subs;
     }
-    /// 기록된 프레임을 꺼내고 비운다.
-    pub fn taken_frames(&self) -> Vec<(CharId, Vec<Vec<u8>>, Vec<CentralId>)> {
+    /// central 별로 기록된 프레임을 꺼내고 비운다.
+    pub fn taken_frames_by_central(&self) -> Vec<(CentralId, CharId, Vec<Vec<u8>>)> {
         std::mem::take(&mut *self.frames.lock().unwrap())
+    }
+    /// 기록된 프레임을 꺼내고 비운다. 대상이 목록이던 시절의 모양 그대로
+    /// 돌려준다 — 프레임 하나가 곧 central 하나이므로 목록은 언제나 한 명이다.
+    pub fn taken_frames(&self) -> Vec<(CharId, Vec<Vec<u8>>, Vec<CentralId>)> {
+        self.taken_frames_by_central()
+            .into_iter()
+            .map(|(central, ch, chunks)| (ch, chunks, vec![central]))
+            .collect()
     }
     pub fn is_started(&self) -> bool {
         *self.started.lock().unwrap()
@@ -135,8 +157,8 @@ impl BlePeripheral for FakePeripheral {
     fn stop(&self) {
         *self.started.lock().unwrap() = false;
     }
-    fn offer_frame(&self, ch: CharId, chunks: Vec<Vec<u8>>, authorized: &[CentralId]) {
-        self.frames.lock().unwrap().push((ch, chunks, authorized.to_vec()));
+    fn offer_frame_to(&self, ch: CharId, central: &CentralId, chunks: Vec<Vec<u8>>) {
+        self.frames.lock().unwrap().push((central.clone(), ch, chunks));
     }
     fn subscribers(&self) -> Vec<Subscriber> {
         self.subs.lock().unwrap().clone()
@@ -160,7 +182,7 @@ mod tests {
             id: CentralId("A".into()),
             max_notify_len: 20,
         }]);
-        p.offer_frame(CharId::Snapshot, vec![vec![1, 2, 3], vec![4]], &[CentralId("A".into())]);
+        p.offer_frame_to(CharId::Snapshot, &CentralId("A".into()), vec![vec![1, 2, 3], vec![4]]);
         let frames = p.taken_frames();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].0, CharId::Snapshot);

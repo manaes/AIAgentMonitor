@@ -67,66 +67,71 @@ fn with_delegate(app: &AppHandle, f: impl FnOnce(&Delegate) + Send + 'static) {
     let _ = with_delegate_or(app, f, || {});
 }
 
+/// 송신 큐의 키: (characteristic uuid, central id).
+///
+/// central 을 키에 넣는 것이 이 계층의 핵심이다. E2EE v2 에서는 세션 키가
+/// central 마다 달라 같은 스냅샷이라도 바이트가 다르므로, 특성 하나에 큐
+/// 하나였던 예전 구조로는 담을 수 없다. 부수 효과로 **키가 곧 전송 대상**이
+/// 되어, 인가 목록을 따로 들고 다니며 동기화하던 문제가 구조적으로 사라진다.
+type QueueKey = (&'static str, String);
+
 /// 메인 스레드에서만 접근하는 상태.
 struct MainState {
     manager: Option<Retained<CBPeripheralManager>>,
     chars: HashMap<&'static str, Retained<CBMutableCharacteristic>>,
     subs: HashMap<String, (Retained<CBCentral>, usize)>,
-    queues: HashMap<&'static str, SendQueue>,
-    /// characteristic 별 최근 인가 대상. `pump()` 가 새 프레임이 없을 때도
-    /// (backpressure 해제 재개 콜백 `peripheralManagerIsReadyToUpdateSubscribers:`
-    /// 에서도 다시 불린다) 이 목록을 그대로 쓴다. 채워지기 전에는 빈 벡터 —
-    /// 아무에게도 안 보내는 쪽으로 실패한다(fail-closed, 스펙 5.1).
-    authorized_targets: HashMap<&'static str, Vec<String>>,
+    /// central 별 송신 큐. 큐가 있다는 것 자체가 "이 central 에게 보내도 된다"는
+    /// 뜻이다 — 큐는 `offer_frame_to`(인가된 구독자에게만 불린다)로만 생기고
+    /// `revoke_targets`/구독 해제가 지운다. 큐가 없으면 아무것도 나가지 않으므로
+    /// 기본값이 fail-closed 다(스펙 5.1).
+    queues: HashMap<QueueKey, SendQueue>,
     events: UnboundedSender<PeripheralEvent>,
 }
 
 impl MainState {
-    /// `pump()` 이 실제로 보낼 대상만 골라내는 결정 로직. `CBCentral`/
+    /// 이 characteristic 으로 보낼 것이 남아 있는 central 들. `CBCentral`/
     /// `CBPeripheralManager` 를 전혀 필요로 하지 않는 순수 함수로 뽑아둔 이유는,
     /// 이 파일의 나머지는 실제 CoreBluetooth 객체가 있어야만 돌아가서
     /// `#[cfg(test)]` 로 묶을 수 없기 때문이다 — 라운드 2가 고친 누출(인가
     /// 필터가 추상화 계층에서만 걸리고 실기기 전송 경로는 구독자 전원에게
     /// 보내던 문제)이 바로 "실제 동작이 테스트 사각지대" 였다. 대상 선정
-    /// 로직 자체는 문자열 집합 연산일 뿐이므로 이렇게 분리하면 그 사각지대가
+    /// 로직 자체는 키 집합 연산일 뿐이므로 이렇게 분리하면 그 사각지대가
     /// 남지 않는다.
-    fn targets_for(sub_ids: impl Iterator<Item = String>, allowed: &[String]) -> Vec<String> {
-        sub_ids.filter(|id| allowed.contains(id)).collect()
+    fn queued_centrals(queues: &HashMap<QueueKey, SendQueue>, ch_uuid: &str) -> Vec<String> {
+        queues
+            .keys()
+            .filter(|(u, _)| *u == ch_uuid)
+            .map(|(_, id)| id.clone())
+            .collect()
     }
 
-    /// `revoke_targets` 의 실제 결정 로직. `targets_for` 와 같은 이유로 순수
-    /// 함수로 뽑아둔다 — `authorized_targets` 는 평범한 `Vec<String>` 이라
-    /// CoreBluetooth 객체 없이도 이 필터링 자체를 테스트할 수 있다.
-    fn without_revoked(targets: Vec<String>, revoked: &[String]) -> Vec<String> {
-        targets.into_iter().filter(|id| !revoked.contains(id)).collect()
+    /// `revoke_targets` 의 실제 결정 로직. 인가를 잃은 central 의 큐를 통째로
+    /// 버린다 — 큐가 곧 대상이므로 이것이 전송 대상에서 빼는 것이다.
+    /// `queued_centrals` 와 같은 이유로 순수 함수로 뽑아둔다.
+    fn drop_queues_for(queues: &mut HashMap<QueueKey, SendQueue>, revoked: &[String]) {
+        queues.retain(|(_, central), _| !revoked.contains(central));
     }
 
-    /// 큐에 쌓인 청크를 가능한 만큼 내보낸다. 대상은 `authorized_targets` 로
-    /// 좁힌다 — 같은 특성을 구독했더라도 인가되지 않은 central 은 제외한다
-    /// (스펙 5.1: 인가된 central 에만 notify).
-    fn pump(&mut self, ch_uuid: &'static str) {
+    /// 한 central 의 큐에 쌓인 청크를 가능한 만큼 내보낸다. 인가 필터가 따로
+    /// 없는 이유는 큐의 존재 자체가 인가이기 때문이다(위 `queues` 주석).
+    fn pump(&mut self, ch_uuid: &'static str, central_id: &str) {
         let (Some(mgr), Some(ch)) = (self.manager.clone(), self.chars.get(ch_uuid).cloned())
         else {
             return;
         };
-        let empty = Vec::new();
-        let allowed = self.authorized_targets.get(ch_uuid).unwrap_or(&empty);
-        let target_ids = Self::targets_for(self.subs.keys().cloned(), allowed);
-        let centrals: Vec<Retained<CBCentral>> = target_ids
-            .iter()
-            .filter_map(|id| self.subs.get(id).map(|(c, _)| c.clone()))
-            .collect();
-        if centrals.is_empty() {
+        // 구독이 끊긴 central 은 보낼 곳이 없다. 큐는 구독 해제 콜백과
+        // `revoke_targets` 가 치우므로 여기서는 그냥 건너뛴다.
+        let Some((central, _)) = self.subs.get(central_id).cloned() else {
             return;
-        }
-        let refs: Vec<&CBCentral> = centrals.iter().map(|c| &**c).collect();
-        let targets = NSArray::from_slice(&refs);
-        let Some(q) = self.queues.get_mut(ch_uuid) else {
+        };
+        let target: &CBCentral = &central;
+        let targets = NSArray::from_slice(&[target]);
+        let Some(q) = self.queues.get_mut(&(ch_uuid, central_id.to_string())) else {
             return;
         };
         q.pump(|chunk| {
             let data = NSData::with_bytes(chunk);
-            // 인가된 central 로 미리 좁혀둔 targets 로만 보낸다(3단계 페어링).
+            // 이 central 하나에만 보낸다(3단계 페어링).
             unsafe {
                 mgr.updateValue_forCharacteristic_onSubscribedCentrals(
                     &data,
@@ -135,6 +140,15 @@ impl MainState {
                 )
             }
         });
+    }
+
+    /// 이 characteristic 을 기다리는 모든 central 의 큐를 두드린다.
+    /// backpressure 해제 재개 콜백은 어느 central 때문에 막혔는지 알려주지
+    /// 않으므로, 재개 시에는 전부 한 번씩 돌려야 한다.
+    fn pump_all(&mut self, ch_uuid: &'static str) {
+        for id in Self::queued_centrals(&self.queues, ch_uuid) {
+            self.pump(ch_uuid, &id);
+        }
     }
 }
 
@@ -218,6 +232,10 @@ define_class!(
             let id = central_id(central);
             let mut st = self.ivars().borrow_mut();
             st.subs.remove(&id);
+            // 큐도 함께 버린다. 남겨두면 다시 구독했을 때 끊기기 전의 꼬리
+            // 청크가 먼저 나가 한 프레임을 버리게 되고, 다시 오지 않을
+            // central 의 큐가 계속 쌓인다.
+            MainState::drop_queues_for(&mut st.queues, std::slice::from_ref(&id));
             let _ = st.events.send(PeripheralEvent::Unsubscribed(CentralId(id.clone())));
             // 인가는 연결 단위다 — 링크가 끊기면 그 central 의 인가도 즉시 지워야
             // 한다(BleBridge.forget_central 이 이 이벤트를 받아 처리한다).
@@ -255,7 +273,7 @@ define_class!(
                     q.on_ready();
                 }
             }
-            self.ivars().borrow_mut().pump(CharId::Snapshot.uuid());
+            self.ivars().borrow_mut().pump_all(CharId::Snapshot.uuid());
         }
     }
 );
@@ -392,8 +410,9 @@ impl BlePeripheral for MacPeripheral {
                     manager: None,
                     chars: HashMap::new(),
                     subs: HashMap::new(),
-                    queues: HashMap::from([(CharId::Snapshot.uuid(), SendQueue::new())]),
-                    authorized_targets: HashMap::new(),
+                    // 큐는 central 별이므로 미리 만들어둘 수 없다.
+                    // `offer_frame_to` 가 그 central 의 첫 프레임에서 만든다.
+                    queues: HashMap::new(),
                     events,
                 };
                 let d = Delegate::alloc().set_ivars(RefCell::new(state));
@@ -432,26 +451,30 @@ impl BlePeripheral for MacPeripheral {
             // didSubscribe 가 다시 오지 않아 subs_mirror 가 영원히 비어 미러가 멈춘다.
             let mut st = d.ivars().borrow_mut();
             st.subs.clear();
-            // 큐도 같은 이유로 비운다. stop() 에 잘린 프레임이 current 에 started=true 로
+            // 큐도 같은 이유로 버린다. stop() 에 잘린 프레임이 current 에 started=true 로
             // 남으면 재개 후 낡은 꼬리 청크가 먼저 나가 한 프레임을 버리게 되고,
             // paused 가 true 로 남았다면 다음 isReadyToUpdateSubscribers 가 올 때까지
-            // 큐 전체가 멈춘다.
-            st.queues.values_mut().for_each(|q| *q = SendQueue::new());
+            // 큐 전체가 멈춘다. 이제 큐가 central 별이라 값만 갈아끼우는 대신
+            // 통째로 비운다 — 재개 후 재구독한 central 에게 `offer_frame_to` 가
+            // 새로 만들어준다.
+            st.queues.clear();
         });
     }
 
-    fn offer_frame(&self, ch: CharId, chunks: Vec<Vec<u8>>, authorized: &[CentralId]) {
+    fn offer_frame_to(&self, ch: CharId, central: &CentralId, chunks: Vec<Vec<u8>>) {
         let uuid = ch.uuid();
-        let ids: Vec<String> = authorized.iter().map(|c| c.0.clone()).collect();
+        let id = central.0.clone();
         with_delegate(&self.app, move |d| {
             {
                 let mut st = d.ivars().borrow_mut();
-                st.authorized_targets.insert(uuid, ids);
-                if let Some(q) = st.queues.get_mut(uuid) {
-                    q.offer(chunks);
-                }
+                // 이 central 의 첫 프레임이면 큐를 만든다. 호출자가 인가된
+                // 구독자에게만 부르므로 큐가 생기는 것 = 인가된 것이다.
+                st.queues
+                    .entry((uuid, id.clone()))
+                    .or_insert_with(SendQueue::new)
+                    .offer(chunks);
             }
-            d.ivars().borrow_mut().pump(uuid);
+            d.ivars().borrow_mut().pump(uuid, &id);
         });
     }
 
@@ -487,67 +510,75 @@ impl BlePeripheral for MacPeripheral {
         });
     }
 
-    /// `authorized_targets` 는 `offer_frame` 때만 갱신되므로, 인가 철회가
-    /// 그 경로를 거치지 않고도 즉시 반영되도록 여기서 모든 characteristic 의
-    /// 대상 목록에서 지운다 — 그러지 않으면 스테일한 목록으로 다음 `pump()`
-    /// (backpressure 해제 재개 포함)가 방금 철회된 central 에게 계속 보낸다.
+    /// 인가를 잃은 central 의 큐를 버린다. 큐에 이미 들어간 청크는
+    /// `on_snapshot` 을 다시 거치지 않고도 backpressure 해제 재개만으로
+    /// 마저 나가므로, 여기서 버리지 않으면 방금 철회된 central 이 남은
+    /// 청크를 계속 받는다.
     fn revoke_targets(&self, ids: &[CentralId]) {
         let ids: Vec<String> = ids.iter().map(|c| c.0.clone()).collect();
         with_delegate(&self.app, move |d| {
-            let mut st = d.ivars().borrow_mut();
-            for targets in st.authorized_targets.values_mut() {
-                *targets = MainState::without_revoked(std::mem::take(targets), &ids);
-            }
+            MainState::drop_queues_for(&mut d.ivars().borrow_mut().queues, &ids);
         });
     }
 }
 
+/// 큐 키가 곧 전송 대상이라는 성질을 CoreBluetooth 없이 지킨다.
+/// (예전 `targets_for_tests` 를 대체한다 — 인가 목록을 따로 들고 다니던
+/// `authorized_targets` 가 사라지면서 그 필터링 자체가 없어졌다.)
 #[cfg(test)]
-mod targets_for_tests {
-    use super::MainState;
+mod queue_routing_tests {
+    use super::{MainState, QueueKey};
+    use crate::ble::send_queue::SendQueue;
+    use std::collections::HashMap;
 
-    #[test]
-    fn excludes_a_subscriber_that_is_not_authorized() {
-        let subs = vec!["AUTHORIZED".to_string(), "EAVESDROPPER".to_string()];
-        let allowed = vec!["AUTHORIZED".to_string()];
-        assert_eq!(
-            MainState::targets_for(subs.into_iter(), &allowed),
-            vec!["AUTHORIZED".to_string()]
-        );
+    fn queues(keys: &[(&'static str, &str)]) -> HashMap<QueueKey, SendQueue> {
+        keys.iter()
+            .map(|(u, id)| ((*u, id.to_string()), SendQueue::new()))
+            .collect()
     }
 
     #[test]
-    fn sends_to_nobody_when_authorized_targets_is_still_empty() {
-        // authorized_targets 가 아직 한 번도 채워지지 않았을 때(HashMap::get 이
-        // None 을 주고 pump() 는 빈 슬라이스로 대체한다). 구독자가 있어도
-        // 아무도 대상이 아니어야 한다 — fail-closed.
-        let subs = vec!["A".to_string()];
-        assert_eq!(MainState::targets_for(subs.into_iter(), &[]), Vec::<String>::new());
+    fn sends_to_nobody_when_no_queue_exists_yet() {
+        // 구독만으로는 큐가 생기지 않는다 — `offer_frame_to` 가 인가된
+        // central 에게 불려야 생긴다. 그 전에는 아무도 대상이 아니다(fail-closed).
+        let q = queues(&[]);
+        assert_eq!(MainState::queued_centrals(&q, "SNAP"), Vec::<String>::new());
     }
 
     #[test]
-    fn without_revoked_drops_only_the_given_ids() {
-        let targets = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let revoked = vec!["B".to_string()];
-        assert_eq!(
-            MainState::without_revoked(targets, &revoked),
-            vec!["A".to_string(), "C".to_string()]
-        );
-    }
-
-    #[test]
-    fn without_revoked_is_a_noop_when_nothing_matches() {
-        let targets = vec!["A".to_string()];
-        let revoked = vec!["ZZZ".to_string()];
-        assert_eq!(MainState::without_revoked(targets, &revoked), vec!["A".to_string()]);
-    }
-
-    #[test]
-    fn includes_every_authorized_subscriber() {
-        let subs = vec!["A".to_string(), "B".to_string()];
-        let allowed = vec!["A".to_string(), "B".to_string()];
-        let mut got = MainState::targets_for(subs.into_iter(), &allowed);
+    fn lists_every_central_queued_for_that_characteristic() {
+        let q = queues(&[("SNAP", "A"), ("SNAP", "B"), ("AUTH", "C")]);
+        let mut got = MainState::queued_centrals(&q, "SNAP");
         got.sort();
-        assert_eq!(got, vec!["A".to_string(), "B".to_string()]);
+        assert_eq!(
+            got,
+            vec!["A".to_string(), "B".to_string()],
+            "다른 characteristic 의 큐가 섞이면 안 된다"
+        );
+    }
+
+    #[test]
+    fn drop_queues_for_removes_only_the_given_centrals() {
+        let mut q = queues(&[("SNAP", "A"), ("SNAP", "B"), ("SNAP", "C")]);
+        MainState::drop_queues_for(&mut q, &["B".to_string()]);
+        let mut got = MainState::queued_centrals(&q, "SNAP");
+        got.sort();
+        assert_eq!(got, vec!["A".to_string(), "C".to_string()]);
+    }
+
+    /// 인가 철회는 그 central 의 **모든** characteristic 큐를 지워야 한다.
+    #[test]
+    fn drop_queues_for_removes_that_central_from_every_characteristic() {
+        let mut q = queues(&[("SNAP", "A"), ("AUTH", "A"), ("SNAP", "B")]);
+        MainState::drop_queues_for(&mut q, &["A".to_string()]);
+        assert_eq!(MainState::queued_centrals(&q, "SNAP"), vec!["B".to_string()]);
+        assert_eq!(MainState::queued_centrals(&q, "AUTH"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn drop_queues_for_is_a_noop_when_nothing_matches() {
+        let mut q = queues(&[("SNAP", "A")]);
+        MainState::drop_queues_for(&mut q, &["ZZZ".to_string()]);
+        assert_eq!(MainState::queued_centrals(&q, "SNAP"), vec!["A".to_string()]);
     }
 }

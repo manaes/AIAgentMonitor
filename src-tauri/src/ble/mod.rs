@@ -78,14 +78,13 @@ impl BleBridge {
             return;
         }
         // 인가된 구독자만 대상으로 삼는다. 미인가 기기가 붙어 있어도
-        // 스냅샷은 만들지 않는다(스펙 5.1). 청크 크기도 인가된 구독자
-        // 기준으로만 정해야, 미인가 기기의 작은 MTU 에 끌려가지 않는다.
+        // 스냅샷은 만들지 않는다(스펙 5.1).
         let authorized = self
             .peripheral
             .authorized_subscribers(&|id| pairing.is_authorized(id));
-        let Some(max_chunk) = authorized.iter().map(|s| s.max_notify_len).min() else {
+        if authorized.is_empty() {
             return;
-        };
+        }
         if !self.gate.should_emit(snap, now) {
             return;
         }
@@ -104,13 +103,27 @@ impl BleBridge {
         let frame_id = self.next_frame_id;
         self.next_frame_id = self.next_frame_id.wrapping_add(1);
 
-        let ids: Vec<CentralId> = authorized.iter().map(|s| s.id.clone()).collect();
-        match framing::chunk(frame_id, &json, max_chunk) {
-            Ok(chunks) => self.peripheral.offer_frame(CharId::Snapshot, chunks, &ids),
-            Err(e) => {
-                tracing::error!("청킹 실패: {e:?}");
-                self.gate.reset();
+        let mut sent_any = false;
+        for sub in &authorized {
+            // 청크 크기는 이 central 의 MTU 로 정한다. 예전처럼 전체 최솟값을
+            // 쓰면 MTU 가 작은 기기 하나가 아이폰의 청크까지 잘게 만든다.
+            match framing::chunk(frame_id, &json, sub.max_notify_len) {
+                Ok(chunks) => {
+                    self.peripheral.offer_frame_to(CharId::Snapshot, &sub.id, chunks);
+                    sent_any = true;
+                }
+                Err(e) => {
+                    // 한 기기가 못 받는다고 다른 기기까지 막지 않는다 — 예전에는
+                    // 청크 크기가 공용이라 여기서 모두의 프레임이 사라졌다.
+                    tracing::error!("청킹 실패({}): {e:?}", sub.id.0);
+                }
             }
+        }
+        if !sent_any {
+            // 아무도 못 받았으면 게이트가 이미 "송출함"으로 커밋한 것을 되돌려
+            // 다음 틱에 같은 내용이라도 다시 시도되게 한다. 한 명이라도 받았다면
+            // 내용은 실제로 나갔으므로 되돌리지 않는다.
+            self.gate.reset();
         }
     }
 
@@ -503,6 +516,55 @@ mod tests {
         assert!(frames[0].1[0].len() > 23, "미인가 구독자의 MTU 에 끌려가면 안 된다");
     }
 
+    /// MTU 가 작은 기기가 붙어도 큰 기기의 청크가 작아지면 안 된다.
+    /// 예전에는 인가된 구독자 전체의 최솟값을 썼다.
+    #[test]
+    fn each_central_gets_chunks_sized_for_its_own_mtu() {
+        let (mut b, fake, mut p) = bridge();
+        b.set_enabled(true).unwrap();
+        fake.set_subscribers(vec![
+            Subscriber { id: CentralId("BIG".into()), max_notify_len: 185 },
+            Subscriber { id: CentralId("SMALL".into()), max_notify_len: 23 },
+        ]);
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, &mut p, "BIG", now);
+        authorize(&mut b, &mut p, "SMALL", now);
+
+        b.on_snapshot(&snap(1.0, 1000), now, &p);
+
+        let frames = fake.taken_frames_by_central();
+        let big = frames.iter().find(|(c, _, _)| c.0 == "BIG").expect("BIG 에게 갔다");
+        let small = frames.iter().find(|(c, _, _)| c.0 == "SMALL").expect("SMALL 에게 갔다");
+        assert!(
+            big.2[0].len() > small.2[0].len(),
+            "MTU 가 큰 기기는 더 큰 청크를 받아야 한다"
+        );
+    }
+
+    /// 한 기기의 청킹 실패가 다른 기기의 프레임까지 없애면 안 된다. 예전에는
+    /// 청크 크기가 전체 최솟값이라 MTU 가 작은 기기 하나 때문에 `TooLarge` 가
+    /// 나면 **모두의** 프레임이 사라졌다.
+    #[test]
+    fn chunking_failure_for_one_central_does_not_silence_the_others() {
+        let (mut b, fake, mut p) = bridge();
+        b.set_enabled(true).unwrap();
+        // max_notify_len 4 → 본문 1바이트. big_snap 은 255청크를 훌쩍 넘으므로
+        // TINY 에 대해서만 framing::chunk 이 TooLarge 로 실패한다.
+        fake.set_subscribers(vec![
+            Subscriber { id: CentralId("BIG".into()), max_notify_len: 185 },
+            Subscriber { id: CentralId("TINY".into()), max_notify_len: 4 },
+        ]);
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        authorize(&mut b, &mut p, "BIG", now);
+        authorize(&mut b, &mut p, "TINY", now);
+
+        b.on_snapshot(&big_snap(1.0, 1000), now, &p);
+
+        let frames = fake.taken_frames_by_central();
+        assert_eq!(frames.len(), 1, "실패한 기기만 빠져야 한다");
+        assert_eq!(frames[0].0, CentralId("BIG".into()));
+    }
+
     #[test]
     fn handle_auth_signals_persist_only_on_grant() {
         let (mut b, _fake, mut p) = bridge();
@@ -541,13 +603,11 @@ mod tests {
     }
 
     /// 리뷰(Task 3 전체 리뷰)가 지적한 잔여 위험: `unpair_*`/`forget_central`
-    /// 은 `pairing.rs` 의 인가 상태만 지우고, macOS 쪽 `authorized_targets`
-    /// (characteristic 별 마지막 전송 대상)는 손대지 않았었다. 인가된
-    /// 구독자가 0명이 되면 `on_snapshot` 이 `offer_frame` 이전에 조기
-    /// 반환하므로 그 뒤로 `authorized_targets` 는 영원히 갱신되지 않고,
-    /// 스테일한 목록을 들고 있다가 backpressure 해제 재개 시 방금 철회된
-    /// central 에게 계속 보낼 수 있었다. `revoke_targets` 가 그 경로 없이도
-    /// 즉시 지운다는 것을 확인한다.
+    /// 은 `pairing.rs` 의 인가 상태만 지우고, macOS 쪽 전송 자원은 손대지
+    /// 않았었다. 큐에 이미 들어간 청크는 `on_snapshot` 을 다시 거치지 않고도
+    /// backpressure 해제 재개만으로 마저 나가므로, 인가를 잃은 central 이
+    /// 남은 청크를 계속 받을 수 있었다. `revoke_targets` 가 그 경로 없이도
+    /// 즉시 큐를 버린다는 것을 확인한다.
     #[test]
     fn forget_central_revokes_stale_pump_targets_immediately() {
         let (mut b, fake, mut p) = bridge();
@@ -558,7 +618,7 @@ mod tests {
         }]);
         let now = UNIX_EPOCH + Duration::from_secs(1000);
         authorize(&mut b, &mut p, "A", now);
-        b.on_snapshot(&snap(1.0, 1000), now, &p); // authorized_targets 에 "A" 가 기록된다
+        b.on_snapshot(&snap(1.0, 1000), now, &p); // "A" 의 송신 큐가 생긴다
         fake.taken_frames();
 
         b.forget_central(&CentralId("A".into()));
