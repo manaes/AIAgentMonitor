@@ -932,10 +932,6 @@ mod tests {
         assert!(m.is_authorized(&id("B")), "다른 토큰으로 인가된 세션은 영향받지 않아야 한다");
     }
 
-    #[test]
-    /// 전송 하나를 끌 때, 그 전송이 서비스 중이던 central 만 정리해야 한다.
-    /// BLE 와 네트워크가 하나의 PairingManager 를 공유하므로(2026-08-25 스펙 4장),
-    /// end_all_sessions 를 쓰면 BLE 를 끄는 순간 네트워크 세션까지 죽는다.
     // ── 두 전송이 공유하는 창 (2026-08-25 스펙 9장) ──
 
     /// 이 설계의 **핵심 보안 성질**: 시도 예산은 창 하나에 묶여 있으므로,
@@ -985,6 +981,9 @@ mod tests {
         );
     }
 
+    /// 전송 하나를 끌 때, 그 전송이 서비스 중이던 central 만 정리해야 한다.
+    /// BLE 와 네트워크가 하나의 PairingManager 를 공유하므로(2026-08-25 스펙 4장),
+    /// end_all_sessions 를 쓰면 BLE 를 끄는 순간 네트워크 세션까지 죽는다.
     #[test]
     fn end_sessions_only_drops_the_given_centrals() {
         let mut m = PairingManager::new();
@@ -1018,6 +1017,7 @@ mod tests {
         assert!(m.is_authorized(&id("A")));
     }
 
+    #[test]
     fn end_all_sessions_drops_authorization_but_keeps_tokens() {
         let mut m = PairingManager::new();
         let code_a = m.begin_pairing(t(1000));
