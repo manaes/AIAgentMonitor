@@ -112,12 +112,9 @@ export type PairedPeer = { peer_id: string; paired_at: number; connected: boolea
 export type PairingStatus = {
   pairing_window: PairingWindow;
   paired_peers: PairedPeer[];
-};
-
-export type PairingInfo = {
-  code: string;
-  // 네트워크 공유가 켜져 있을 때만 채워진다 — BLE 만 켜져 있으면 QR 을 그릴
-  // 이유가 없다. 같은 코드가 6자리로도, QR 안에도 들어 있다.
+  // 창이 열려 있고 네트워크 공유가 켜져 있을 때만 채워진다. 상태에서 파생되므로
+  // 창을 연 뒤에 네트워크를 켜도 바로 따라온다 — begin_pairing 응답에 한 번만
+  // 실어 보내던 초안은 그 경우 QR 이 영영 안 나오는 버그였다.
   qr_payload: string | null;
 };
 
@@ -125,8 +122,8 @@ export async function pairingStatus(): Promise<PairingStatus> {
   return invoke<PairingStatus>("pairing_status");
 }
 
-export async function beginPairing(): Promise<PairingInfo> {
-  return invoke<PairingInfo>("begin_pairing");
+export async function beginPairing(): Promise<void> {
+  return invoke<void>("begin_pairing");
 }
 
 export async function unpair(peerId: string): Promise<void> {

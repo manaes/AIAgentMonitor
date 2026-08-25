@@ -94,6 +94,8 @@ class SnapshotStore {
       const status = await bleStatus();
       if (seq === this.#bleReqSeq) this.ble = status;
       this.bleActionError = null;
+      // 전송을 켜고 끄면 페어링 영역에 무엇을 보여줄지가 달라진다.
+      await this.#refreshPairing();
     } catch (e) {
       this.bleActionError = `BLE 설정을 변경하지 못했습니다: ${e}`;
     }
@@ -131,6 +133,8 @@ class SnapshotStore {
       const status = await networkStatus();
       if (seq === this.#networkReqSeq) this.network = status;
       this.networkActionError = null;
+      // 네트워크를 켜면 (창이 열려 있다면) QR 이 생긴다 — 다시 읽어야 보인다.
+      await this.#refreshPairing();
     } catch (e) {
       this.networkActionError = `네트워크 설정을 변경하지 못했습니다: ${e}`;
     }
@@ -142,8 +146,6 @@ class SnapshotStore {
   // 여기엔 이벤트 push 가 없어 동작 직후 직접 다시 읽는다.
   pairing = $state<PairingStatus | null>(null);
   pairingActionError = $state<string | null>(null);
-  /// 페어링 시작 시 받은 QR 페이로드. 네트워크가 꺼져 있으면 null 이다.
-  qrPayload = $state<string | null>(null);
   #pairingInitialized = false;
   #pairingReqSeq = 0;
 
@@ -161,8 +163,7 @@ class SnapshotStore {
 
   async beginPairing() {
     try {
-      const info = await beginPairing();
-      this.qrPayload = info.qr_payload;
+      await beginPairing();
       await this.#refreshPairing();
       this.pairingActionError = null;
     } catch (e) {
@@ -184,7 +185,6 @@ class SnapshotStore {
     try {
       await unpairAll();
       await this.#refreshPairing();
-      this.qrPayload = null;
       this.pairingActionError = null;
     } catch (e) {
       this.pairingActionError = `전체 해제에 실패했습니다: ${e}`;

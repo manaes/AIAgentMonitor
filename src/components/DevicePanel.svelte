@@ -54,7 +54,7 @@
   // QR 은 네트워크가 켜져 있을 때만 만들어진다(백엔드가 null 로 준다).
   let qrDataUrl = $state<string | null>(null);
   $effect(() => {
-    const payload = pairingWindow.kind === "open" ? store.qrPayload : null;
+    const payload = pairingWindow.kind === "open" ? (store.pairing?.qr_payload ?? null) : null;
     if (!payload) {
       qrDataUrl = null;
       return;

@@ -62,13 +62,12 @@ pub struct PairingStatus {
     /// 보인다는 것이 창에 소유자를 두지 않기로 한 근거의 절반이다(스펙 5.1).
     pub pairing_window: ble::pairing::PairingWindow,
     pub paired_peers: Vec<ble::pairing::PairedPeer>,
-}
-
-#[derive(Clone, serde::Serialize)]
-pub struct PairingInfo {
-    pub code: String,
-    /// 네트워크 공유가 켜져 있을 때만 Some — 폰이 QR 로 스캔할 페이로드다.
-    /// BLE 만 켜져 있으면 QR 을 그릴 이유가 없다.
+    /// 폰이 QR 로 스캔할 페이로드. **창이 열려 있고 네트워크 공유가 켜져 있을
+    /// 때만** Some 이다.
+    ///
+    /// 이 값을 `begin_pairing` 응답에 한 번만 실어 보내던 초안은 버그였다 —
+    /// 창을 연 **뒤에** 네트워크를 켜면 QR 이 영영 안 나왔다. 상태에서 파생
+    /// 시키면 그 순간 바로 따라온다.
     pub qr_payload: Option<String>,
 }
 
@@ -230,34 +229,36 @@ async fn build_qr_payload(handle: &NetworkHandle, code: &str) -> String {
 #[tauri::command]
 async fn pairing_status(
     pairing: tauri::State<'_, SharedPairing>,
+    network_state: tauri::State<'_, Arc<NetworkHandle>>,
 ) -> Result<PairingStatus, String> {
     let now = std::time::SystemTime::now();
-    let p = pairing.lock().await;
-    Ok(PairingStatus {
-        pairing_window: p.pairing_window(now),
-        paired_peers: p.paired_peers(),
-    })
+    let (pairing_window, paired_peers) = {
+        let p = pairing.lock().await;
+        (p.pairing_window(now), p.paired_peers())
+    };
+    // 창이 열려 있고 네트워크가 켜져 있을 때만 QR 을 만든다 — 둘 중 하나라도
+    // 아니면 그릴 이유가 없다.
+    let qr_payload = match &pairing_window {
+        ble::pairing::PairingWindow::Open { code, .. }
+            if network_state.bridge.lock().await.is_enabled() =>
+        {
+            Some(build_qr_payload(&network_state, code).await)
+        }
+        _ => None,
+    };
+    Ok(PairingStatus { pairing_window, paired_peers, qr_payload })
 }
 
 /// 사용자가 Devices 탭에서 [페어링 시작] 을 눌렀을 때만 호출한다. 이 버튼이
 /// 없으면 보안 근거(스펙 5.1: 코드는 사용자 제스처에서만 발급)가 성립하지
 /// 않는다 — 코드는 `pairing_status` 로만 화면에 흐르고 링크로는 나가지 않는다.
 ///
-/// 창은 **두 전송이 공유한다**. 켜져 있는 전송에 맞는 것만 돌려준다 — BLE 만
-/// 켜져 있으면 QR 은 None 이다(그릴 이유가 없다).
+/// 창은 **두 전송이 공유한다.** 코드도 QR 도 `pairing_status` 가 창 상태에서
+/// 파생시키므로 여기서는 창만 연다.
 #[tauri::command]
-async fn begin_pairing(
-    pairing: tauri::State<'_, SharedPairing>,
-    network_state: tauri::State<'_, Arc<NetworkHandle>>,
-) -> Result<PairingInfo, String> {
-    let code = pairing.lock().await.begin_pairing(std::time::SystemTime::now());
-    let network_on = network_state.bridge.lock().await.is_enabled();
-    let qr_payload = if network_on {
-        Some(build_qr_payload(&network_state, &code).await)
-    } else {
-        None
-    };
-    Ok(PairingInfo { code, qr_payload })
+async fn begin_pairing(pairing: tauri::State<'_, SharedPairing>) -> Result<(), String> {
+    pairing.lock().await.begin_pairing(std::time::SystemTime::now());
+    Ok(())
 }
 
 /// 저장소를 갱신하고, 내려간 세션을 **두 브릿지 모두**에 알린다. 그 central 이
