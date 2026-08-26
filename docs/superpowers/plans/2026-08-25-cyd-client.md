@@ -70,7 +70,7 @@
   - `pub struct LanBridge`
   - `pub fn new() -> LanBridge`
   - `pub fn is_enabled(&self) -> bool`
-  - `pub fn set_enabled(&mut self, on: bool) -> anyhow::Result<()>`
+  - `pub fn set_enabled(&mut self, on: bool)   // network 브리지와 동일 — Result 아님`
   - `pub fn served_centrals(&self) -> Vec<CentralId>`
   - `pub fn last_error(&self) -> Option<String>`
 
@@ -144,7 +144,7 @@ impl LanBridge {
         self.enabled
     }
 
-    pub fn set_enabled(&mut self, on: bool) -> anyhow::Result<()> {
+    pub fn set_enabled(&mut self, on: bool)   // network 브리지와 동일 — Result 아님 {
         if on == self.enabled {
             return Ok(());
         }
@@ -424,7 +424,13 @@ git commit -m "feat(lan): WebSocket 서버와 연결 수명 — 연결 하나가
 **Interfaces:**
 - Consumes: Task 2 의 `ServerEvent`, E2EE 계획 Task 6·7 의 v2 분기
 - Produces: `pub fn handle_auth(&mut self, id: &CentralId, data: &[u8], pairing: &mut PairingManager) -> AuthOutcome`
-  where `pub struct AuthOutcome { pub payload: Vec<u8>, pub now_authorized: bool }`
+  where `pub struct AuthOutcome { pub payload: Vec<u8>, pub now_authorized: bool, pub granted: bool }`
+
+> **정정 2026-08-26.** 초안은 `granted` 를 뺐다 — "LAN 은 v2 전용이라 필요 없다"는
+> 판단이었는데 **틀렸다.** `granted` 는 `lib.rs:885` 에서 토큰을 디스크에 쓰는 신호이고,
+> v2 페어링(`Granted2`)도 새 토큰을 발급한다. 빠뜨리면 LAN 으로 페어링한 기기가 그
+> 세션에서는 동작하다가 맥을 껐다 켜는 순간 토큰이 사라져 영영 재연결이 안 된다.
+> `ble/mod.rs:183-189` 의 주석이 같은 이유를 적어두고 있다.
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -561,7 +567,15 @@ git commit -m "feat(lan): 인증 배선 — 프레임을 그대로 PairingManage
 
 **Interfaces:**
 - Consumes: E2EE 계획 Task 7 의 `PairingManager::channel_mut`, Task 2 의 `Outbound`
-- Produces: `pub fn on_snapshot(&mut self, snap: &Snapshot, pairing: &mut PairingManager, out: &UnboundedSender<Outbound>)`
+- Produces:
+  - `pub fn prepare_snapshot(&mut self, snap: &Snapshot, now: SystemTime, pairing: &mut PairingManager) -> Vec<(CentralId, Vec<u8>)>` — 동기, 봉인까지만
+  - `pub async fn send_prepared(&mut self, lines: Vec<(CentralId, Vec<u8>)>)` — 비동기, 쓰기만
+
+> **정정 2026-08-26.** 초안은 `on_snapshot` 하나였다. E2EE v2 작업 중
+> `network/mod.rs` 가 이 둘로 쪼개졌다 — 페어링 잠금이 `write_all().await` 를 넘어
+> 유지되면 폰 하나가 백그라운드로 내려갔을 때 `begin_pairing` 과 양 전송의
+> `handle_auth` 가 수십 초 멈추기 때문이다. LAN 도 같은 모양을 따른다:
+> 호출부가 `prepare_snapshot` 뒤 `drop(pairing)` 하고 `send_prepared` 를 부른다.
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -982,7 +996,7 @@ USB-C 면 `v2`, 둘 다 있으면 `v3`(디스플레이가 **ST7789** 다).
 ```ini
 [env:cyd]
 platform = espressif32
-board = esp32-2432S028R          ; 변종에 맞게 v2 / v3 로 바꾼다
+board = esp32-2432S028Rv3        ; 실물 확인됨(2026-08-26) — ST7789 판이다
 framework = arduino
 monitor_speed = 115200
 platform_packages =

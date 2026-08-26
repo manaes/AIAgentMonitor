@@ -27,6 +27,10 @@ ESP32 Cheap Yellow Display(CYD)를 **세 번째 클라이언트**로 추가한�
 | 터치 | XPT2046 (저항막) |
 | 무선 | WiFi + BT 4.2 |
 
+**실물 확인 완료 (2026-08-26): `esp32-2432S028Rv3` — USB-C 와 마이크로 USB 가 둘 다
+있는 판이고 디스플레이 컨트롤러가 ILI9341 이 아니라 ST7789 다.** 아래는 셋을 구분하는
+원래 서술이며, 우리 보드는 v3 로 확정됐다.
+
 **변종이 셋이다** — `esp32-2432S028R`(마이크로 USB), `esp32-2432S028Rv2`(USB-C),
 `esp32-2432S028Rv3`(USB-C + 마이크로 USB, **ST7789**). 보드 정의 한 줄 차이지만 v3 는
 디스플레이 컨트롤러가 다르다. **실물이 도착하면 어느 변종인지 먼저 확인한다.**
@@ -78,11 +82,18 @@ MTU 를 기본값 23 으로 둔 기기가 붙으면 본문이 17바이트가 되
 ```rust
 pub fn new(...) -> Self
 pub fn is_enabled(&self) -> bool
-pub fn set_enabled(&mut self, on: bool) -> anyhow::Result<()>
+pub fn set_enabled(&mut self, on: bool)
 pub fn served_centrals(&self) -> Vec<CentralId>
-pub fn on_snapshot(&mut self, snap: &Snapshot, pairing: &PairingManager)
+// 봉인은 동기(페어링 잠금 필요), 쓰기는 비동기(잠금 불필요) — 잠금이 write 를
+// 넘지 않게 호출부가 사이에서 drop 한다. network 브리지가 같은 모양이다.
+pub fn prepare_snapshot(&mut self, snap: &Snapshot, now: SystemTime,
+                        pairing: &mut PairingManager) -> Vec<(CentralId, Vec<u8>)>
+pub async fn send_prepared(&mut self, lines: Vec<(CentralId, Vec<u8>)>)
 pub fn handle_auth(&mut self, id: &CentralId, data: &[u8],
                    pairing: &mut PairingManager) -> AuthOutcome
+//   AuthOutcome { payload, now_authorized, granted } — granted 는 새 토큰 발급
+//   신호이고 v2 의 Granted2 도 포함해야 한다. 빠뜨리면 LAN 으로 페어링한 기기의
+//   토큰이 디스크에 안 남아 맥 재시작 후 영영 재연결이 안 된다.
 pub fn forget_central(&mut self, id: &CentralId)
 pub fn drop_sessions(&mut self, ids: &[CentralId])
 ```
