@@ -11,7 +11,7 @@ pub mod server;
 use crate::ble::peripheral::CentralId;
 use server::{ServerEvent, ServerHandle};
 use std::collections::HashSet;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 
 /// LAN 전송이 지금 서비스 중인 central 들과, 사용자에게 보여줄 마지막 오류를
 /// 들고 있는다. `network::NetworkBridge`와 표면을 맞춘 이유는 `lib.rs` 배선을
@@ -34,17 +34,17 @@ pub struct LanBridge {
     /// 서버 태스크가 이벤트를 올릴 통로. 리스너는 켰다 껐다 하지만 이 통로는
     /// 브리지와 수명을 같이한다 — 배선(`lib.rs`)이 수신 루프를 한 번만 걸면
     /// 되도록.
-    events: UnboundedSender<ServerEvent>,
+    events: Sender<ServerEvent>,
     /// 리스너가 붙을 포트. 운영에서는 언제나 `server::PORT` 다.
     port: u16,
 }
 
 impl LanBridge {
-    pub fn new(events: UnboundedSender<ServerEvent>) -> Self {
+    pub fn new(events: Sender<ServerEvent>) -> Self {
         Self::with_port(events, server::PORT)
     }
 
-    fn with_port(events: UnboundedSender<ServerEvent>, port: u16) -> Self {
+    fn with_port(events: Sender<ServerEvent>, port: u16) -> Self {
         Self {
             enabled: false,
             centrals: HashSet::new(),
@@ -125,12 +125,12 @@ impl LanBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+    use tokio::sync::mpsc::{channel, Receiver};
 
     /// 테스트는 임시 포트(0)로 띄운다 — 서로, 그리고 개발 중인 앱의 4320 을
     /// 밟지 않기 위해서다. 실제 포트가 열리고 닫히는지는 `server` 쪽 테스트가 본다.
-    fn bridge() -> (LanBridge, UnboundedReceiver<ServerEvent>) {
-        let (tx, rx) = unbounded_channel();
+    fn bridge() -> (LanBridge, Receiver<ServerEvent>) {
+        let (tx, rx) = channel(server::EVENT_QUEUE);
         (LanBridge::with_port(tx, 0), rx)
     }
 
@@ -244,7 +244,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "실제 4320 을 잡는다 — 손으로만"]
     async fn the_real_port_opens_and_closes_with_the_toggle() {
-        let (tx, _rx) = unbounded_channel();
+        let (tx, _rx) = channel(server::EVENT_QUEUE);
         let mut b = LanBridge::new(tx);
 
         assert!(
