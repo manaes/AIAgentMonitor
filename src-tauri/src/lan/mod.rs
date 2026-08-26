@@ -206,9 +206,12 @@ impl LanBridge {
             // 지우는 뜻이 무엇인지는 `forget_central` 한 곳에만 둔다 — 여기에
             // 베껴 두면 그쪽이 자라날 때 이쪽만 옛 동작에 남는다.
             self.forget_central(id);
-            // 리스너가 없으면(토글이 꺼졌다) 보낼 곳이 없다. 그 경우 애초에
-            // `set_enabled(false)` 가 `centrals` 를 비웠으므로 여기까지 오지도
-            // 않지만, 그 성질에 기대지 않는다.
+            // 리스너가 없으면(토글이 꺼졌다) 보낼 곳이 없다. **이 조합은 실제로
+            // 닿는다** — `set_enabled(false)` 가 `centrals` 를 비우고 핸들을
+            // 내려도, 서버 태스크가 종료되는 동안 늦은 `Connected` 가 올라와
+            // 목록을 다시 채울 수 있고 `apply_event` 는 `enabled` 를 보지 않고
+            // 넣는다(`serves` 의 doc). 그러면 `centrals` 에는 있는데 `server` 는
+            // `None` 이다.
             if let Some(h) = &self.server {
                 let _ = h.outbound.send(Outbound::Close(id.clone()));
             }
@@ -1562,11 +1565,19 @@ mod tests {
         );
     }
 
-    /// 해제할 것이 하나도 없을 때(다른 전송의 기기만 해제됐다) 아무 일도 하지
-    /// 않는다. `unpair` 는 그 central 이 어느 전송에 붙어 있었는지 모르는 채로
+    /// 해제할 것이 하나도 없을 때(다른 전송의 기기만 해제됐다) 이 전송의 목록은
+    /// 그대로다. `unpair` 는 그 central 이 어느 전송에 붙어 있었는지 모르는 채로
     /// 세 브리지 모두를 부르므로 이쪽이 평범한 경우다.
+    ///
+    /// **이름이 목록까지만 약속하는 것은 일부러다.** `drop_sessions` 의 doc 은
+    /// "모르는 id 에는 `Close` 를 쏘지 않는다"고도 적지만 그 규칙은 이 테스트가
+    /// 보지 못한다 — 브리지 테스트에는 `outbound` 를 관측할 수단이 없고(수신자는
+    /// 서버 태스크 안이다), 설령 쏘더라도 `server::push_to_sink` 가 모르는 id 를
+    /// 버리므로 바이트도 상태도 달라지지 않아 밖에서 구분할 방법 자체가 없다.
+    /// 그 문지기는 관측 가능한 결과가 아니라 규칙(`sessions_to_end` 의 doc)이고,
+    /// 여기에 `changes_nothing` 같은 이름을 붙이면 단언보다 많이 약속하게 된다.
     #[tokio::test]
-    async fn unpairing_a_central_from_another_transport_changes_nothing() {
+    async fn unpairing_a_central_from_another_transport_leaves_our_list_alone() {
         let mine = server::central_id(0);
         let (mut b, _rx) = live_bridge(&mine);
         b.drop_sessions(&[CentralId("ble:aa".into())]);
