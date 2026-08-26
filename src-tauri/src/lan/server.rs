@@ -25,19 +25,26 @@
 //! 연결 하나는 여덟 자리 중 하나이고, 자리를 놓지 않는 피어는 아무것도 키우지
 //! 않으면서 자리를 영원히 쓴다.
 //!
-//! **지금 시간 상한이 걸리는 곳은 정확히 둘이다.** 하나는 조용해진 피어
-//! (`IDLE_TIMEOUT`, 90초). 다른 하나는 **송신 경로가 밀린** 피어 — 큐가 차서
-//! 지워지면 하트비트를 보내지 못하고, 그 순간 연결을 놓는다.
+//! **시간 상한이 걸리는 곳은 셋이다.**
 //!
-//! 뒤쪽은 "읽지 않으면 얼마 뒤에 끊긴다"가 **아니다.** 큐가 차려면 커널 송신
-//! 버퍼가 먼저 차야 하고, 지금 이 전송이 내보내는 것은 30초에 한 번의 Ping
-//! 뿐이라(초당 1바이트 미만) 그 버퍼를 채우는 데만 수 주가 걸린다. 즉 오늘
-//! **읽지 않으면서 말은 하는 피어에게는 사실상 시한이 없다.** 스냅샷 푸시가
-//! 붙는 Task 4 부터 이 경로가 초 단위로 짧아지고, 그때 이 문장은 사실이 된다.
+//! 1. 조용해진 피어 — `IDLE_TIMEOUT`(90초). 마지막으로 무언가 받은 지 그만큼
+//!    지나면 사라진 것으로 본다.
+//! 2. 송신 경로가 밀린 피어 — 큐가 차서 지워지면 하트비트를 보내지 못하고,
+//!    그 순간 연결을 놓는다.
+//! 3. **인가되지 않은 피어 — `AUTH_DEADLINE`(150초).** 붙은 지 그만큼 지났는데도
+//!    인가되지 않았으면 놓는다.
 //!
-//! 그래서 **인증하지 않은 연결에 걸리는 절대 시한은 아직 없다.** 필요하고,
-//! Task 4 의 몫이다. 이 문단이 "이미 있다"고 읽히면 다음 사람이 확인을
-//! 건너뛴다 — 이 저장소는 그런 문서로 이미 세 번 값을 치렀다.
+//! 셋 중 앞의 둘은 피어가 하기 나름이다. 1번은 계속 말하면 오지 않고, 2번은
+//! 상대가 읽지 않아 커널 송신 버퍼까지 차야 오는데 그 시간은 우리가 얼마나
+//! 보내느냐에 달려 있다 — 하트비트만 흐르던 때(초당 1바이트 미만)는 수 주,
+//! 스냅샷이 흐르는 지금은 초 단위다. 즉 **말은 하면서 읽지 않는 피어에게
+//! 앞의 둘은 상한이 아니라 산수였다.** 산수는 트래픽이 바뀌면 함께 바뀐다.
+//!
+//! 3번만 상대가 무엇을 보내든 읽든 늘어나지 않는다. 그것이 이 시한의 존재
+//! 이유이고, 자리 여덟 개가 실제로 회수된다는 유일한 근거다.
+//!
+//! "왜 하필 150초인가"는 `AUTH_DEADLINE` 의 doc 에 있다 — 그 숫자는 페어링
+//! 코드의 수명에 묶여 있어서, 한쪽만 바꾸면 조용히 깨진다.
 
 use crate::ble::peripheral::CentralId;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -48,7 +55,7 @@ use axum::routing::get;
 use axum::Router;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender};
@@ -73,7 +80,7 @@ pub const PORT: u16 = 4320;
 ///
 /// 64 KiB 는 그 위에 얹은 여유다. 늘리기 전에 위 두 줄이 아직 사실인지 보라 —
 /// "조금만 풀자"는 곧 인증 전 메모리를 그만큼 내주는 것이다.
-const MAX_FRAME_BYTES: usize = 64 * 1024;
+pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
 /// 동시 연결 상한. 연결 하나가 태스크 둘 · 채널 둘 · 맵 항목 둘을 잡는다.
 /// 책상 위 기기 하나(+ 재접속이 겹치는 한둘)면 충분한데, 상한이 없으면 같은
@@ -110,18 +117,48 @@ const SINK_QUEUE: usize = 8;
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// 하트비트 타이밍. 상수를 그대로 쓰지 않고 값으로 들고 다니는 이유는
-/// 90초를 실제로 기다리지 않고도 "조용해진 피어를 정말 놓는가"를 테스트가
-/// 확인할 수 있게 하기 위해서다 — `port` 를 인자로 받는 것과 같은 이유다.
+/// 인증 시한 — **인가되지 않은 연결이 자리를 붙들 수 있는 절대 상한**이다.
+/// 연결이 성립한 순간부터 재고, 상대가 무엇을 보내든 읽든 늘어나지 않는다.
+///
+/// **왜 늘어나면 안 되나.** 늘어나는 순간 그것은 상한이 아니라 산수가 된다.
+/// `IDLE_TIMEOUT` 은 말을 계속 하면 오지 않고, 송신 큐 상한은 우리가 얼마나
+/// 보내느냐에 따라 수 주에서 수 초 사이를 오간다. 둘 다 피어가 조종할 수
+/// 있으므로, 자리 여덟 개가 회수된다는 보장을 그 위에 세울 수 없다.
+///
+/// **왜 `CODE_TTL` 보다 긴가 — 여기가 이 숫자의 전부다.** 페어링 전 구간이
+/// 인가되지 않은 연결 위에서 일어난다: CYD 가 붙어 `HELLO2` 를 보내고, 맥
+/// 화면의 여섯 자리를 사람이 읽어 기기 키패드로 넣고, 그제서야 `CODE2` 가
+/// 나간다(스펙 6장의 흐름도). 그 **사람 시간**의 예산을 정해 둔 것이 페어링
+/// 코드의 수명 `pairing::CODE_TTL`(120초)이다.
+///
+/// 시한이 그보다 짧으면 사람이 키패드 앞에 서 있는 동안 연결이 끊긴다. 다시
+/// 붙은 연결에는 `HELLO2` 트랜스크립트가 없으므로(연결 하나 = 세션 하나),
+/// 방금 제대로 입력한 코드가 `Rejected` 로 돌아온다 — 사용자에게는 "맞는
+/// 코드인데 틀렸다고 한다"로 보이고, 이 앱은 로그를 남기지 않으므로 원인을
+/// 알 방법이 없다. 그래서 120초에 왕복·재접속 여유 30초를 얹었다.
+///
+/// 30초를 더 얹어도 상한의 성질은 그대로다: 자리 하나가 최악 150초마다
+/// 회수되는 것과 영영 회수되지 않는 것의 차이가 이 상수의 전부이고,
+/// 150 과 60 의 차이는 그다음 문제다.
+///
+/// 줄이고 싶어지면 `CODE_TTL` 을 먼저 보라 — 둘의 관계는
+/// `the_auth_deadline_outlives_the_code_a_human_is_typing` 이 못박아 둔다.
+const AUTH_DEADLINE: Duration = Duration::from_secs(150);
+
+/// 하트비트와 인증 시한의 타이밍. 상수를 그대로 쓰지 않고 값으로 들고 다니는
+/// 이유는 90초·150초를 실제로 기다리지 않고도 "조용해진 피어를 정말 놓는가",
+/// "인가되지 않은 피어를 정말 놓는가"를 테스트가 확인할 수 있게 하기
+/// 위해서다 — `port` 를 인자로 받는 것과 같은 이유다.
 #[derive(Debug, Clone, Copy)]
 pub struct Timing {
     pub ping: Duration,
     pub idle: Duration,
+    pub auth: Duration,
 }
 
 impl Default for Timing {
     fn default() -> Self {
-        Self { ping: PING_INTERVAL, idle: IDLE_TIMEOUT }
+        Self { ping: PING_INTERVAL, idle: IDLE_TIMEOUT, auth: AUTH_DEADLINE }
     }
 }
 
@@ -140,6 +177,34 @@ fn heartbeat(silent_for: Duration, timing: &Timing) -> Heartbeat {
         Heartbeat::Drop
     } else {
         Heartbeat::Ping
+    }
+}
+
+/// 인증 시한이 다다랐을 때의 판단. `Heartbeat` 와 같은 이유로 연결 코드에서
+/// 떼어 두었다 — 이것은 "무엇이 자리를 계속 쓸 자격이 있는가"라는 정책이다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deadline {
+    /// 아직 인가되지 않았다 — 놓는다.
+    Drop,
+    /// 이미 인가됐다. 인가된 연결에는 시한이 없으므로 **다시 재지 않는다.**
+    ///
+    /// 한 번 걷힌 시한은 돌아오지 않는다. 그래서 사용자가 기기를 해제해도
+    /// (`unpair`) 그 연결은 시한 없이 자리에 남는다 — 바이트는 한 톨도 나가지
+    /// 않지만(`lan::sealed_frame` 의 인가 검사) 자리는 쥐고 있다. LAN 은 아직
+    /// 언페어링 경로에 아예 배선돼 있지 않아서(`lib.rs::persist_and_drop` 이
+    /// BLE·network 두 브리지만 부른다) 시한만 되돌리는 것으로는 반쪽이다.
+    /// 해제된 연결을 실제로 닫는 것(`Outbound::Close`)과 함께 가야 한다.
+    Lift,
+}
+
+/// 시한이 보는 것은 인가 여부 **하나뿐**이다. 여기에 "그래도 최근에 말은
+/// 했으니까" 같은 조건을 더하는 순간, 시한은 다시 피어가 조종할 수 있는 값이
+/// 된다(`AUTH_DEADLINE` 의 doc).
+fn deadline(authorized: bool) -> Deadline {
+    if authorized {
+        Deadline::Lift
+    } else {
+        Deadline::Drop
     }
 }
 
@@ -183,12 +248,21 @@ pub enum ServerEvent {
     BindFailed { generation: u64, message: String },
 }
 
-/// 이 central 에게 보낼 것. 서버 태스크가 소유한 송신 채널로 전달된다.
+/// 서버 태스크가 소유한 채널로 전달되는 항목. 대부분은 "이 central 에게 보낼
+/// 것"이지만 `Authorized` 만 다르다 — 나가는 바이트가 없는 내부 통지다.
+///
+/// 같은 채널에 태우는 이유는 그 채널의 소비자(펌프)가 바깥에서 `sinks` 를
+/// 만지는 **유일한** 지점이기 때문이다. 통지용 채널을 따로 두면 `sinks` 를
+/// 만지는 곳이 둘이 되고, 그 둘 사이의 순서를 아무도 보장하지 않는다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outbound {
     Text(CentralId, Vec<u8>),
     Binary(CentralId, Vec<u8>),
     Close(CentralId),
+    /// 이 연결이 인가됐다 — 인증 시한을 건다(`Deadline::Lift`). 앱의 이벤트
+    /// 루프가 `handle_auth` 결과를 보고 보낸다. **상대에게는 아무것도 나가지
+    /// 않는다**: 우리가 누구를 인가했는지는 낯선 기기가 알 일이 아니다.
+    Authorized(CentralId),
 }
 
 /// 동시 연결 자리표. `MAX_CONNECTIONS` 를 넘으면 자리를 내주지 않는다.
@@ -233,16 +307,28 @@ impl Drop for Slot {
     }
 }
 
-/// central 별 송신 큐. 연결이 하나 생기면 하나 만들고, 그 연결이 끝나면 지운다.
+/// 살아 있는 연결 하나가 서버 쪽에 남기는 것.
+///
+/// 인가 여부가 **송신 큐 옆에** 있는 이유는, 그것을 알아야 하는 쪽(연결
+/// 핸들러의 인증 시한)과 그것을 아는 쪽(앱의 이벤트 루프 → 펌프)이 서로 다른
+/// 태스크이기 때문이다. 핸들러는 시한이 다다랐을 때 **한 번만** 읽으므로
+/// 깨울 필요가 없고, 그래서 채널이 아니라 원자값이면 충분하다.
+#[derive(Clone)]
+struct Conn {
+    tx: Sender<Message>,
+    authorized: Arc<AtomicBool>,
+}
+
+/// central 별 연결 상태. 연결이 하나 생기면 하나 만들고, 그 연결이 끝나면 지운다.
 /// 이 규칙이 어긋나면 끊긴 기기의 큐가 계속 쌓이거나(누수), 붙어 있는 기기에
 /// 스냅샷이 나가지 않는다. 연결 코드 안에 두면 그 규칙만 따로 확인할 방법이
 /// 없어서 별도 타입으로 뺐다.
 #[derive(Default)]
-struct Sinks(Mutex<HashMap<CentralId, Sender<Message>>>);
+struct Sinks(Mutex<HashMap<CentralId, Conn>>);
 
 impl Sinks {
-    fn insert(&self, id: CentralId, tx: Sender<Message>) {
-        self.0.lock().unwrap().insert(id, tx);
+    fn insert(&self, id: CentralId, conn: Conn) {
+        self.0.lock().unwrap().insert(id, conn);
     }
 
     fn remove(&self, id: &CentralId) {
@@ -251,8 +337,20 @@ impl Sinks {
 
     /// 잠금을 쥔 채로 보내지 않는다 — 송신은 await 를 탈 수 있고, 그 사이에
     /// 새 연결이 자기 큐를 등록하지 못하면 안 된다.
-    fn get(&self, id: &CentralId) -> Option<Sender<Message>> {
+    fn get(&self, id: &CentralId) -> Option<Conn> {
         self.0.lock().unwrap().get(id).cloned()
+    }
+
+    /// 이 연결을 인가된 것으로 표시한다. 인증 시한이 보는 유일한 값이다.
+    ///
+    /// **모르는 id 는 아무 일도 하지 않는다.** 이미 끝난 연결의 늦은 통지가
+    /// 다음 연결에 옮겨붙으면, 낯선 기기가 남의 인가로 시한 없는 자리를 얻는다.
+    /// 세션 id 는 프로세스 전역에서 반복되지 않으므로(`next_central_id`) 실제로
+    /// 옮겨붙지는 않지만, 그 성질에 기대는 코드를 하나 더 만들지 않는다.
+    fn mark_authorized(&self, id: &CentralId) {
+        if let Some(c) = self.0.lock().unwrap().get(id) {
+            c.authorized.store(true, Ordering::Relaxed);
+        }
     }
 
     /// 큐 개수를 세는 건 "연결 하나가 큐 하나" 규칙을 확인할 때뿐이다.
@@ -274,8 +372,10 @@ struct AppState {
 
 pub struct ServerHandle {
     shutdown: watch::Sender<bool>,
-    /// Task 4(스냅샷 푸시)가 쓴다. 여기만 상한이 없는 이유는 낯선 기기가 아니라
-    /// 앱의 틱 루프(초당 하나)만 쓰기 때문이다 — 바깥에서 닿지 않는다.
+    /// 인증 응답·봉인 스냅샷·인가 통지가 지나는 통로. 여기만 상한이 없는
+    /// 이유는 낯선 기기가 아니라 앱 자신(틱 루프는 초당 하나, 인증 응답은
+    /// 프레임당 하나)만 쓰기 때문이다 — 바깥에서 닿지 않는다. 상대가 읽지
+    /// 않아 밀리는 것은 그 뒤의 central 별 큐(`SINK_QUEUE`)가 받아 낸다.
     pub outbound: UnboundedSender<Outbound>,
     /// 이 리스너의 세대. `BindFailed` 가 누구 것인지 가리는 데 쓴다.
     pub generation: u64,
@@ -397,8 +497,12 @@ async fn run(
     let pump_state = state.clone();
     let pump = tokio::spawn(async move {
         while let Some(item) = outbound.recv().await {
-            let (id, msg) = to_message(item);
-            push_to_sink(&pump_state.sinks, &id, msg);
+            match route(item) {
+                Routed::Frame(id, msg) => {
+                    push_to_sink(&pump_state.sinks, &id, msg);
+                }
+                Routed::Authorized(id) => pump_state.sinks.mark_authorized(&id),
+            }
         }
     });
 
@@ -409,13 +513,27 @@ async fn run(
     tracing::info!(port, "LAN 미러 서버 종료");
 }
 
-/// 보낼 항목을 WebSocket 프레임으로 옮긴다. 순수 함수라 펌프 태스크와 떼어
-/// 확인할 수 있다.
-fn to_message(item: Outbound) -> (CentralId, Message) {
+/// 펌프가 항목 하나를 보고 내린 결론.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Routed {
+    /// 이 central 에게 이 프레임을 보낸다.
+    Frame(CentralId, Message),
+    /// 이 central 의 인증 시한만 건다. 나가는 바이트는 없다.
+    Authorized(CentralId),
+}
+
+/// 항목 하나를 어디로 보낼지 정한다. 순수 함수라 펌프 태스크와 떼어 확인할
+/// 수 있고, **무엇이 상대에게 나가고 무엇이 나가지 않는가**가 한 곳에 모인다 —
+/// 인가 통지가 실수로 프레임이 되어 나가면, 우리가 누구를 인가했는지 같은
+/// WiFi 의 아무에게나 알려주는 셈이다.
+fn route(item: Outbound) -> Routed {
     match item {
-        Outbound::Text(id, b) => (id, Message::Text(String::from_utf8_lossy(&b).into_owned())),
-        Outbound::Binary(id, b) => (id, Message::Binary(b)),
-        Outbound::Close(id) => (id, Message::Close(None)),
+        Outbound::Text(id, b) => {
+            Routed::Frame(id, Message::Text(String::from_utf8_lossy(&b).into_owned()))
+        }
+        Outbound::Binary(id, b) => Routed::Frame(id, Message::Binary(b)),
+        Outbound::Close(id) => Routed::Frame(id, Message::Close(None)),
+        Outbound::Authorized(id) => Routed::Authorized(id),
     }
 }
 
@@ -423,10 +541,10 @@ fn to_message(item: Outbound) -> (CentralId, Message) {
 /// 놓는다** — 상대가 읽지 않는데 계속 쌓으면 그 자체가 메모리 증가 레버다.
 /// `false` 는 "이 central 에게 더 보낼 수 없다"(모르는 id 이거나 방금 놓았다).
 fn push_to_sink(sinks: &Sinks, id: &CentralId, msg: Message) -> bool {
-    let Some(s) = sinks.get(id) else {
+    let Some(c) = sinks.get(id) else {
         return false;
     };
-    if s.try_send(msg).is_err() {
+    if c.tx.try_send(msg).is_err() {
         tracing::warn!(id = %id.0, "LAN 송신 큐가 밀렸다 — 연결을 놓는다");
         sinks.remove(id);
         return false;
@@ -475,7 +593,13 @@ async fn handle(
 
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (sink_tx, mut sink_rx) = tokio::sync::mpsc::channel::<Message>(SINK_QUEUE);
-    state.sinks.insert(id.clone(), sink_tx);
+    // 인가 여부는 앱의 이벤트 루프가 `Outbound::Authorized` 로 알려준다. 등록을
+    // `Connected` 를 올리기 **전에** 해 두는 것이 중요하다 — 순서가 반대면
+    // 인증이 아주 빨리 끝난 기기의 통지가 아무 데도 닿지 않는다.
+    let authorized = Arc::new(AtomicBool::new(false));
+    state
+        .sinks
+        .insert(id.clone(), Conn { tx: sink_tx, authorized: authorized.clone() });
 
     // 수명 이벤트(Connected/Disconnected)는 흘려보내면 안 된다 — Disconnected 를
     // 놓치면 인가가 실제 링크보다 오래 살아남는다. 그래서 프레임과 달리 여기서는
@@ -502,6 +626,16 @@ async fn handle(
         tokio::time::Instant::now() + state.timing.ping,
         state.timing.ping,
     );
+
+    // 인증 시한. **연결이 성립한 이 순간부터** 재는 고정된 시각이고, 루프가
+    // 몇 바퀴를 돌든 다시 계산되지 않는다 — `sleep_until` 에 절대 시각을
+    // 주는 것이 그 뜻이다. 상대가 무엇을 보내든 읽든 이 시각은 움직이지
+    // 않는다(`AUTH_DEADLINE` 의 doc).
+    let auth_deadline = tokio::time::Instant::now() + state.timing.auth;
+    // 시한이 이미 걷혔는가. 한 번 걷히면 다시 재지 않으므로, 이 플래그가
+    // 아래 가지를 영구히 끈다(끄지 않으면 지난 시각의 `sleep_until` 이 매번
+    // 즉시 깨어나 루프가 바쁘게 돈다).
+    let mut deadline_lifted = false;
 
     loop {
         tokio::select! {
@@ -563,6 +697,19 @@ async fn handle(
             // `ws_tx.send().await` 에서 멈춰 있어 이 분기가 **깨어나지 않는다.**
             // 그것을 잡는 것은 위의 하트비트다.
             _ = &mut writer => break,
+            // **인가되지 않은 연결의 절대 시한.** 위의 두 시간 상한은 피어가
+            // 조종할 수 있다 — 말을 계속 하면 무응답 판정이 오지 않고, 큐가
+            // 차는 시점은 우리가 얼마나 보내느냐에 달렸다. 이 가지만 그렇지
+            // 않고, 그래서 자리 여덟 개가 실제로 회수된다는 근거가 여기 있다.
+            _ = tokio::time::sleep_until(auth_deadline), if !deadline_lifted => {
+                match deadline(authorized.load(Ordering::Relaxed)) {
+                    Deadline::Drop => {
+                        tracing::info!(id = %id.0, "LAN 인증 시한이 지났다 — 연결을 놓는다");
+                        break;
+                    }
+                    Deadline::Lift => deadline_lifted = true,
+                }
+            },
             // 토글을 끄면 리스너만 닫는 것으로는 부족하다. 미러 연결은 스스로
             // 끝나지 않으므로, 여기서 깨우지 않으면 axum 의 graceful shutdown 이
             // 영원히 기다리고 기기는 계속 붙어 있는 채로 남는다.
@@ -671,13 +818,13 @@ pub(crate) mod test_socket {
         out
     }
 
-    /// 서버→클라이언트 텍스트 프레임 하나를 읽는다. 서버 프레임은 마스킹하지
-    /// 않는다(RFC 6455). 길이는 7비트와 16비트 두 형태만 다룬다 — 인증 응답은
-    /// 가장 긴 것도 200바이트 남짓이라 그 이상은 나올 수 없다.
-    pub(crate) async fn read_text_frame(s: &mut TcpStream) -> Vec<u8> {
+    /// 서버→클라이언트 프레임 하나를 읽어 `(첫 바이트, 본문)` 으로 돌려준다.
+    /// 서버 프레임은 마스킹하지 않는다(RFC 6455). 길이는 7비트와 16비트 두
+    /// 형태만 다룬다 — 어느 쪽으로 나가든 `MAX_FRAME_BYTES`(64 KiB) 안이라
+    /// 64비트 형태는 나올 수 없다.
+    pub(crate) async fn read_frame(s: &mut TcpStream) -> (u8, Vec<u8>) {
         let mut head = [0u8; 2];
         s.read_exact(&mut head).await.expect("프레임 머리를 읽지 못했다");
-        assert_eq!(head[0], 0x81, "텍스트 프레임(FIN+opcode 1)이어야 한다");
         assert_eq!(head[1] & 0x80, 0, "서버 프레임은 마스킹하지 않는다");
         let len = match head[1] & 0x7f {
             126 => {
@@ -689,6 +836,21 @@ pub(crate) mod test_socket {
         };
         let mut payload = vec![0u8; len];
         s.read_exact(&mut payload).await.expect("본문을 읽지 못했다");
+        (head[0], payload)
+    }
+
+    /// 텍스트 프레임 하나(인증 응답)를 읽는다.
+    pub(crate) async fn read_text_frame(s: &mut TcpStream) -> Vec<u8> {
+        let (opcode, payload) = read_frame(s).await;
+        assert_eq!(opcode, 0x81, "텍스트 프레임(FIN+opcode 1)이어야 한다");
+        payload
+    }
+
+    /// 바이너리 프레임 하나(봉인된 스냅샷)를 읽는다. **텍스트로 받으면 안
+    /// 된다** — 봉인 프레임은 UTF-8 이 아니라, 텍스트로 옮기는 순간 손실된다.
+    pub(crate) async fn read_binary_frame(s: &mut TcpStream) -> Vec<u8> {
+        let (opcode, payload) = read_frame(s).await;
+        assert_eq!(opcode, 0x82, "바이너리 프레임(FIN+opcode 2)이어야 한다");
         payload
     }
 }
@@ -756,25 +918,49 @@ mod tests {
         }
     }
 
+    /// 아무도 읽지 않는 큐를 가진 연결 하나. 실제 연결에서 writer 태스크가
+    /// 멈춰 있는 상태와 같다. `_rx` 를 함께 돌려주는 이유는 그것을 떨어뜨리면
+    /// 채널이 닫혀 `try_send` 가 큐 상한과 무관하게 실패하기 때문이다.
+    fn conn() -> (Conn, Receiver<Message>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(SINK_QUEUE);
+        (Conn { tx, authorized: Arc::new(AtomicBool::new(false)) }, rx)
+    }
+
     #[test]
     fn text_outbound_becomes_a_text_frame() {
-        let (id, msg) = to_message(Outbound::Text(central_id(3), b"{\"a\":1}".to_vec()));
-        assert_eq!(id, central_id(3));
-        assert_eq!(msg, Message::Text("{\"a\":1}".to_string()));
+        let routed = route(Outbound::Text(central_id(3), b"{\"a\":1}".to_vec()));
+        assert_eq!(
+            routed,
+            Routed::Frame(central_id(3), Message::Text("{\"a\":1}".to_string()))
+        );
     }
 
     #[test]
     fn binary_outbound_stays_binary() {
         // 봉인된 스냅샷은 UTF-8 이 아니다. 텍스트로 옮기면 손실된다.
         let sealed = vec![0x00, 0xff, 0xfe];
-        let (_, msg) = to_message(Outbound::Binary(central_id(0), sealed.clone()));
-        assert_eq!(msg, Message::Binary(sealed));
+        assert_eq!(
+            route(Outbound::Binary(central_id(0), sealed.clone())),
+            Routed::Frame(central_id(0), Message::Binary(sealed))
+        );
     }
 
     #[test]
     fn close_outbound_becomes_a_close_frame() {
-        let (_, msg) = to_message(Outbound::Close(central_id(0)));
-        assert_eq!(msg, Message::Close(None));
+        assert_eq!(
+            route(Outbound::Close(central_id(0))),
+            Routed::Frame(central_id(0), Message::Close(None))
+        );
+    }
+
+    /// 인가 통지는 프레임이 **아니다.** 여기서 프레임으로 새면 우리가 누구를
+    /// 인가했는지가 같은 WiFi 의 아무에게나 나간다.
+    #[test]
+    fn an_authorization_notice_never_becomes_a_frame() {
+        assert_eq!(
+            route(Outbound::Authorized(central_id(2))),
+            Routed::Authorized(central_id(2))
+        );
     }
 
     /// 큐는 연결이 생길 때 만들어지고 끝날 때 사라진다. 이 규칙이 깨지면
@@ -782,11 +968,11 @@ mod tests {
     #[test]
     fn a_sink_lives_exactly_as_long_as_its_connection() {
         let sinks = Sinks::default();
-        let (tx, _rx) = tokio::sync::mpsc::channel(SINK_QUEUE);
+        let (c, _rx) = conn();
         let id = central_id(0);
 
         assert_eq!(sinks.len(), 0);
-        sinks.insert(id.clone(), tx);
+        sinks.insert(id.clone(), c);
         assert_eq!(sinks.len(), 1);
         assert!(sinks.get(&id).is_some());
 
@@ -812,10 +998,9 @@ mod tests {
     #[test]
     fn a_backed_up_sink_is_dropped_rather_than_grown() {
         let sinks = Sinks::default();
-        // 아무도 읽지 않는 큐. 실제 연결에서 writer 태스크가 멈춘 상태와 같다.
-        let (tx, _rx) = tokio::sync::mpsc::channel(SINK_QUEUE);
+        let (c, _rx) = conn();
         let id = central_id(0);
-        sinks.insert(id.clone(), tx);
+        sinks.insert(id.clone(), c);
 
         for i in 0..SINK_QUEUE {
             assert!(
@@ -1201,9 +1386,12 @@ mod tests {
     async fn a_silent_peer_is_eventually_dropped() {
         let port = free_port().await;
         let (tx, mut rx) = events();
+        // 인증 시한은 기본값(150초) 그대로 둔다 — 이 테스트가 보려는 것은
+        // 무응답 경로이므로, 시한이 끼어들면 무엇이 연결을 놓았는지 흐려진다.
         let timing = Timing {
             ping: Duration::from_millis(60),
             idle: Duration::from_millis(200),
+            ..Timing::default()
         };
         let handle = spawn_with(port, tx, 1, None, timing);
         wait_until_listening(port).await;
@@ -1243,7 +1431,11 @@ mod tests {
             tx,
             1,
             None,
-            Timing { ping: Duration::from_millis(40), idle: Duration::from_secs(30) },
+            Timing {
+                ping: Duration::from_millis(40),
+                idle: Duration::from_secs(30),
+                ..Timing::default()
+            },
         );
         wait_until_listening(port).await;
 
@@ -1277,6 +1469,7 @@ mod tests {
         let timing = Timing {
             ping: Duration::from_millis(40),
             idle: Duration::from_millis(150),
+            ..Timing::default()
         };
         let handle = spawn_with(port, tx, 1, None, timing);
         wait_until_listening(port).await;
@@ -1296,6 +1489,186 @@ mod tests {
         }
 
         drop(sock);
+        let _ = handle.stop();
+    }
+
+    // --- 인증 시한 (인가되지 않은 연결의 절대 상한) ---
+
+    /// 시한이 보는 것은 인가 여부 하나뿐이다. 조건이 하나 더 붙는 순간 시한은
+    /// 다시 피어가 조종할 수 있는 값이 된다.
+    #[test]
+    fn only_authorization_lifts_the_deadline() {
+        assert_eq!(deadline(false), Deadline::Drop);
+        assert_eq!(deadline(true), Deadline::Lift);
+    }
+
+    /// **이 두 상수는 함께 움직여야 한다.** 페어링 전 구간이 인가되지 않은
+    /// 연결 위에서 일어나고, 그 사람 시간의 예산이 `CODE_TTL` 이다. 시한이
+    /// 그보다 짧으면 사람이 기기 키패드 앞에 서 있는 동안 연결이 끊기고, 다시
+    /// 붙은 연결에는 `HELLO2` 트랜스크립트가 없어 **제대로 입력한 코드가
+    /// `Rejected` 로 돌아온다.** 시한만 줄이는 변경을 여기서 막는다.
+    #[test]
+    fn the_auth_deadline_outlives_the_code_a_human_is_typing() {
+        assert!(
+            AUTH_DEADLINE > crate::ble::pairing::CODE_TTL,
+            "인증 시한({AUTH_DEADLINE:?})이 페어링 코드 수명({:?})보다 짧으면 \
+             정상 페어링이 중간에 끊긴다",
+            crate::ble::pairing::CODE_TTL
+        );
+    }
+
+    /// 인가 통지는 **그 연결에만** 붙는다. 옆 연결로 새면 낯선 기기가 남의
+    /// 인가로 시한 없는 자리를 얻는다.
+    #[test]
+    fn marking_one_connection_does_not_authorize_another() {
+        let sinks = Sinks::default();
+        let (mine, _rx1) = conn();
+        let (theirs, _rx2) = conn();
+        let (a, b) = (central_id(0), central_id(1));
+        sinks.insert(a.clone(), mine);
+        sinks.insert(b.clone(), theirs);
+
+        sinks.mark_authorized(&a);
+
+        assert!(sinks.get(&a).unwrap().authorized.load(Ordering::Relaxed));
+        assert!(
+            !sinks.get(&b).unwrap().authorized.load(Ordering::Relaxed),
+            "옆 연결까지 인가된 것으로 표시됐다"
+        );
+    }
+
+    /// 이미 끝난 연결에 대한 늦은 통지는 아무 일도 하지 않는다 — 항목을
+    /// 만들어서도 안 된다.
+    #[test]
+    fn marking_an_unknown_connection_creates_nothing() {
+        let sinks = Sinks::default();
+        sinks.mark_authorized(&central_id(9));
+        assert_eq!(sinks.len(), 0);
+    }
+
+    /// 이 테스트가 이 태스크의 요구사항 그 자체다.
+    ///
+    /// 피어는 **계속 말한다** — 그러므로 `last_seen` 이 계속 갱신돼 무응답
+    /// 판정은 오지 않는다(`idle` 을 30초로 넉넉히 잡아 그 경로를 배제한다).
+    /// 소비자 속도에 맞춰 보내므로 이벤트 큐도 넘치지 않고, 우리가 보내는
+    /// 것을 다 읽어 주므로 송신 큐도 밀리지 않는다. 즉 **다른 어떤 상한도
+    /// 이 연결에 걸리지 않는다.** 그래도 놓여야 한다.
+    #[tokio::test]
+    async fn a_peer_that_never_authorizes_is_dropped_however_well_it_behaves() {
+        let port = free_port().await;
+        let (tx, mut rx) = events();
+        let handle = spawn_with(
+            port,
+            tx,
+            1,
+            None,
+            Timing {
+                ping: Duration::from_millis(40),
+                idle: Duration::from_secs(30),
+                auth: Duration::from_millis(300),
+            },
+        );
+        wait_until_listening(port).await;
+
+        let mut sock = handshake(port).await;
+        let id = next_connected(&mut rx).await;
+
+        // 시한을 넘길 때까지 주기적으로 말한다. 이벤트는 그때그때 비워
+        // 이벤트 큐 상한이 끼어들 여지를 없앤다.
+        let dropped = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let _ = sock.write_all(&masked_text_frame(b"HELLO")).await;
+                while let Ok(ev) = rx.try_recv() {
+                    if ev == ServerEvent::Disconnected(id.clone()) {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await;
+
+        assert!(
+            dropped.is_ok(),
+            "말은 하지만 인가되지 않은 피어가 자리를 계속 붙들고 있다"
+        );
+        let _ = handle.stop();
+    }
+
+    /// 반대쪽. **인가된 연결에는 시한이 없다** — 있으면 멀쩡히 미러를 보고
+    /// 있던 기기가 150초마다 화면 앞에서 끊긴다.
+    #[tokio::test]
+    async fn an_authorized_peer_outlives_the_deadline() {
+        let port = free_port().await;
+        let (tx, mut rx) = events();
+        let handle = spawn_with(
+            port,
+            tx,
+            1,
+            None,
+            // 시한을 600ms 로 잡은 것은 펌프가 인가 통지를 처리할 여유를
+            // 넉넉히 주기 위해서다 — 그 처리가 시한보다 늦으면 이 테스트는
+            // 실제 결함이 아니라 부하 때문에 실패한다.
+            Timing {
+                ping: Duration::from_secs(30),
+                idle: Duration::from_secs(30),
+                auth: Duration::from_millis(600),
+            },
+        );
+        wait_until_listening(port).await;
+
+        let mut sock = handshake(port).await;
+        let id = next_connected(&mut rx).await;
+
+        // 앱의 이벤트 루프가 `handle_auth` 결과를 보고 하는 일 그대로.
+        handle.outbound.send(Outbound::Authorized(id.clone())).unwrap();
+
+        // 시한을 한참 넘긴 뒤에도 살아 있어야 한다. 살아 있다는 증거는
+        // "끊겼다는 이벤트가 없다"가 아니라 **프레임이 아직 오간다**는 것이다.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        sock.write_all(&masked_text_frame(b"HELLO")).await.unwrap();
+        assert_eq!(
+            next_event(&mut rx).await,
+            ServerEvent::Frame { id, text: "HELLO".to_string() },
+            "인가된 연결이 시한에 끊겼다"
+        );
+
+        let _ = handle.stop();
+    }
+
+    /// 인가되기 **전에** 도착한 프레임은 시한을 밀지 못한다. 위 테스트가
+    /// 걷어 준 것이 인가 통지인지 그냥 트래픽인지 헷갈릴 여지를 없앤다.
+    #[tokio::test]
+    async fn traffic_alone_does_not_lift_the_deadline() {
+        let port = free_port().await;
+        let (tx, mut rx) = events();
+        let handle = spawn_with(
+            port,
+            tx,
+            1,
+            None,
+            Timing {
+                ping: Duration::from_secs(30),
+                idle: Duration::from_secs(30),
+                auth: Duration::from_millis(200),
+            },
+        );
+        wait_until_listening(port).await;
+
+        let mut sock = handshake(port).await;
+        let id = next_connected(&mut rx).await;
+        sock.write_all(&masked_text_frame(b"HELLO")).await.unwrap();
+        assert_eq!(
+            next_event(&mut rx).await,
+            ServerEvent::Frame { id: id.clone(), text: "HELLO".to_string() }
+        );
+
+        assert_eq!(
+            next_event(&mut rx).await,
+            ServerEvent::Disconnected(id),
+            "프레임을 보냈다는 것만으로 시한이 걷히면 안 된다"
+        );
+
         let _ = handle.stop();
     }
 }

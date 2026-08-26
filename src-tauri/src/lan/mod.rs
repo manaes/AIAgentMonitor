@@ -10,10 +10,19 @@ pub mod server;
 
 use crate::ble::pairing::{self, PairingManager};
 use crate::ble::peripheral::CentralId;
+use crate::ble::wire::MirrorSnapshot;
+use crate::emitter::EmitGate;
+use crate::types::Snapshot;
 use server::{Outbound, ServerEvent, ServerHandle};
 use std::collections::HashSet;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc::Sender;
+
+/// 미러 갱신 주기. BLE·network 와 같은 값이다 — 두 전송을 나란히 켜고 껐을 때
+/// 체감 차이가 없어야 하고, `server::SINK_QUEUE`(8) 의 "여덟이 밀렸다는 건
+/// 상대가 8초째 읽지 않는다는 뜻" 이라는 계산이 바로 이 1Hz 를 전제한다.
+/// 이 값을 줄이면 그 큐가 뜻하는 시간도 함께 줄어든다.
+const LAN_THROTTLE: Duration = Duration::from_millis(1000);
 
 /// `handle_auth` 한 번의 결과. `network::AuthOutcome` 과 **필드까지 같다** —
 /// 세 전송이 같은 표면을 유지해야 빠진 분기가 눈에 띈다.
@@ -81,6 +90,10 @@ pub struct LanBridge {
     events: Sender<ServerEvent>,
     /// 리스너가 붙을 포트. 운영에서는 언제나 `server::PORT` 다.
     port: u16,
+    /// 미러 갱신 게이트. 앱의 틱은 250ms 인데 미러는 1Hz 로 묶는다
+    /// (`LAN_THROTTLE`). 내용이 그대로면 아예 내보내지 않으므로, 조용한
+    /// 시간에는 봉인 카운터도 전진하지 않는다.
+    gate: EmitGate,
 }
 
 impl LanBridge {
@@ -98,6 +111,7 @@ impl LanBridge {
             generation: 0,
             events,
             port,
+            gate: EmitGate::new(LAN_THROTTLE),
         }
     }
 
@@ -122,6 +136,10 @@ impl LanBridge {
             // 안 보여주는 것만큼 나쁘다. 이번 시도도 실패하면 `BindFailed` 가
             // 곧바로 다시 채운다.
             self.last_error = None;
+            // 다시 켰으면 첫 스냅샷은 곧바로 나가야 한다. 게이트는 "내용이
+            // 같으면 안 보낸다"이므로, 되돌리지 않으면 꺼져 있는 동안 아무것도
+            // 바뀌지 않은 경우 다시 켠 기기가 변화가 생길 때까지 빈 화면을 본다.
+            self.gate.reset();
             self.generation += 1;
             self.server = Some(server::spawn(
                 self.port,
@@ -251,15 +269,112 @@ impl LanBridge {
         }
     }
 
+    /// 이 연결이 인가됐음을 서버에 알린다 — 그래야 서버가 이 연결의 **인증
+    /// 시한**을 걷는다(`server::AUTH_DEADLINE`). 호출부는 `handle_auth` 가
+    /// `now_authorized` 를 세운 바로 그 자리에서 부른다.
+    ///
+    /// 인가 자체는 공유 `PairingManager` 가 갖고 있는데도 서버에 따로 알려야
+    /// 하는 이유는, 연결 핸들러가 그 매니저를 볼 수 없기 때문이다 — 볼 수 있게
+    /// 만들면 연결 태스크 여덟 개가 페어링 잠금을 다투게 된다. 시한이 필요로
+    /// 하는 것은 불리언 하나이므로 그것만 건넨다.
+    ///
+    /// 리스너가 없으면(토글이 꺼졌다) 조용히 버려진다. 그 경우 `handle_auth`
+    /// 도 애초에 아무도 인가하지 않는다(`serves`).
+    pub fn mark_authorized(&self, central: &CentralId) {
+        if let Some(h) = &self.server {
+            let _ = h.outbound.send(Outbound::Authorized(central.clone()));
+        }
+    }
+
     /// 스냅샷을 보낼 대상. **인가되지 않은 연결은 들어가지 않는다** — 붙어
-    /// 있다는 것과 볼 자격이 있다는 것은 다르다. 실제 봉인과 전송은 Task 4 지만,
-    /// "누구에게 보낼 수 있는가"는 인증의 결론이므로 여기서 정한다.
+    /// 있다는 것과 볼 자격이 있다는 것은 다르다. "누구에게 보낼 수 있는가"는
+    /// 인증의 결론이므로 봉인(`prepare_snapshot`)과 떼어 여기서 정한다.
     pub fn snapshot_targets(&self, pairing: &PairingManager) -> Vec<CentralId> {
         self.centrals
             .iter()
             .filter(|id| self.serves(id) && pairing.is_authorized(id))
             .cloned()
             .collect()
+    }
+
+    /// 스냅샷 틱의 **앞쪽 절반** — 이번 틱에 각 central 에게 나갈 봉인 프레임을
+    /// 만든다. 인가된 central 이 하나도 없거나 꺼져 있으면 빈 목록이다(BLE 의
+    /// "구독자 없으면 직렬화도 안 함" 과 같은 절약).
+    ///
+    /// **쓰기와 나눠 둔 이유는 페어링 잠금 시간이다.** 봉인에는 `&mut
+    /// PairingManager` 가 필요하지만(카운터가 전진한다) 쓰기에는 필요 없다.
+    /// 그래서 호출부는 이 함수까지만 잠금 안에서 부르고, 잠금을 놓은 뒤
+    /// `send_prepared` 를 부른다 — `network::prepare_snapshot` 과 같은 모양이다.
+    ///
+    /// 정직하게 말하면 **LAN 의 쓰기는 오늘 막히지 않는다**(`send_prepared` 의
+    /// doc). 그런데도 같은 모양을 유지하는 이유는 두 가지다: 세 전송의 표면이
+    /// 같아야 배선에서 한쪽만 고치는 드리프트가 눈에 띄고, 봉인과 쓰기가 함수
+    /// 경계로 갈라져 있어야 나중에 이 쓰기가 정말 await 를 타게 되어도 잠금이
+    /// 이미 바깥에 있기 때문이다.
+    ///
+    /// 게이트를 대상 검사 **뒤에** 두는 것은 일부러다. 아무도 없는데 게이트를
+    /// 소비하면, 기기가 붙은 직후의 첫 스냅샷이 "방금 보냈다"는 이유로 밀린다.
+    pub fn prepare_snapshot(
+        &mut self,
+        snap: &Snapshot,
+        now: SystemTime,
+        pairing: &mut PairingManager,
+    ) -> Vec<(CentralId, Vec<u8>)> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        let targets = self.snapshot_targets(pairing);
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        if !self.gate.should_emit(snap, now) {
+            return Vec::new();
+        }
+
+        let json = match serde_json::to_vec(&MirrorSnapshot::from(snap)) {
+            Ok(j) => j,
+            Err(e) => {
+                // `last_error` 에 싣지 않는다 — 그 필드는 사용자가 고칠 수 있는
+                // 실패(포트 점유·권한 거부)만 담는다는 것이 이 모듈의 규칙이고
+                // (`send_auth_reply`·`upgrade` 의 doc), 직렬화 실패는 사용자가
+                // 할 수 있는 일이 없는 우리 쪽 결함이다. 게이트는 이미 "보냈다"로
+                // 커밋했으므로 되돌려 다음 틱에 다시 시도되게 한다.
+                tracing::error!("LAN 스냅샷 직렬화 실패: {e}");
+                self.gate.reset();
+                return Vec::new();
+            }
+        };
+
+        // 봉인은 central 마다 다른 키와 카운터를 쓰므로 프레임도 central 마다
+        // 따로 만든다. 하나가 빠져도 나머지는 그대로 나간다.
+        let mut out = Vec::with_capacity(targets.len());
+        for central in targets {
+            if let Some(frame) = sealed_frame(pairing, &central, &json) {
+                out.push((central, frame));
+            }
+        }
+        out
+    }
+
+    /// 스냅샷 틱의 **뒤쪽 절반** — 준비된 프레임을 각 central 의 큐로 넘긴다.
+    /// 페어링 잠금 없이 돈다(`prepare_snapshot` 의 doc).
+    ///
+    /// **여기서 실제로 막히는 일은 없다.** `outbound` 는 무한 채널이라
+    /// `send` 가 기다리지 않는다. 상대가 읽지 않아 밀리는 것은 그 뒤의 central
+    /// 별 큐(`server::SINK_QUEUE`)가 받아 내고, 밀린 연결은 서버가 놓는다 —
+    /// 이 함수는 그 판단을 하지 않는다.
+    ///
+    /// 한 central 의 실패가 다른 central 을 막지 않는다. 리스너가 그 사이
+    /// 내려갔으면 전부 조용히 버려지고, 다음 틱이 새 프레임을 만든다 — 버려진
+    /// 프레임의 카운터는 되돌리지 않는다(`sealed_frame` 의 doc).
+    pub async fn send_prepared(&mut self, frames: Vec<(CentralId, Vec<u8>)>) {
+        let Some(h) = &self.server else {
+            return;
+        };
+        for (central, frame) in frames {
+            // 봉인 프레임은 UTF-8 이 아니다 — 반드시 바이너리로 나가야 한다.
+            let _ = h.outbound.send(Outbound::Binary(central, frame));
+        }
     }
 
     /// 이 이벤트가 **지금 살아 있는 리스너**의 것인가. 리스너가 없으면(꺼졌거나
@@ -298,13 +413,62 @@ impl LanBridge {
     }
 }
 
+/// 이 central 에게 실제로 나갈 봉인 프레임(`counter || ciphertext || tag`).
+/// 인가되지 않았거나 v2 세션이 아니면 `None` — **한 바이트도 나가면 안 된다.**
+///
+/// **인가 검사가 여기 또 있는 이유.** `snapshot_targets` 가 이미 걸렀다. 그래도
+/// 다시 보는 것은, 이 함수가 나갈 바이트를 만드는 유일한 지점이고 그 지점이
+/// 스스로 닫혀 있어야 하기 때문이다. 형제 전송에서 정확히 이 검사가 없어서,
+/// 언페어링과 스냅샷 틱이 겹치는 창에 **방금 해제한 기기에게 평문 JSON** 이
+/// 나갔다(`network::snapshot_line` 의 doc). 지금은 대상 선정과 봉인 사이에
+/// await 가 없어 그 창이 없지만, "창이 없다"에 기대는 대신 검사를 둔다.
+///
+/// **v1 세션에는 아무것도 보내지 않는다.** 형제 전송은 채널이 없으면 평문 JSON
+/// 을 보낸다 — BLE 는 10m 안에서, iroh 는 상대가 걸어온 QUIC 위에서다. LAN 은
+/// 망 전체에 열려 있고, 이 전송이 받아들여진 근거 자체가 "미러가 봉인돼 있어
+/// 같은 WiFi 의 다른 기기가 읽을 수 없다"였다(스펙 7.2). 그러니 여기서 평문으로
+/// 떨어지는 것은 전환기 호환이 아니라 downgrade 다. 세대 정책은 여전히
+/// `PairingManager` 가 정한다 — v1 로 붙는 것을 이 전송이 막지는 않는다
+/// (`handle_auth` 의 doc). 다만 **그 세션에 평문을 실어 보내지는 않는다.**
+///
+/// LAN 클라이언트는 E2EE v2 이후에만 존재하므로 실제로 이 갈래에 닿을 기기는
+/// 없다. 닿았다면 그 자체가 알아야 할 사실이라 흔적을 남긴다.
+///
+/// **카운터는 되돌리지 않는다.** 봉인이 끝난 순간 `(키, 논스)` 한 쌍이 소비된다.
+/// 이 프레임이 끝내 나가지 못해도 다음 프레임은 다음 카운터를 쓴다 — 수신 측은
+/// 카운터의 빈 칸을 견디지만(`SealedChannel::open`), 같은 논스를 두 번 쓰는 것은
+/// ChaCha20-Poly1305 에서 회복 불가능한 사고다.
+fn sealed_frame(
+    pairing: &mut PairingManager,
+    central: &CentralId,
+    json: &[u8],
+) -> Option<Vec<u8>> {
+    if !pairing.is_authorized(central) {
+        return None;
+    }
+    match pairing.channel_mut(central) {
+        Some(ch) => Some(ch.seal(json)),
+        None => {
+            tracing::warn!(
+                id = %central.0,
+                "LAN 세션에 봉인 채널이 없다 — 평문을 내보내는 대신 건너뛴다"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ble::pairing::test_client::{self, hex_encode, V2Client};
     use crate::ble::pairing::AuthReply;
-    use crate::crypto;
-    use std::time::{Duration, UNIX_EPOCH};
+    use crate::crypto::{self, channel::SealedChannel};
+    use crate::types::{
+        ActivityStatus, AgentKind, AgentState, ProjectActivity, TokenCounts,
+    };
+    use std::path::PathBuf;
+    use std::time::UNIX_EPOCH;
     use tokio::sync::mpsc::{channel, Receiver};
 
     fn t(secs: u64) -> SystemTime {
@@ -559,12 +723,16 @@ mod tests {
     /// 브리지의 `handle_auth` 만으로 v2 페어링을 끝까지 밟는다 — 응답 바이트를
     /// 클라이언트가 실제로 열 수 있는지까지 확인하므로, 배선이 페이로드를
     /// 건드렸다면 여기서 깨진다.
+    ///
+    /// 클라이언트 쪽 `SealedChannel` 도 함께 돌려준다. 그래야 스냅샷 테스트가
+    /// "봉인된 것처럼 보인다"가 아니라 **이 기기가 실제로 열 수 있는가**를 볼 수
+    /// 있다 — 앞의 것은 키가 어긋나도 통과한다.
     fn v2_pair(
         b: &mut LanBridge,
         p: &mut PairingManager,
         central: &CentralId,
         now: SystemTime,
-    ) -> AuthOutcome {
+    ) -> (AuthOutcome, SealedChannel) {
         let code = p.begin_pairing(now);
         let mut c = V2Client::new();
 
@@ -579,8 +747,8 @@ mod tests {
             .handle_auth(central, format!("CODE2:{cbind}").as_bytes(), now, p)
             .expect("서비스 중인 연결이다");
         let sealed = field(&out.payload, "sealed");
-        let _ = test_client::open_pairing_and_session(&ss, &nonce, &sealed);
-        out
+        let (_token, ch) = test_client::open_pairing_and_session(&ss, &nonce, &sealed);
+        (out, ch)
     }
 
     /// 인증 프레임은 그대로 `PairingManager` 에 넘어가고, 응답은
@@ -612,7 +780,7 @@ mod tests {
         let (mut b, _rx) = live_bridge(&id);
         let mut p = PairingManager::new();
 
-        let out = v2_pair(&mut b, &mut p, &id, t(1000));
+        let (out, _ch) = v2_pair(&mut b, &mut p, &id, t(1000));
 
         assert!(out.now_authorized, "v2 페어링 성공은 인가로 이어져야 한다");
         assert!(out.granted, "v2 도 새 토큰을 발급한다 — 저장하지 않으면 재부팅 후 사라진다");
@@ -937,5 +1105,331 @@ mod tests {
         let (b, _rx) = bridge();
         b.send_auth_reply(&server::central_id(0), b"{}".to_vec());
         assert!(b.last_error().is_none());
+    }
+
+    /// 리스너가 없을 때의 인가 통지도 마찬가지다. 토글이 꺼져 있으면 애초에
+    /// 아무도 인가되지 않지만(`serves`), 그 성질에 기대지 않는다.
+    #[test]
+    fn marking_authorized_with_no_listener_is_harmless() {
+        let (b, _rx) = bridge();
+        b.mark_authorized(&server::central_id(0));
+        assert!(b.last_error().is_none());
+    }
+
+    // --- 봉인 스냅샷 (Task 4) ---
+
+    /// 미러 한 장. `rate` 를 인자로 받는 이유는 게이트가 내용 해시를 보기
+    /// 때문이다 — 같은 값을 두 번 넣으면 두 번째는 나가지 않는다.
+    fn sample_snapshot(rate: f32) -> Snapshot {
+        Snapshot {
+            emitted_at: UNIX_EPOCH + Duration::from_secs(1_755_500_000),
+            agents: vec![AgentState {
+                kind: AgentKind::Claude,
+                rate_tok_per_sec: rate,
+                tokens_5h: TokenCounts {
+                    tokens_in: 1_000,
+                    tokens_out: 2_000,
+                    tokens_cache_read: 40_000,
+                    tokens_cache_create: 7_000,
+                },
+                quota_limit: None,
+                quota_reset_at: Some(UNIX_EPOCH + Duration::from_secs(1_755_512_400)),
+                quota_used_pct: Some(62.0),
+                quota_reset_at_weekly: None,
+                quota_used_pct_weekly: None,
+                projects: vec![ProjectActivity {
+                    path: PathBuf::from("/Users/me/dev/foo"),
+                    name: "foo".to_string(),
+                    model: "claude-opus-5".to_string(),
+                    rate_tok_per_sec: 98.25,
+                    last_event_at: UNIX_EPOCH + Duration::from_secs(1_755_499_987),
+                    status: ActivityStatus::Active,
+                }],
+            }],
+        }
+    }
+
+    /// 봉인 프레임 하나가 나가고, **그 기기가 실제로 연다.** "평문이 아니다"
+    /// 까지만 보면 키가 어긋나도 통과하므로 여기서 열어 본다.
+    ///
+    /// LAN 은 청킹하지 않는다 — WebSocket 이 프레이밍을 하므로 프레임 하나가
+    /// 그대로 메시지 하나다.
+    #[tokio::test]
+    async fn a_v2_session_gets_one_sealed_frame_it_can_open() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        let (_out, mut client) = v2_pair(&mut b, &mut p, &id, t(1000));
+
+        let snap = sample_snapshot(1.0);
+        let frames = b.prepare_snapshot(&snap, t(1001), &mut p);
+
+        assert_eq!(frames.len(), 1, "청킹하지 않으므로 한 건뿐이다");
+        let (target, frame) = &frames[0];
+        assert_eq!(target, &id);
+        assert!(!frame.starts_with(b"{"), "평문 JSON 이 나갔다");
+        assert!(frame.len() > 8 + 16, "카운터 8 + 태그 16 보다 길어야 한다");
+
+        let opened = client.open(frame).expect("이 기기의 세션 키로 열려야 한다");
+        assert_eq!(
+            opened,
+            serde_json::to_vec(&MirrorSnapshot::from(&snap)).unwrap(),
+            "열고 나면 이번 틱의 미러 DTO 그대로여야 한다"
+        );
+    }
+
+    /// 인가되지 않은 연결에는 **0바이트**다. 붙어 있다는 것과 볼 자격이 있다는
+    /// 것은 다르다.
+    #[tokio::test]
+    async fn an_unauthorized_connection_receives_zero_bytes() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        p.begin_pairing(t(1000));
+
+        assert!(b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).is_empty());
+
+        // 핸드셰이크 중간(AwaitingCode2)도 아직 아니다 — 사람이 코드를 넣기
+        // 전까지는 인가가 아니다.
+        let c = V2Client::new();
+        b.handle_auth(&id, format!("HELLO2:{}", hex_encode(&c.public)).as_bytes(), t(1001), &mut p);
+        assert!(b.prepare_snapshot(&sample_snapshot(2.0), t(1002), &mut p).is_empty());
+    }
+
+    /// 인가된 기기 옆에 낯선 기기가 붙어 있어도 그쪽에는 아무것도 나가지 않고,
+    /// 그렇다고 인가된 기기까지 막히지도 않는다.
+    #[tokio::test]
+    async fn a_stranger_beside_a_paired_device_gets_nothing() {
+        let paired = server::central_id(0);
+        let stranger = server::central_id(1);
+        let (mut b, _rx) = live_bridge(&paired);
+        b.apply_event(&ServerEvent::Connected(stranger.clone()));
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &paired, t(1000));
+
+        let frames = b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, paired, "낯선 기기에게 나간 프레임이 있다");
+    }
+
+    /// 인가된 뒤에도 공유를 끄면 아무것도 나가지 않는다.
+    #[tokio::test]
+    async fn turning_sharing_off_stops_the_bytes() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+
+        b.set_enabled(false);
+        b.apply_event(&ServerEvent::Connected(id.clone())); // 지각 이벤트
+        assert!(b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).is_empty());
+    }
+
+    /// **언페어링된 기기에게는 다음 틱부터 0바이트.** 링크는 아직 붙어 있고
+    /// 브리지의 `centrals` 에도 남아 있지만, 인가가 사라진 것으로 충분하다 —
+    /// 형제 전송은 이 검사가 없어서 방금 해제한 기기에게 평문을 보냈다.
+    #[tokio::test]
+    async fn a_device_that_just_lost_authorization_gets_nothing() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+        assert_eq!(b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).len(), 1);
+
+        // 사용자가 이 기기를 해제했다(`unpair` → `revoke_peer`).
+        let peer = p.paired_peers()[0].peer_id.clone();
+        assert!(!p.revoke_peer(&peer).is_empty(), "해제할 세션이 있어야 한다");
+
+        assert!(
+            b.prepare_snapshot(&sample_snapshot(2.0), t(1002), &mut p).is_empty(),
+            "해제한 기기에게 한 바이트라도 나가면 안 된다"
+        );
+    }
+
+    /// **v1 세션에는 평문을 보내지 않는다.** 형제 전송은 채널이 없으면 평문
+    /// JSON 을 보내지만, LAN 은 망 전체에 열려 있고 이 전송이 받아들여진 근거
+    /// 자체가 "미러가 봉인돼 있다"였다(스펙 7.2). 여기서 평문으로 떨어지는 것은
+    /// 전환기 호환이 아니라 downgrade 다.
+    #[tokio::test]
+    async fn a_v1_session_gets_no_plaintext_over_the_lan() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        let code = p.begin_pairing(t(1000));
+
+        b.handle_auth(&id, b"HELLO", t(1001), &mut p);
+        let out = b
+            .handle_auth(&id, format!("CODE:{code}").as_bytes(), t(1002), &mut p)
+            .expect("서비스 중이다");
+        assert!(out.now_authorized, "v1 도 인가는 된다 — 세대 판단은 전송의 것이 아니다");
+        assert!(p.channel_mut(&id).is_none(), "v1 이므로 봉인 채널이 없다");
+
+        assert!(
+            b.prepare_snapshot(&sample_snapshot(1.0), t(1003), &mut p).is_empty(),
+            "봉인할 수 없으면 평문으로 떨어지지 말고 아무것도 보내지 않아야 한다"
+        );
+    }
+
+    /// 미러는 1Hz 다. 앱의 틱은 250ms 이므로, 게이트가 없으면 초당 네 장이
+    /// 나가고 `server::SINK_QUEUE`(8) 가 뜻하는 시간이 8초에서 2초로 줄어든다.
+    #[tokio::test]
+    async fn the_mirror_is_gated_to_one_frame_per_second() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+
+        assert_eq!(b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).len(), 1);
+        assert!(
+            b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).is_empty(),
+            "내용이 같으면 다시 보내지 않는다"
+        );
+        assert!(
+            b.prepare_snapshot(&sample_snapshot(2.0), t(1001), &mut p).is_empty(),
+            "내용이 달라도 1초 안이면 아직이다"
+        );
+        assert_eq!(
+            b.prepare_snapshot(&sample_snapshot(2.0), t(1002), &mut p).len(),
+            1,
+            "1초가 지나고 내용도 바뀌었으면 나가야 한다"
+        );
+    }
+
+    /// 아무도 인가되지 않았을 때는 게이트를 **소비하지 않는다.** 소비해 버리면
+    /// 기기가 붙은 직후의 첫 미러가 "방금 보냈다"는 이유로 1초 밀린다.
+    #[tokio::test]
+    async fn an_empty_tick_does_not_spend_the_gate() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+
+        // 아직 아무도 인가되지 않았다.
+        assert!(b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).is_empty());
+
+        v2_pair(&mut b, &mut p, &id, t(1001));
+        assert_eq!(
+            b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).len(),
+            1,
+            "붙자마자의 첫 미러가 게이트에 걸렸다"
+        );
+    }
+
+    /// **카운터는 전진하기만 한다.** 봉인이 끝난 순간 `(키, 논스)` 한 쌍이
+    /// 소비되고, 그 프레임이 끝내 나가지 못해도 되돌리지 않는다 — 수신 측은
+    /// 빈 칸을 견디지만 같은 논스를 두 번 쓰는 것은 회복 불가능한 사고다.
+    ///
+    /// 첫 프레임을 **보내지 않고 버린** 뒤 두 번째 프레임만 여는 것으로 그
+    /// 성질을 확인한다. 카운터를 되돌렸다면 두 번째 프레임이 0번이 되어,
+    /// 이미 0번을 본 적 없는 클라이언트에게는 그대로 열리므로 이 테스트는
+    /// 카운터 자체를 본다.
+    #[tokio::test]
+    async fn a_dropped_frame_never_makes_a_counter_repeat() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        let (_out, mut client) = v2_pair(&mut b, &mut p, &id, t(1000));
+
+        let first = b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p);
+        let second = b.prepare_snapshot(&sample_snapshot(2.0), t(1002), &mut p);
+
+        let counter = |f: &[u8]| u64::from_be_bytes(f[..8].try_into().unwrap());
+        assert_eq!(counter(&first[0].1), 0);
+        assert_eq!(counter(&second[0].1), 1, "버려진 프레임의 번호를 재사용했다");
+
+        // 첫 프레임은 나가지 못했다고 치고 두 번째만 연다 — 수신 측은 빈 칸을
+        // 견뎌야 한다.
+        client.open(&second[0].1).expect("빈 칸이 있어도 열려야 한다");
+    }
+
+    /// **봉인된 스냅샷이 64 KiB 프레임 상한에 실제로 들어가는가.** 상한을
+    /// 넘으면 서버가 자기 프레임을 보내지 못하는 것이 아니라(상한은 수신
+    /// 방향이다) 기기 쪽 조립이 무너지므로, 값을 재서 못박아 둔다.
+    ///
+    /// 현실적인 최대치를 만든다: 에이전트 셋 각각에 프로젝트 24개, 이름과
+    /// 모델명을 길게. 실제 사용에서 이보다 큰 미러는 나오기 어렵다.
+    ///
+    /// 2026-08-26 측정값: 이 무거운 스냅샷이 평문 9,649 · 봉인 9,673 바이트로
+    /// 상한의 **14.8%** 다. 평범한 한 장(에이전트 하나·프로젝트 하나)은 188
+    /// 바이트다. 상한을 올려야 할 이유는 지금 없다.
+    #[tokio::test]
+    async fn a_sealed_snapshot_fits_the_frame_budget_with_room_to_spare() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+
+        let mut snap = sample_snapshot(1.0);
+        let base = snap.agents[0].clone();
+        snap.agents = [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity]
+            .into_iter()
+            .map(|kind| {
+                let mut a = base.clone();
+                a.kind = kind;
+                a.projects = (0..24)
+                    .map(|i| ProjectActivity {
+                        path: PathBuf::from(format!("/Users/someone/work/monorepo/services/{i}")),
+                        name: format!("service-with-a-fairly-long-name-{i}"),
+                        model: "claude-opus-5-with-a-long-identifier".to_string(),
+                        rate_tok_per_sec: 12.5,
+                        last_event_at: UNIX_EPOCH + Duration::from_secs(1_755_499_987),
+                        status: ActivityStatus::Active,
+                    })
+                    .collect();
+                a
+            })
+            .collect();
+
+        let frames = b.prepare_snapshot(&snap, t(1001), &mut p);
+        let sealed = &frames[0].1;
+        let plain = serde_json::to_vec(&MirrorSnapshot::from(&snap)).unwrap();
+
+        // 봉인은 카운터 8 + 태그 16 만 더한다 — 압축도 패딩도 없다.
+        assert_eq!(sealed.len(), plain.len() + 24);
+        assert!(
+            sealed.len() * 4 < server::MAX_FRAME_BYTES,
+            "봉인된 스냅샷 {}바이트 — 64 KiB 상한의 4분의 1을 넘었다. \
+             상한을 올리기 전에 미러 DTO 가 왜 이렇게 커졌는지 먼저 보라.",
+            sealed.len()
+        );
+    }
+
+    /// 봉인 프레임이 **진짜 소켓으로, 바이너리 프레임으로** 나가는 것까지 본다.
+    /// 위의 테스트들은 전부 I/O 없는 상태 기계 호출이라, 펌프가 이것을 텍스트로
+    /// 옮기거나(봉인 바이트는 UTF-8 이 아니라 손실된다) 아예 흘려버려도 잡히지
+    /// 않는다. 여기가 그 한 겹을 덮는다.
+    #[tokio::test]
+    async fn a_sealed_snapshot_arrives_over_the_socket_as_one_binary_frame() {
+        use server::test_socket::*;
+
+        let port = server::test_socket::free_port().await;
+        let (tx, mut rx) = channel(server::EVENT_QUEUE);
+        let mut b = LanBridge::with_port(tx, port);
+        let mut p = PairingManager::new();
+        b.set_enabled(true);
+        wait_until_listening(port).await;
+
+        let mut sock = handshake(port).await;
+        let ev = rx.recv().await.expect("Connected 가 와야 한다");
+        b.apply_event(&ev);
+        let ServerEvent::Connected(id) = ev else {
+            panic!("Connected 를 기대했다");
+        };
+
+        // `v2_pair` 는 `handle_auth` 만 태운다 — 응답을 소켓에 쓰는 것은
+        // `send_auth_reply` 이고 여기서는 부르지 않으므로, 소켓으로 나가는
+        // 첫 바이트는 아래 스냅샷이 된다.
+        let (_out, mut client) = v2_pair(&mut b, &mut p, &id, t(1000));
+
+        let snap = sample_snapshot(1.0);
+        let frames = b.prepare_snapshot(&snap, t(1001), &mut p);
+        b.send_prepared(frames).await;
+
+        let got = read_binary_frame(&mut sock).await;
+        assert_eq!(
+            client.open(&got).expect("이 기기의 세션 키로 열려야 한다"),
+            serde_json::to_vec(&MirrorSnapshot::from(&snap)).unwrap()
+        );
+
+        b.set_enabled(false);
     }
 }

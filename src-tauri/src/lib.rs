@@ -995,8 +995,13 @@ pub fn run() {
                                     if outcome.now_authorized {
                                         // network 는 여기서 스냅샷 uni-stream 을 열지만 LAN 은
                                         // 열 것이 없다 — 스냅샷은 이미 붙어 있는 같은
-                                        // WebSocket 으로 나간다(Task 4 가
-                                        // `snapshot_targets` 로 대상을 고른다).
+                                        // WebSocket 으로 나간다(틱이 `prepare_snapshot`
+                                        // 으로 대상을 고른다).
+                                        //
+                                        // 대신 서버에 인가를 알려 이 연결의 **인증 시한**을
+                                        // 걷는다. 이것을 빠뜨리면 정상적으로 페어링한 기기가
+                                        // 150초 뒤에 끊긴다 — 그것도 미러가 잘 나오는 중에.
+                                        h.bridge.lock().await.mark_authorized(id);
                                         tracing::info!(id = %id.0, "LAN 세션 인가됨");
                                     }
                                 }
@@ -1094,6 +1099,7 @@ pub fn run() {
                 let antigravity_for_tick = antigravity_quota.clone();
                 let ble_for_tick = ble_handle.clone();
                 let network_for_tick = network_handle.clone();
+                let lan_for_tick = lan_handle.clone();
                 let settings_for_tick = settings_state.clone();
                 let pairing_for_tick = shared_pairing.clone();
                 // **이 루프가 하나의 순차 태스크라는 점이 v2 프레임 순서의 근거다.**
@@ -1185,9 +1191,14 @@ pub fn run() {
                             // 인증 경로와 같다.
                             let mut p = pairing_for_tick.lock().await;
                             // BLE 는 큐에 넘기고 끝나는 동기 호출이라 잠금 안에서
-                            // 마쳐도 된다. 네트워크는 봉인까지만 여기서 한다.
+                            // 마쳐도 된다. 네트워크와 LAN 은 봉인까지만 여기서 한다.
                             ble_for_tick.bridge.lock().await.on_snapshot(&snap, now, &mut p);
                             let lines = network_for_tick
+                                .bridge
+                                .lock()
+                                .await
+                                .prepare_snapshot(&snap, now, &mut p);
+                            let lan_frames = lan_for_tick
                                 .bridge
                                 .lock()
                                 .await
@@ -1198,6 +1209,10 @@ pub fn run() {
                             // 시작·BLE/네트워크 인증 처리가 전부 멈춘다.
                             drop(p);
                             network_for_tick.bridge.lock().await.send_prepared(lines).await;
+                            // LAN 의 쓰기는 오늘 막히지 않지만(무한 채널에 넣고
+                            // 끝난다) 잠금 밖이라는 위치는 지킨다 — 세 전송이 같은
+                            // 모양이어야 한쪽만 고치는 드리프트가 눈에 띈다.
+                            lan_for_tick.bridge.lock().await.send_prepared(lan_frames).await;
                         }
                     }
                 });
