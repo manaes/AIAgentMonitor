@@ -277,6 +277,41 @@ if !powered {
 - [ ] Snapshot 특성 페이로드가 `{` 로 시작하지 **않는다** (평문 JSON 이 아니라
       `SealedChannel::seal` 이 만드는 `counter‖ciphertext‖tag` 봉인 프레임이다)
 
+#### 실행 절차
+
+위 체크리스트가 여태 한 번도 돌지 않은 이유는 "어떻게 돌리는가" 가 없어서다.
+`verify-no-plaintext.sh` 가 그 자리를 채운다.
+
+**이 검사의 함정은 항상 통과한다는 것이다.** 인터페이스를 잘못 골랐거나, 캡처
+중에 페어링을 안 했거나, 필터가 트래픽을 다 걸러냈어도 "평문 없음" 은 성립한다.
+그래서 스크립트는 먼저 양성 대조를 돌리고, 대조가 깨지면 나머지를 아예 돌리지
+않는다. 그리고 코드를 넘기지 않으면 **exit 3** 으로 끝난다 — "통과" 와 "검사하지
+않음" 을 종료 코드로 구분해서, 안 돈 검사가 통과로 기록되지 않게 한다.
+
+찾는 값은 우리가 실제로 가진 값이다. 토큰은
+`~/Library/Application Support/ai-agent-monitor/paired-peers.json` 의 32자 hex
+이고, 평문 스냅샷의 서명은 `{"v":` 다 — `MirrorSnapshot` 이 `{ v, t, a }` 순서로
+직렬화되기 때문이다(`src-tauri/src/ble/wire.rs:100`). 봉인 프레임은 hex ASCII 라
+`{` 를 담지 않는다.
+
+```bash
+# 1) 네트워크(iroh) — 페어링 직전에 시작한다. en0 은 이 맥의 Wi-Fi.
+sudo tcpdump -i en0 -s0 -w /tmp/aim-net.pcap
+#    ...맥에서 [페어링 시작] → 폰으로 QR 스캔 → 코드 입력 → 미러 화면 확인...
+#    Ctrl-C 로 멈춘다. 화면에 떴던 6자리 코드를 적어둔다.
+
+# 2) 검사 (두 번째 인자는 화면에 떴던 코드 — 빼면 exit 3)
+./docs/ble-protocol/verify-no-plaintext.sh /tmp/aim-net.pcap 482913
+```
+
+BLE 쪽은 `PacketLogger` 가 필요하고, 이건 Xcode 에 딸려 오지 않는다 —
+developer.apple.com 의 **Additional Tools for Xcode** 를 따로 받아야 한다
+(2026-08-26 기준 이 맥에는 설치돼 있지 않다). 설치 후 캡처해서 `.pklg` 를
+같은 스크립트에 넘기면 된다. `strings` 기반이라 컨테이너 형식과 무관하게 돈다.
+
+스크립트가 실제로 잡는지는 확인해 뒀다 — 랜덤 hex 캡처에 실제 토큰과
+`{"v":2,...}` 를 심으면 두 항목 모두 FAIL 로 뜨고, 심지 않으면 통과한다.
+
 ### 7-8. 이 브랜치가 의도적으로 하지 않은 것
 
 다음 사람이 "왜 안 됐지"를 찾아 헤매지 않도록 명시해 둔다.
