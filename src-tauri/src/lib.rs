@@ -970,6 +970,28 @@ pub fn run() {
                                 if let Some(outcome) = outcome {
                                     notable = outcome.changed_visible_state();
                                     h.bridge.lock().await.send_auth_reply(id, outcome.payload);
+                                    // **인가 통지가 디스크보다 먼저다.** 아래 토큰
+                                    // 저장과 이 통지는 서로 독립인데, 순서가 반대면
+                                    // 보안 타이머(인증 시한)의 해제 시점이 디스크
+                                    // 속도에 매달린다. 저장이 오래 걸린 채 150초
+                                    // 경계에 걸리면, 방금 페어링에 **성공한** 기기가
+                                    // 성공하는 순간 끊긴다. 재연결은 사람 없이
+                                    // `AUTH2`/`PROOF2` 로 되므로 잠기지는 않지만,
+                                    // 보안 판단이 I/O 지연에 의존하는 관계 자체를
+                                    // 두지 않는다.
+                                    //
+                                    // 통지 자체를 빠뜨리면 정상적으로 페어링한
+                                    // 기기가 150초 뒤에 끊긴다 — 그것도 미러가
+                                    // 잘 나오는 중에.
+                                    //
+                                    // network 는 여기서 스냅샷 uni-stream 을 열지만
+                                    // LAN 은 열 것이 없다 — 스냅샷은 이미 붙어 있는
+                                    // 같은 WebSocket 으로 나간다(틱이
+                                    // `prepare_snapshot` 으로 대상을 고른다).
+                                    if outcome.now_authorized {
+                                        h.bridge.lock().await.mark_authorized(id);
+                                        tracing::info!(id = %id.0, "LAN 세션 인가됨");
+                                    }
                                     if outcome.granted {
                                         // 새 토큰이 발급됐다. 여기서 디스크에 쓰지 않으면
                                         // 이 세션에서는 멀쩡히 동작하다가 맥을 껐다 켜는
@@ -991,18 +1013,6 @@ pub fn run() {
                                                     "페어링 토큰 저장 실패: {e}"
                                                 )));
                                         }
-                                    }
-                                    if outcome.now_authorized {
-                                        // network 는 여기서 스냅샷 uni-stream 을 열지만 LAN 은
-                                        // 열 것이 없다 — 스냅샷은 이미 붙어 있는 같은
-                                        // WebSocket 으로 나간다(틱이 `prepare_snapshot`
-                                        // 으로 대상을 고른다).
-                                        //
-                                        // 대신 서버에 인가를 알려 이 연결의 **인증 시한**을
-                                        // 걷는다. 이것을 빠뜨리면 정상적으로 페어링한 기기가
-                                        // 150초 뒤에 끊긴다 — 그것도 미러가 잘 나오는 중에.
-                                        h.bridge.lock().await.mark_authorized(id);
-                                        tracing::info!(id = %id.0, "LAN 세션 인가됨");
                                     }
                                 }
                             }

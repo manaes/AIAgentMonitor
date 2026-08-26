@@ -136,9 +136,15 @@ impl LanBridge {
             // 안 보여주는 것만큼 나쁘다. 이번 시도도 실패하면 `BindFailed` 가
             // 곧바로 다시 채운다.
             self.last_error = None;
-            // 다시 켰으면 첫 스냅샷은 곧바로 나가야 한다. 게이트는 "내용이
-            // 같으면 안 보낸다"이므로, 되돌리지 않으면 꺼져 있는 동안 아무것도
-            // 바뀌지 않은 경우 다시 켠 기기가 변화가 생길 때까지 빈 화면을 본다.
+            // 되돌리지 않으면, 꺼져 있는 동안 내용이 그대로였을 때 다시 켠
+            // 기기가 **다음 변화가 생길 때까지** 빈 화면을 본다. 게이트는
+            // "내용이 같으면 안 보낸다"이기 때문이다.
+            //
+            // 다만 `reset()` 이 지우는 것은 `last_hash` 뿐이고 `last_emit_at` 은
+            // 남는다 — 직전 송출로부터 `LAN_THROTTLE`(1초) 안에 다시 켜면 첫
+            // 미러는 여전히 그만큼 밀린다. 실사용에서 재활성화는 bind + 재연결 +
+            // `AUTH2`/`PROOF2` 왕복을 거쳐 1초를 훌쩍 넘으므로 보이지 않지만,
+            // "곧바로"는 아니다.
             self.gate.reset();
             self.generation += 1;
             self.server = Some(server::spawn(
@@ -349,8 +355,18 @@ impl LanBridge {
         // 따로 만든다. 하나가 빠져도 나머지는 그대로 나간다.
         let mut out = Vec::with_capacity(targets.len());
         for central in targets {
-            if let Some(frame) = sealed_frame(pairing, &central, &json) {
-                out.push((central, frame));
+            match seal_for(pairing, &central, &json) {
+                Sealed::Frame(frame) => out.push((central, frame)),
+                // 인가가 없는 것은 사고가 아니다 — 방금 해제됐거나 아직 인증
+                // 전이다. 조용히 건너뛴다.
+                Sealed::NotAuthorized => {}
+                // 인가됐는데 봉인 채널이 없다. LAN 클라이언트는 E2EE v2 이후에만
+                // 존재하므로 여기 닿을 기기는 없어야 한다 — 닿았다면 그 자체가
+                // 알아야 할 사실이다(`seal_for` 의 doc).
+                Sealed::NoChannel => tracing::warn!(
+                    id = %central.0,
+                    "LAN 세션에 봉인 채널이 없다 — 평문을 내보내는 대신 건너뛴다"
+                ),
             }
         }
         out
@@ -364,9 +380,23 @@ impl LanBridge {
     /// 별 큐(`server::SINK_QUEUE`)가 받아 내고, 밀린 연결은 서버가 놓는다 —
     /// 이 함수는 그 판단을 하지 않는다.
     ///
-    /// 한 central 의 실패가 다른 central 을 막지 않는다. 리스너가 그 사이
-    /// 내려갔으면 전부 조용히 버려지고, 다음 틱이 새 프레임을 만든다 — 버려진
-    /// 프레임의 카운터는 되돌리지 않는다(`sealed_frame` 의 doc).
+    /// 한 central 의 실패가 다른 central 을 막지 않는다 — central 마다 따로
+    /// 넣고, 버려진 프레임의 카운터는 되돌리지 않는다(`seal_for` 의 doc).
+    ///
+    /// **리스너가 그 사이 내려갔으면 이 배치는 그대로 사라지고, 다음 틱이 다시
+    /// 만들어 주지 않는다.** `prepare_snapshot` 이 이미 게이트를 소비했고 여기서
+    /// `gate.reset()` 을 부르지 않기 때문이다. `EmitGate::reset` 의 doc 이
+    /// "나가지 못한 프레임은 **반드시** 되돌려라"라고 적어 둔 것을 알면서 그렇게
+    /// 하지 않는다:
+    ///
+    /// 그 지침은 **다음 틱이 성공할 수 있는** 일시적 실패를 위한 것이다. 여기는
+    /// 아니다. `self.server` 는 `set_enabled(true)` 에서만 다시 `Some` 이 되고
+    /// (`BindFailed` 는 `None` 으로 만들 뿐 되살리지 않는다), 그 함수가 이미
+    /// `gate.reset()` 을 부른다. 즉 버린 배치 뒤에 올 수 있는 미래는 둘뿐이다 —
+    /// 리스너가 계속 죽어 있거나(그동안은 무엇을 만들어도 배달되지 않는다),
+    /// 사용자가 다시 켜거나(그 순간 게이트가 되돌아간다). 여기서 되돌리면
+    /// 죽어 있는 리스너를 향해 초당 네 번 봉인하고 버리는 루프가 될 뿐이다.
+    /// 되살리는 손잡이는 `set_enabled` 한 곳에 둔다.
     pub async fn send_prepared(&mut self, frames: Vec<(CentralId, Vec<u8>)>) {
         let Some(h) = &self.server else {
             return;
@@ -413,15 +443,38 @@ impl LanBridge {
     }
 }
 
-/// 이 central 에게 실제로 나갈 봉인 프레임(`counter || ciphertext || tag`).
-/// 인가되지 않았거나 v2 세션이 아니면 `None` — **한 바이트도 나가면 안 된다.**
+/// 봉인 지점이 이 central 에 대해 내린 판단.
+///
+/// **왜 `Option` 이 아닌가.** 바이트가 나가지 않는 이유가 둘인데 그 둘의 뜻이
+/// 정반대다. `NotAuthorized` 는 평범한 일상이고(아직 인증 전이거나 방금
+/// 해제됐다), `NoChannel` 은 LAN 에서 일어나면 안 되는 조합이다. `Option` 으로
+/// 뭉치면 둘이 구분되지 않고, 구분되지 않으면 **인가 검사를 지워도 결과가
+/// 똑같아 보인다** — 실제로 리뷰가 그 세 줄을 지우고 전체 스위트를 통과시켰다.
+/// 지금 이 열거형이 그 변형을 잡는다.
+#[derive(Debug, PartialEq, Eq)]
+enum Sealed {
+    /// 봉인된 프레임(`counter || ciphertext || tag`). 이대로 나간다.
+    Frame(Vec<u8>),
+    /// 인가되지 않았다 — 0바이트.
+    NotAuthorized,
+    /// 인가는 됐는데 봉인 채널이 없다(= v1 세션) — 역시 0바이트.
+    NoChannel,
+}
+
+/// 이 central 에게 무엇을 보낼지 정한다. 나갈 바이트를 만드는 **유일한 지점**이고,
+/// 그래서 스스로 닫혀 있어야 한다. 로그를 남기지 않는 순수한 판단이다 — 흔적은
+/// 부르는 쪽이 남긴다.
 ///
 /// **인가 검사가 여기 또 있는 이유.** `snapshot_targets` 가 이미 걸렀다. 그래도
-/// 다시 보는 것은, 이 함수가 나갈 바이트를 만드는 유일한 지점이고 그 지점이
-/// 스스로 닫혀 있어야 하기 때문이다. 형제 전송에서 정확히 이 검사가 없어서,
-/// 언페어링과 스냅샷 틱이 겹치는 창에 **방금 해제한 기기에게 평문 JSON** 이
-/// 나갔다(`network::snapshot_line` 의 doc). 지금은 대상 선정과 봉인 사이에
-/// await 가 없어 그 창이 없지만, "창이 없다"에 기대는 대신 검사를 둔다.
+/// 다시 보는 것은, 형제 전송에서 정확히 이 검사가 없어서 언페어링과 스냅샷 틱이
+/// 겹치는 창에 **방금 해제한 기기에게 평문 JSON** 이 나갔기 때문이다
+/// (`network::snapshot_line` 의 doc). 지금 LAN 에는 대상 선정과 봉인 사이에
+/// await 가 없어 그 창이 없다 — 그래서 이 검사는 오늘 **바이트를 바꾸지 않는다**
+/// (인가가 사라질 때 `end_session` 이 채널도 함께 지우므로 아래 `NoChannel`
+/// 갈래로도 0바이트가 된다). 검사가 지키는 것은 바이트가 아니라 **판단의
+/// 독립성**이다: 이 지점이 "인가되지 않았다"를 스스로 알고 있어야, 두 맵의
+/// 수명이 같다는 우연이 깨져도(혹은 Task 4b 가 `drop_sessions` 를 배선해 창이
+/// 생겨도) 결론이 따라 바뀌지 않는다.
 ///
 /// **v1 세션에는 아무것도 보내지 않는다.** 형제 전송은 채널이 없으면 평문 JSON
 /// 을 보낸다 — BLE 는 10m 안에서, iroh 는 상대가 걸어온 QUIC 위에서다. LAN 은
@@ -431,30 +484,17 @@ impl LanBridge {
 /// `PairingManager` 가 정한다 — v1 로 붙는 것을 이 전송이 막지는 않는다
 /// (`handle_auth` 의 doc). 다만 **그 세션에 평문을 실어 보내지는 않는다.**
 ///
-/// LAN 클라이언트는 E2EE v2 이후에만 존재하므로 실제로 이 갈래에 닿을 기기는
-/// 없다. 닿았다면 그 자체가 알아야 할 사실이라 흔적을 남긴다.
-///
-/// **카운터는 되돌리지 않는다.** 봉인이 끝난 순간 `(키, 논스)` 한 쌍이 소비된다.
-/// 이 프레임이 끝내 나가지 못해도 다음 프레임은 다음 카운터를 쓴다 — 수신 측은
-/// 카운터의 빈 칸을 견디지만(`SealedChannel::open`), 같은 논스를 두 번 쓰는 것은
-/// ChaCha20-Poly1305 에서 회복 불가능한 사고다.
-fn sealed_frame(
-    pairing: &mut PairingManager,
-    central: &CentralId,
-    json: &[u8],
-) -> Option<Vec<u8>> {
+/// **카운터는 되돌리지 않는다.** `Frame` 이 만들어진 순간 `(키, 논스)` 한 쌍이
+/// 소비된다. 그 프레임이 끝내 나가지 못해도 다음 프레임은 다음 카운터를 쓴다 —
+/// 수신 측은 카운터의 빈 칸을 견디지만(`SealedChannel::open`), 같은 논스를 두 번
+/// 쓰는 것은 ChaCha20-Poly1305 에서 회복 불가능한 사고다.
+fn seal_for(pairing: &mut PairingManager, central: &CentralId, json: &[u8]) -> Sealed {
     if !pairing.is_authorized(central) {
-        return None;
+        return Sealed::NotAuthorized;
     }
     match pairing.channel_mut(central) {
-        Some(ch) => Some(ch.seal(json)),
-        None => {
-            tracing::warn!(
-                id = %central.0,
-                "LAN 세션에 봉인 채널이 없다 — 평문을 내보내는 대신 건너뛴다"
-            );
-            None
-        }
+        Some(ch) => Sealed::Frame(ch.seal(json)),
+        None => Sealed::NoChannel,
     }
 }
 
@@ -1246,10 +1286,59 @@ mod tests {
         );
     }
 
+    /// **봉인 지점은 인가 여부를 스스로 안다.**
+    ///
+    /// 이 테스트가 없으면 `seal_for` 의 `is_authorized` 세 줄을 통째로 지워도
+    /// 스위트가 전부 통과한다(리뷰가 실제로 해 봤다). 이유는 두 가지가 겹쳐서다:
+    /// `prepare_snapshot` 은 `snapshot_targets` 가 빈 목록을 주면 봉인 지점까지
+    /// 가지도 않고, 설령 갔더라도 인가를 지우는 `end_session` 이 봉인 채널도 함께
+    /// 지우므로 `NoChannel` 갈래로 떨어져 **바이트는 똑같이 0** 이다.
+    ///
+    /// 그래서 여기서 보는 것은 바이트가 아니라 **이유**다. 이 지점이 "인가되지
+    /// 않았다"를 스스로 알고 있어야, 두 맵의 수명이 같다는 우연이 깨져도(혹은
+    /// Task 4b 가 `drop_sessions` 를 배선해 await 창이 생겨도) 결론이 따라
+    /// 바뀌지 않는다. 자유 함수라 `prepare_snapshot` 을 거치지 않고 직접 부른다.
+    #[tokio::test]
+    async fn the_sealing_point_knows_on_its_own_that_a_central_is_unauthorized() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+        assert!(
+            matches!(seal_for(&mut p, &id, b"{}"), Sealed::Frame(_)),
+            "인가된 v2 세션에는 봉인 프레임이 나와야 한다"
+        );
+
+        let peer = p.paired_peers()[0].peer_id.clone();
+        assert!(!p.revoke_peer(&peer).is_empty(), "해제할 세션이 있어야 한다");
+
+        assert_eq!(
+            seal_for(&mut p, &id, b"{}"),
+            Sealed::NotAuthorized,
+            "인가가 사라졌으면 봉인 지점이 그 이유로 거절해야 한다 — \
+             `NoChannel` 이 나온다면 인가 검사가 사라진 것이다"
+        );
+    }
+
+    /// 인증을 시작조차 하지 않은 연결도 마찬가지다. 위 테스트는 "인가를 잃은"
+    /// 경우이고 이쪽은 "한 번도 얻은 적 없는" 경우다 — 두 상태가 같은 이유로
+    /// 거절되는지 본다.
+    #[test]
+    fn the_sealing_point_refuses_a_central_that_never_authenticated() {
+        let mut p = PairingManager::new();
+        assert_eq!(
+            seal_for(&mut p, &server::central_id(0), b"{}"),
+            Sealed::NotAuthorized
+        );
+    }
+
     /// **v1 세션에는 평문을 보내지 않는다.** 형제 전송은 채널이 없으면 평문
     /// JSON 을 보내지만, LAN 은 망 전체에 열려 있고 이 전송이 받아들여진 근거
     /// 자체가 "미러가 봉인돼 있다"였다(스펙 7.2). 여기서 평문으로 떨어지는 것은
     /// 전환기 호환이 아니라 downgrade 다.
+    ///
+    /// 인가는 됐으므로 거절의 이유는 `NoChannel` 이어야 한다 — 위 두 테스트와
+    /// 짝이 되어, 봉인 지점이 두 상황을 실제로 **구분**하는지까지 고정한다.
     #[tokio::test]
     async fn a_v1_session_gets_no_plaintext_over_the_lan() {
         let id = server::central_id(0);
@@ -1264,6 +1353,11 @@ mod tests {
         assert!(out.now_authorized, "v1 도 인가는 된다 — 세대 판단은 전송의 것이 아니다");
         assert!(p.channel_mut(&id).is_none(), "v1 이므로 봉인 채널이 없다");
 
+        assert_eq!(
+            seal_for(&mut p, &id, b"{}"),
+            Sealed::NoChannel,
+            "인가는 됐으나 봉인할 수 없다 — 거절의 이유가 그것이어야 한다"
+        );
         assert!(
             b.prepare_snapshot(&sample_snapshot(1.0), t(1003), &mut p).is_empty(),
             "봉인할 수 없으면 평문으로 떨어지지 말고 아무것도 보내지 않아야 한다"
