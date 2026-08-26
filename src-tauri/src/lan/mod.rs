@@ -178,6 +178,43 @@ impl LanBridge {
         self.centrals.remove(central);
     }
 
+    /// 사용자가 기기를 해제했다(`unpair`/`unpair_all`). 그 central 들의 LAN 세션을
+    /// 끝낸다 — `ble::BleBridge::drop_sessions`·`network::NetworkBridge::drop_sessions`
+    /// 와 **같은 이름·같은 시그니처**다. 앱은 그 central 이 어느 전송에 붙어
+    /// 있었는지 모르는 채로 세 브리지 모두에 같은 목록을 넘긴다.
+    ///
+    /// **목록에서 지우는 것만으로는 부족하다.** 지우면 다음 틱부터 스냅샷이
+    /// 나가지 않지만(`snapshot_targets`) 소켓은 그대로 살아 있다. 게다가 인가된
+    /// 연결은 인증 시한이 이미 걷혀 다시 걸리지 않으므로
+    /// (`server::Deadline::Lift`) 그 연결을 놓아 줄 시간 상한이 아예 없다 —
+    /// 해제된 기기가 `server::MAX_CONNECTIONS`(8) 중 한 자리를 영영 쥐게 된다.
+    /// 그래서 `Outbound::Close` 를 함께 보낸다. 그것이 소켓까지 나가야 연결
+    /// 핸들러가 루프를 빠져나가고 `Slot` 이 떨어져 자리가 돌아온다.
+    ///
+    /// **모르는 id 는 건너뛴다.** 한 사용자가 BLE 로도 network 로도 페어링했을 수
+    /// 있고 `revoke_all` 은 그 전부를 돌려주므로, 이 목록에는 LAN 이 서비스한 적
+    /// 없는 id 가 언제나 섞여 든다. 그런 id 에 `Close` 를 쏘아도 펌프가 버리지만
+    /// (`server::push_to_sink`), 공유 목록에 모르는 id 를 넣지 않는다는 이 모듈의
+    /// 규칙(`sessions_to_end` 의 doc)을 여기서도 지킨다. 다만 건너뛰는 것이
+    /// **루프를 멈추지는 않는다** — 모르는 id 하나가 아는 id 들의 처리를 막으면
+    /// 그것이 바로 이 함수가 고치려는 그 누수다.
+    pub fn drop_sessions(&mut self, ids: &[CentralId]) {
+        for id in ids {
+            if !self.centrals.contains(id) {
+                continue;
+            }
+            // 지우는 뜻이 무엇인지는 `forget_central` 한 곳에만 둔다 — 여기에
+            // 베껴 두면 그쪽이 자라날 때 이쪽만 옛 동작에 남는다.
+            self.forget_central(id);
+            // 리스너가 없으면(토글이 꺼졌다) 보낼 곳이 없다. 그 경우 애초에
+            // `set_enabled(false)` 가 `centrals` 를 비웠으므로 여기까지 오지도
+            // 않지만, 그 성질에 기대지 않는다.
+            if let Some(h) = &self.server {
+                let _ = h.outbound.send(Outbound::Close(id.clone()));
+            }
+        }
+    }
+
     pub fn last_error(&self) -> Option<String> {
         self.last_error.clone()
     }
@@ -481,8 +518,10 @@ enum Sealed {
 /// (인가가 사라질 때 `end_session` 이 채널도 함께 지우므로 아래 `NoChannel`
 /// 갈래로도 0바이트가 된다). 검사가 지키는 것은 바이트가 아니라 **판단의
 /// 독립성**이다: 이 지점이 "인가되지 않았다"를 스스로 알고 있어야, 두 맵의
-/// 수명이 같다는 우연이 깨져도(혹은 Task 4b 가 `drop_sessions` 를 배선해 창이
-/// 생겨도) 결론이 따라 바뀌지 않는다.
+/// 수명이 같다는 우연이 깨져도 결론이 따라 바뀌지 않는다. `drop_sessions` 가
+/// 배선된 지금도 그 창은 열리지 않는데(해제는 `revoke_peer` 가 **먼저** 인가를
+/// 지우고 나서 세 브리지를 도는 순서다), 그 순서가 바뀌는 날에도 이 지점의
+/// 결론은 그대로여야 한다.
 ///
 /// **v1 세션에는 아무것도 보내지 않는다.** 형제 전송은 채널이 없으면 평문 JSON
 /// 을 보낸다 — BLE 는 10m 안에서, iroh 는 상대가 걸어온 QUIC 위에서다. LAN 은
@@ -1304,8 +1343,8 @@ mod tests {
     ///
     /// 그래서 여기서 보는 것은 바이트가 아니라 **이유**다. 이 지점이 "인가되지
     /// 않았다"를 스스로 알고 있어야, 두 맵의 수명이 같다는 우연이 깨져도(혹은
-    /// Task 4b 가 `drop_sessions` 를 배선해 await 창이 생겨도) 결론이 따라
-    /// 바뀌지 않는다. 자유 함수라 `prepare_snapshot` 을 거치지 않고 직접 부른다.
+    /// 해제 경로에 await 창이 생겨도) 결론이 따라 바뀌지 않는다. 자유 함수라
+    /// `prepare_snapshot` 을 거치지 않고 직접 부른다.
     #[tokio::test]
     async fn the_sealing_point_knows_on_its_own_that_a_central_is_unauthorized() {
         let id = server::central_id(0);
@@ -1493,6 +1532,103 @@ mod tests {
              상한을 올리기 전에 미러 DTO 가 왜 이렇게 커졌는지 먼저 보라.",
             sealed.len()
         );
+    }
+
+    // --- 언페어링 (Task 4b) ---
+
+    /// 해제된 central 은 이 전송의 목록에서 사라지고, **모르는 id 가 앞뒤에 섞여
+    /// 있어도** 아는 id 는 정상 처리된다. 한 사용자가 BLE 로도 network 로도
+    /// 페어링했을 수 있고 `revoke_all` 은 그 전부를 돌려주므로, 섞여 드는 것은
+    /// 예외가 아니라 평상시다 — 그중 하나에서 루프가 멈추면 뒤에 있는 진짜 LAN
+    /// 세션이 그대로 남는다.
+    #[tokio::test]
+    async fn unpairing_forgets_only_the_centrals_we_serve() {
+        let mine = server::central_id(0);
+        let neighbour = server::central_id(1);
+        let (mut b, _rx) = live_bridge(&mine);
+        b.apply_event(&ServerEvent::Connected(neighbour.clone()));
+
+        b.drop_sessions(&[
+            CentralId("ble:aa".into()),
+            mine,
+            CentralId("iroh:bb".into()),
+        ]);
+
+        assert_eq!(
+            b.served_centrals(),
+            vec![neighbour],
+            "해제한 세션만 사라져야 한다 — 모르는 id 하나가 처리를 막았거나, \
+             해제하지 않은 옆 기기까지 내렸다"
+        );
+    }
+
+    /// 해제할 것이 하나도 없을 때(다른 전송의 기기만 해제됐다) 아무 일도 하지
+    /// 않는다. `unpair` 는 그 central 이 어느 전송에 붙어 있었는지 모르는 채로
+    /// 세 브리지 모두를 부르므로 이쪽이 평범한 경우다.
+    #[tokio::test]
+    async fn unpairing_a_central_from_another_transport_changes_nothing() {
+        let mine = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&mine);
+        b.drop_sessions(&[CentralId("ble:aa".into())]);
+        assert_eq!(b.served_centrals(), vec![mine]);
+    }
+
+    /// **이 태스크의 요점.** 목록에서 지우면 스냅샷은 멎지만(그건 Task 4 가 이미
+    /// 고정했다) 소켓은 살아 있고 자리도 그대로다. 인가된 연결에는 그 자리를
+    /// 되돌려 줄 시간 상한이 없으므로(`server::Deadline::Lift`) 해제된 기기가
+    /// 여덟 자리 중 하나를 영영 쥐게 된다.
+    ///
+    /// 그래서 여기서 보는 것은 상태가 아니라 **소켓으로 나가는 바이트**다:
+    /// Close 프레임이 실제로 도착하는가, 그리고 상대가 규약대로 되받았을 때
+    /// 서버가 연결을 실제로 끝내는가. `Disconnected` 가 그 증거다 — 그 이벤트는
+    /// 연결 핸들러가 루프를 빠져나온 뒤에만 나가고, 그 직후 `Slot` 이 떨어진다.
+    /// 자리가 정말 회수되는지까지는 `server` 쪽의
+    /// `closing_a_connection_gives_its_slot_back` 이 본다.
+    #[tokio::test]
+    async fn unpairing_closes_the_socket() {
+        use server::test_socket::*;
+        use tokio::io::AsyncWriteExt;
+
+        let port = free_port().await;
+        let (tx, mut rx) = channel(server::EVENT_QUEUE);
+        let mut b = LanBridge::with_port(tx, port);
+        let mut p = PairingManager::new();
+        b.set_enabled(true);
+        wait_until_listening(port).await;
+
+        let mut sock = handshake(port).await;
+        let ev = rx.recv().await.expect("Connected 가 와야 한다");
+        b.apply_event(&ev);
+        let ServerEvent::Connected(id) = ev else {
+            panic!("Connected 를 기대했다");
+        };
+        v2_pair(&mut b, &mut p, &id, t(1000));
+
+        // 사용자가 이 기기를 해제했다 — `lib.rs::persist_and_drop` 이 하는 일 그대로.
+        let peer = p.paired_peers()[0].peer_id.clone();
+        let dropped = p.revoke_peer(&peer);
+        assert_eq!(dropped, vec![id.clone()], "해제할 LAN 세션이 있어야 한다");
+        b.drop_sessions(&dropped);
+
+        let (opcode, _) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut sock))
+            .await
+            .expect("해제했는데 Close 프레임이 소켓으로 나오지 않았다");
+        assert_eq!(opcode, 0x88, "Close 프레임(FIN+opcode 8)이어야 한다");
+
+        // 규약대로 되받는다 — 정상적인 클라이언트가 하는 일이다.
+        sock.write_all(&masked_close_frame()).await.unwrap();
+
+        let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("Close 를 되받았는데 연결이 끝나지 않았다")
+            .unwrap();
+        assert_eq!(
+            ev,
+            ServerEvent::Disconnected(id),
+            "해제된 연결이 실제로 끝나야 자리가 돌아온다"
+        );
+
+        b.set_enabled(false);
     }
 
     /// 봉인 프레임이 **진짜 소켓으로, 바이너리 프레임으로** 나가는 것까지 본다.

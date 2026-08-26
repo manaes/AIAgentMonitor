@@ -270,7 +270,7 @@ async fn begin_pairing(pairing: tauri::State<'_, SharedPairing>) -> Result<(), S
     Ok(())
 }
 
-/// 내려간 세션을 **두 브릿지 모두**에 알리고, 저장소를 갱신한다. 그 central 이
+/// 내려간 세션을 **세 브릿지 모두**에 알리고, 저장소를 갱신한다. 그 central 이
 /// 어느 전송에 붙어 있었는지 앱은 모르고 알 필요도 없다 — 모르는 id 는 무시된다.
 ///
 /// **스트림을 먼저 끊고 디스크는 나중에 쓴다.** 순서가 반대면 디스크 I/O 를
@@ -278,14 +278,20 @@ async fn begin_pairing(pairing: tauri::State<'_, SharedPairing>) -> Result<(), S
 /// 안)과 쓰기(잠금 밖)가 나뉘어 있어 인가가 살아 있을 때 봉인해 둔 프레임 한
 /// 장이 해제 뒤에 나갈 수 있다. 평문은 아니고 다음 틱에 저절로 낫지만, 디스크를
 /// 먼저 기다릴 이유가 없으므로 그냥 순서를 뒤집는다.
+///
+/// LAN 도 **같은 이유로 저장 앞이다.** 이쪽이 늦으면 그 창 동안 해제된 기기의
+/// 소켓이 계속 열려 있고, 인가된 LAN 연결에는 그 자리를 되돌려 줄 시간 상한이
+/// 없다(`lan::LanBridge::drop_sessions` 의 doc).
 async fn persist_and_drop(
     pairing: &SharedPairing,
     ble_state: &Arc<BleHandle>,
     network_state: &Arc<NetworkHandle>,
+    lan_state: &Arc<LanHandle>,
     dropped: Vec<ble::peripheral::CentralId>,
 ) -> Result<(), String> {
     ble_state.bridge.lock().await.drop_sessions(&dropped);
     network_state.bridge.lock().await.drop_sessions(&dropped);
+    lan_state.bridge.lock().await.drop_sessions(&dropped);
     save_paired_peers(pairing).await
 }
 
@@ -297,9 +303,10 @@ async fn unpair(
     pairing: tauri::State<'_, SharedPairing>,
     ble_state: tauri::State<'_, Arc<BleHandle>>,
     network_state: tauri::State<'_, Arc<NetworkHandle>>,
+    lan_state: tauri::State<'_, Arc<LanHandle>>,
 ) -> Result<(), String> {
     let dropped = pairing.lock().await.revoke_peer(&peer_id);
-    persist_and_drop(&pairing, &ble_state, &network_state, dropped).await
+    persist_and_drop(&pairing, &ble_state, &network_state, &lan_state, dropped).await
 }
 
 #[tauri::command]
@@ -307,9 +314,10 @@ async fn unpair_all(
     pairing: tauri::State<'_, SharedPairing>,
     ble_state: tauri::State<'_, Arc<BleHandle>>,
     network_state: tauri::State<'_, Arc<NetworkHandle>>,
+    lan_state: tauri::State<'_, Arc<LanHandle>>,
 ) -> Result<(), String> {
     let dropped = pairing.lock().await.revoke_all();
-    persist_and_drop(&pairing, &ble_state, &network_state, dropped).await
+    persist_and_drop(&pairing, &ble_state, &network_state, &lan_state, dropped).await
 }
 
 /// BLE 와 동시에 켤 수 있다(2026-08-25 스펙) — 페어링 창을 공유하므로 예전의

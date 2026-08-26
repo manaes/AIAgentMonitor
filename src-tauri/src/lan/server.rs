@@ -41,12 +41,19 @@
 //! 앞의 둘은 상한이 아니라 산수였다.** 산수는 트래픽이 바뀌면 함께 바뀐다.
 //!
 //! 3번만 상대가 무엇을 보내든 읽든 늘어나지 않는다. 그것이 이 시한의 존재
-//! 이유이고, 자리 여덟 개가 실제로 회수된다는 유일한 근거다 — **`handle` 에
-//! 들어온 연결에 한해서** 그렇다. 자리는 `upgrade()` 가 `on_upgrade` 보다 먼저
-//! 잡고(업그레이드가 실패해도 자리가 새지 않게 한 Task 2 의 결정) 시한은
-//! `handle()` 안에서 무장되므로, 101 응답을 주고받는 사이의 짧은 구간은 자리를
-//! 쥐면서 어떤 시한도 받지 않는다. 그 구간은 수십 바이트의 왕복이라 실질적으로
-//! 닫혀 있다.
+//! 이유이고, **인가되지 않은** 연결의 자리가 실제로 회수된다는 유일한 근거다 —
+//! 그것도 **`handle` 에 들어온 연결에 한해서** 그렇다. 자리는 `upgrade()` 가
+//! `on_upgrade` 보다 먼저 잡고(업그레이드가 실패해도 자리가 새지 않게 한 Task 2
+//! 의 결정) 시한은 `handle()` 안에서 무장되므로, 101 응답을 주고받는 사이의 짧은
+//! 구간은 자리를 쥐면서 어떤 시한도 받지 않는다. 그 구간은 수십 바이트의 왕복이라
+//! 실질적으로 닫혀 있다.
+//!
+//! **인가된 연결에는 셋 중 어느 것도 절대 상한이 아니다.** 시한은 걷혔고
+//! (`Deadline::Lift`) 나머지 둘은 위에서 본 대로 피어가 조종한다. 그쪽 자리를
+//! 돌려주는 것은 시간이 아니라 **사용자의 결정**이다: 토글을 끄거나 그 기기를
+//! 해제하면(`lan::LanBridge::drop_sessions`) `Outbound::Close` 가 나가고, 그것을
+//! 받은 핸들러가 루프를 빠져나가며 `Slot` 을 떨어뜨린다. 인가는 사용자가 준
+//! 것이므로 그것을 거두는 것도 사용자여야 한다는 뜻이기도 하다.
 //!
 //! "왜 하필 150초인가"는 `AUTH_DEADLINE` 의 doc 에 있다 — 그 숫자는 페어링
 //! 코드의 수명에 묶여 있어서, 한쪽만 바꾸면 조용히 깨진다.
@@ -193,18 +200,19 @@ pub enum Deadline {
     Drop,
     /// 이미 인가됐다. 인가된 연결에는 시한이 없으므로 **다시 재지 않는다.**
     ///
-    /// 한 번 걷힌 시한은 돌아오지 않는다. 그래서 사용자가 기기를 해제해도
-    /// (`unpair`) 그 연결은 시한 없이 자리에 남는다 — 바이트는 한 톨도 나가지
-    /// 않지만 자리는 쥐고 있다.
+    /// 한 번 걷힌 시한은 돌아오지 않는다. 그래서 **인가된 연결의 자리를 돌려주는
+    /// 것은 시한이 아니다** — 상대가 끊거나, 조용해져 `IDLE_TIMEOUT` 에 걸리거나,
+    /// 송신 큐가 밀리거나, 토글이 꺼지거나, 사용자가 그 기기를 해제하는 것이다.
+    ///
+    /// 마지막 것이 `lan::LanBridge::drop_sessions` 다. 해제된 central 을 목록에서
+    /// 지우고 `Outbound::Close` 를 보내, 연결 핸들러가 루프를 빠져나가며 `Slot` 을
+    /// 떨어뜨리게 한다. 그 배선이 없던 동안(`lib.rs::persist_and_drop` 이 BLE·
+    /// network 두 브리지만 불렀다)에는 해제된 기기의 연결이 시한도 없이 자리에
+    /// 남았다 — 바이트는 한 톨도 나가지 않았지만 자리는 쥐고 있었다.
     ///
     /// 바이트를 막는 것은 `LanBridge::snapshot_targets` 의 `is_authorized`
     /// 필터다. 봉인 지점(`lan::seal_for`)에도 같은 검사가 있지만 그것은 두 번째
     /// 자물쇠이고, 오늘 실제로 문을 잠그는 것은 바깥 필터다.
-    ///
-    /// LAN 은 아직 언페어링 경로에 아예 배선돼 있지 않아서
-    /// (`lib.rs::persist_and_drop` 이 BLE·network 두 브리지만 부른다) 시한만
-    /// 되돌리는 것으로는 반쪽이다. 해제된 연결을 실제로 닫는 것
-    /// (`Outbound::Close`)과 함께 가야 한다 — Task 4b.
     Lift,
 }
 
@@ -829,6 +837,16 @@ pub(crate) mod test_socket {
         out
     }
 
+    /// 닫기 핸드셰이크를 **규약대로 되받는** 프레임. 서버가 `Close` 를 보내면
+    /// 정상적인 클라이언트는 이것을 돌려주고, 그것을 받아야 서버 쪽 상태가
+    /// `CloseAcknowledged` 로 넘어가 다음 읽기가 스트림의 끝이 된다 — 즉 연결
+    /// 핸들러가 루프를 빠져나가 `Slot` 을 떨어뜨린다. 되받지 않는 기기(전원이
+    /// 뽑혔다)는 그대로 `IDLE_TIMEOUT` 이나 다음 하트비트 송신 실패로 걸린다.
+    pub(crate) fn masked_close_frame() -> Vec<u8> {
+        // FIN + opcode 8, 마스크 비트 + 길이 0. 본문 없는 Close 도 유효하다.
+        vec![0x88, 0x80, 0x37, 0xfa, 0x21, 0x3d]
+    }
+
     /// 서버→클라이언트 프레임 하나를 읽어 `(첫 바이트, 본문)` 으로 돌려준다.
     /// 서버 프레임은 마스킹하지 않는다(RFC 6455). 길이는 7비트와 16비트 두
     /// 형태만 다룬다 — 어느 쪽으로 나가든 `MAX_FRAME_BYTES`(64 KiB) 안이라
@@ -1298,6 +1316,59 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("자리가 비었는데도 계속 거절한다");
+    }
+
+    /// **`Close` 가 자리를 실제로 돌려주는가 (Task 4b).**
+    ///
+    /// 프레임을 보내는 것과 `Slot` 이 떨어지는 것은 다른 일이다 — 자리는 핸들러가
+    /// **끝나야** 돌아온다(`handle` 의 `_slot`). 그래서 `Disconnected` 하나만
+    /// 보면 부족하다: 그 이벤트는 핸들러가 반환하기 직전에 나가므로 "루프는
+    /// 빠져나왔다"까지만 말한다. 자리가 돌아왔다는 증거는 **거절당하던 새 연결이
+    /// 다시 받아들여지는 것**뿐이다.
+    ///
+    /// 그래서 여덟 자리를 전부 채워 503 을 확인한 뒤 하나만 `Close` 로 닫는다.
+    /// 이 경로가 없으면 해제된 기기가 자리를 영영 쥐고, 인가된 연결에는 그것을
+    /// 되돌려 줄 시간 상한이 없다(`Deadline::Lift`).
+    #[tokio::test]
+    async fn closing_a_connection_gives_its_slot_back() {
+        let port = free_port().await;
+        let (tx, mut rx) = events();
+        let handle = listener(port, tx);
+        wait_until_listening(port).await;
+
+        let mut live = Vec::new();
+        let mut ids = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            live.push(handshake(port).await);
+            ids.push(next_connected(&mut rx).await);
+        }
+        let (_refused, head) = try_handshake(port).await;
+        assert!(head.starts_with("HTTP/1.1 503"), "자리가 다 차 있어야 한다: {head}");
+
+        // 앱이 언페어링에서 하는 일 그대로(`LanBridge::drop_sessions`).
+        handle.outbound.send(Outbound::Close(ids[0].clone())).unwrap();
+
+        let (opcode, _) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut live[0]))
+            .await
+            .expect("Close 를 보냈는데 프레임이 소켓으로 나오지 않았다");
+        assert_eq!(opcode, 0x88, "Close 프레임(FIN+opcode 8)이어야 한다");
+
+        // 규약대로 되받는다 — 그래야 서버가 닫기 핸드셰이크를 끝낸다.
+        live[0].write_all(&masked_close_frame()).await.unwrap();
+        assert_eq!(next_event(&mut rx).await, ServerEvent::Disconnected(ids[0].clone()));
+
+        // `Disconnected` 와 `_slot` 이 떨어지는 순간 사이에는 아주 짧은 틈이 있다.
+        for _ in 0..200 {
+            let (s, head) = try_handshake(port).await;
+            if head.starts_with("HTTP/1.1 101") {
+                drop(s);
+                let _ = handle.stop();
+                return;
+            }
+            drop(s);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("Close 로 닫은 연결이 자리를 돌려주지 않았다");
     }
 
     // --- 세대 (I2/I3/I4) ---
