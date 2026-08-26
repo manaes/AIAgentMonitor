@@ -98,7 +98,7 @@ export async function listenNetworkStatus(cb: () => void): Promise<UnlistenFn> {
 
 // ── LAN(WebSocket) 미러 ─────────────────────────────────────
 //
-// 같은 WiFi 의 전용 기기(CYD)용 전송이다. QR 은 없다 — 그 기기에는 카메라가
+// 같은 망(WiFi·유선)의 전용 기기(CYD)용 전송이다. QR 은 없다 — 그 기기에는 카메라가
 // 없어서, 사람이 주소를 손으로 넣고 6자리 코드를 입력한다.
 
 export type LanStatus = {
