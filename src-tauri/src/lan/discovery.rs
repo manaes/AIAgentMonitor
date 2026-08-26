@@ -13,9 +13,19 @@
 //! **광고는 리스너가 실제로 떠 있는 동안에만 나간다.** 그 판단은 여기가 아니라
 //! `LanBridge::advertise` 에 있다 — 이 모듈은 시키는 대로 게시하고 거둘 뿐이다.
 //!
-//! **실패는 두 통로로 나온다.** `publish` 가 돌려주는 `Err` 는 게시를 **시작조차**
-//! 못 한 경우고, 시작한 뒤에 드러나는 실패(멀티캐스트 차단 등)는 `ErrorSink` 로
-//! 온다. 둘을 하나로 뭉치지 않는 이유는 `ErrorSink` 의 doc 에 적었다.
+//! **게시 실패의 대부분은 오늘 조용하다 — 이 모듈이 알 방법이 없다.**
+//! `mdns-sd 0.21.0` 에서 멀티캐스트 소켓 생성 실패와 그룹 조인 실패("multicast not
+//! permitted" 의 전형)는 `Zeroconf::new` 안에서 `debug!` 로 삼켜진다
+//! (`service_daemon.rs:1258-1278`, `:1320-1322`). 크레이트가 `DaemonEvent::Error` 를
+//! 내는 자리는 **소스 전체에 하나뿐**이고(`:2221`) 그것은 서비스 타입 이름 길이
+//! 위반이다 — 우리 타입은 컴파일 타임 상수라 영원히 통과한다. 그러니 **방화벽이
+//! 5353 을 막았거나 게스트 VLAN 이면 게시는 실패한 채 아무 신호도 남기지 않는다.**
+//!
+//! 그래서 "기기가 못 찾으면 IP 를 손으로 넣으세요"라는 안내는 **오류에 매달릴 수
+//! 없다.** 패널이 LAN 주소를 언제나 함께 보여주는 것이 그 대비다(`local_ipv4`,
+//! 배선은 Task 6). 이 사실을 doc 에 적어 두는 이유는, 크레이트의 `new()` doc 이
+//! 정반대를 약속하고 있어서(`:305-308`) 그 문장을 읽은 사람이 같은 오해를 다시
+//! 코드에 옮겨 적기 때문이다 — 이미 한 번 그랬다.
 
 use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceInfo};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
@@ -53,13 +63,21 @@ const GOODBYE_RESEND_WAIT: Duration = Duration::from_millis(250);
 
 /// 게시가 **시작한 뒤에** 실패했음을 알리는 통로.
 ///
-/// 이것이 필요한 이유는 `ServiceDaemon::new()` 가 멀티캐스트 소켓을 열지 않기
-/// 때문이다(크레이트 doc: 소켓은 데몬 스레드가 뜬 뒤 lazily 열리고, "multicast not
-/// permitted" 같은 플랫폼 문제는 생성자가 아니라 나중에 `monitor()` 의
-/// `DaemonEvent` 로 나온다). 즉 **실전에서 가장 흔한 실패**(방화벽이 5353 을 막았다,
-/// 게스트 VLAN, 멀티캐스트 금지)는 `publish()` 의 반환값에 절대 나타나지 않는다.
-/// 그 실패를 삼키면 사용자는 "켰는데 기기가 못 찾는다"만 겪고, IP 를 손으로 넣으라는
-/// 안내를 **그 안내가 존재하는 이유인 바로 그 상황에서** 받지 못한다.
+/// **오늘 이 통로로 오는 것은 사실상 없다 — 그 사실이 여기 적혀 있어야 한다.**
+/// `mdns-sd 0.21.0` 이 `DaemonEvent::Error` 를 만드는 자리는 소스 전체에 하나뿐이고
+/// (`service_daemon.rs:2221`), 그것은 `register_service` 의 서비스 타입 이름 길이
+/// 검사다. `SERVICE_TYPE` 은 컴파일 타임 상수이고 그 검사값이 3바이트(상한 15)라
+/// **영원히 통과한다.** 우리가 정말 알고 싶은 실패 — 소켓 생성(`:1258-1278`),
+/// 멀티캐스트 그룹 조인(`:1320-1322`), 런타임 송신(`:4700-4740`) — 은 전부 `debug!`
+/// 로 삼켜지고, 게다가 앞의 둘은 `Command::Monitor` 가 처리되기도 전에 `Zeroconf::new`
+/// 안에서 일어나므로 `monitor()` 를 아무리 일찍 걸어도 닿지 않는다.
+///
+/// **그런데도 통로를 남겨 둔 이유**는 셋이다. ① 값이 든다면 이름 길이 위반은 실제로
+/// 잡는다(누가 `SERVICE_TYPE` 을 길게 바꾸는 날). ② 크레이트가 `Error` 를 늘리면
+/// 그날부터 동작한다 — 배선을 다시 하지 않아도 된다. ③ 비용이 스레드 하나다.
+/// 지우고 싶어지면 이 세 줄을 먼저 읽어라. 다만 **여기 무언가 온다고 기대하고 다른
+/// 것을 설계하지는 마라** — 뮤테이션으로 확인했다: `on_error()` 호출을 지워도 죽는
+/// 테스트가 없다(실패가 오지 않으니까).
 ///
 /// 콜백인 이유는 이 모듈이 `ServerEvent` 를 알 필요가 없기 때문이다. 무엇을 할지는
 /// 부르는 쪽(`LanBridge::advertise`)이 정한다.
@@ -67,9 +85,10 @@ pub type ErrorSink = Box<dyn Fn(String) + Send + 'static>;
 
 /// 살아 있는 게시 하나.
 ///
-/// 그냥 떨어뜨려도 데몬 스레드는 끝나지만 **goodbye 는 나가지 않는다** — 조회하는
-/// 쪽은 TTL 이 만료될 때까지 이 서비스가 살아 있다고 믿는다. 그래서 거두는 길은
-/// `stop()` 이고, 소유자(`MdnsAdvertiser`)가 `Drop` 에서도 그것을 부른다.
+/// **그냥 떨어뜨리면 아무것도 끝나지 않는다.** 데몬 스레드는 계속 돌고(자기 명령
+/// Sender 클론을 들고 있어 채널이 끊기지 않는다 — `service_daemon.rs:1385`,
+/// `:1587-1596`) 광고도 그대로 남는다. 거두는 길은 `stop()` 하나뿐이고, 소유자
+/// (`MdnsAdvertiser`)가 `Drop` 에서도 그것을 부른다.
 pub struct Publication {
     daemon: ServiceDaemon,
     /// `unregister` 가 요구하는 전체 이름(`AIM-호스트._aim._tcp.local.`).
@@ -175,10 +194,31 @@ impl Drop for MdnsAdvertiser {
 ///
 /// 주소는 `enable_addr_auto()` 로 데몬이 채운다. 우리가 고른 주소 하나를 박아
 /// 두면 WiFi 와 유선을 오갈 때 광고가 옛 주소를 계속 말한다.
+///
+/// **실패하면 데몬을 반드시 내리고 나간다.** `?` 로 그냥 빠져나가면 핸들만 떨어지는데
+/// 그것으로는 아무것도 끝나지 않는다(`Publication` 의 doc). 가장 나쁜 자리는
+/// `register` **뒤**의 실패다: 맥은 이미 광고되는데 부르는 쪽은 `Err` 를 받아
+/// `advertising` 을 `false` 로 두므로, 나중에 토글을 내려도 `advertise(false)` 가
+/// 가드에서 곧바로 돌아가 **아무도 그 광고를 거두지 못한다.** `shutdown` 의
+/// `cleanup` 이 남은 서비스에 goodbye 를 뿌리므로 여기서 부르면 그 상태가 생기지
+/// 않는다.
 pub fn publish(port: u16, on_error: ErrorSink) -> anyhow::Result<Publication> {
     let daemon = ServiceDaemon::new()?;
+    match register_on(&daemon, port, on_error) {
+        Ok(fullname) => Ok(Publication { daemon, fullname }),
+        Err(e) => {
+            let _ = daemon.shutdown();
+            Err(e)
+        }
+    }
+}
+
+/// 게시의 실패할 수 있는 부분. **`publish` 와 나눠 둔 이유는 정리 때문이다** —
+/// 여기서 어느 `?` 로 나가든 `publish` 의 한 자리에서 데몬을 내린다.
+fn register_on(daemon: &ServiceDaemon, port: u16, on_error: ErrorSink) -> anyhow::Result<String> {
     // **등록보다 먼저 건다.** 데몬 스레드는 이미 돌기 시작했고 소켓을 여는 것도
-    // 그쪽이다 — 등록 뒤에 걸면 그 사이에 나온 실패를 놓친다.
+    // 그쪽이다 — 등록 뒤에 걸면 그 사이에 나온 실패를 놓친다. (다만 오늘 그 사이에
+    // 나오는 것은 없다 — `ErrorSink` 의 doc 참고.)
     let events = daemon.monitor()?;
     let info = build_service_info(port)?;
     let fullname = info.get_fullname().to_string();
@@ -204,7 +244,7 @@ pub fn publish(port: u16, on_error: ErrorSink) -> anyhow::Result<Publication> {
             }
         })?;
 
-    Ok(Publication { daemon, fullname })
+    Ok(fullname)
 }
 
 /// 게시할 레코드를 만든다. **데몬과 떼어 둔 이유는 테스트다** — 무엇이 광고에
@@ -399,7 +439,13 @@ mod tests {
     ///
     /// 이것이 덮는 층은 위쪽 테스트들이 닿지 못하는 곳이다: `enable_addr_auto` 가
     /// 주소를 실제로 채우는가, 라벨이 레코드에서 살아남는가, TXT 가 그대로 실려
-    /// 가는가, 그리고 **`ErrorSink` 가 조용한가**(데몬이 오류를 냈다면 여기 담긴다).
+    /// 가는가 — 전부 **레코드의 내용**에 관한 것이다.
+    ///
+    /// **이것이 증명하지 않는 것: 레코드가 망에 퍼진다는 것.** mDNS 구현은 자기
+    /// 호스트의 질의를 루프백으로 짧게 끊는 경우가 많아, 망이 한 장도 흘려보내지
+    /// 못하는 상태에서도 이 테스트는 통과한다. 퍼지는지는 **다른 기기에서** 보는
+    /// 수밖에 없다(`docs/ble-protocol/DEVICE-TEST.md` §8-1). 여기에 그 판정을
+    /// 얹으면 언제나 통과하는 거짓 검사가 하나 늘 뿐이다.
     ///
     /// 개발 중인 앱이 같은 맥에서 이미 광고 중이면 데몬이 인스턴스 이름에 접미사를
     /// 붙여 갈라 놓는다 — 아래 단정(포트·TXT·주소)은 어느 쪽을 찾든 참이다.
@@ -445,8 +491,29 @@ mod tests {
             }
         }
 
-        let _ = seeker.shutdown();
+        // **거두는 것까지 본다.** `stop()` 이 광고를 실제로 물리지 않으면 토글을 꺼도
+        // 조회하는 쪽은 TTL 이 만료될 때까지 죽은 포트를 붙들고 있다.
+        //
+        // 이것이 고정하지 **않는** 것: 저장해 둔 fullname 이 맞는가. 틀린 이름으로
+        // `unregister` 하면 `NotFound` 라 그쪽 goodbye 는 안 나가지만, 뒤이은
+        // `shutdown` 의 `cleanup` 이 아직 `my_services` 에 남아 있는 서비스에
+        // goodbye 를 뿌리므로 여기까지는 똑같이 도착한다(뮤테이션으로 확인했다).
+        // 이름이 사 주는 것은 120ms 뒤의 **재전송**이고, 그것은 패킷을 봐야 보인다
+        // (`docs/ble-protocol/DEVICE-TEST.md` §8-1).
         published.stop();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .expect("10초 안에 goodbye 가 오지 않았다 — 광고가 그대로 남는다");
+            match found.recv_timeout(left) {
+                Ok(ServiceEvent::ServiceRemoved(..)) => break,
+                Ok(_) => continue,
+                Err(e) => panic!("브라우즈 통로가 끝났다: {e}"),
+            }
+        }
+
+        let _ = seeker.shutdown();
         assert_eq!(
             *errors.lock().unwrap(),
             Vec::<String>::new(),
