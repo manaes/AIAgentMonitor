@@ -980,18 +980,35 @@ git commit -m "test(lan): 하드웨어 없는 종단 검증 절차와 참조 클
 > 아래 코드는 **컴파일해 보지 않았다.** 문서화된 API 를 근거로 썼으므로 첫 빌드에서
 > 시그니처가 어긋날 수 있다. 각 태스크는 빌드 확인부터 시작한다.
 
-## Task 8: PlatformIO 골격과 화면 점등
+## Task 8: PlatformIO 골격 — **화면 없이 시리얼만**
+
+> **재구성 2026-08-26.** 초안은 이 태스크가 화면 점등부터였다. 그러면 첫 실패에서
+> "암호가 틀렸나 / WebSocket 배선이 틀렸나 / ST7789 설정이 틀렸나"를 **동시에**
+> 의심하게 된다. v3 판은 디스플레이 컨트롤러가 ILI9341 이 아니라 ST7789 라
+> 설정을 틀리면 화면이 아예 안 켜지고, 그 상태에서 프로토콜까지 의심하면 훨씬 힘들다.
+>
+> 그래서 순서를 바꾼다. **이 태스크는 디스플레이를 전혀 건드리지 않는다** — WiFi ·
+> mDNS · WebSocket · monocypher · 페어링 · 재연결을 전부 **시리얼 출력만으로** 확정한다.
+> 화면은 그 다음 태스크에서 붙인다. 실패하면 의심할 곳이 하나뿐이다.
+>
+> 하드웨어는 CYD 본체를 그대로 쓴다 — 별도 dev board 가 필요 없다. 실물 확인 결과
+> 실크스크린이 `esp32-2432s028` 이고 칩은 ESP32 classic(WROOM-32) 이다(2026-08-26).
 
 **Files:**
 - Create: `firmware/cyd/platformio.ini`
 - Create: `firmware/cyd/src/main.cpp`
 
-- [ ] **Step 1: 보드 변종을 확인한다**
+- [ ] **Step 1: 보드 변종 — 확인 완료**
 
-실물의 USB 커넥터를 본다. 마이크로 USB 만 있으면 `esp32-2432S028R`,
-USB-C 면 `v2`, 둘 다 있으면 `v3`(디스플레이가 **ST7789** 다).
+USB-C 와 마이크로 USB 가 **둘 다** 있는 판이므로 `esp32-2432S028Rv3` 다.
+디스플레이 컨트롤러는 **ST7789** — 이 태스크에서는 쓰지 않지만 다음 태스크에서
+이 값이 틀리면 화면이 안 켜진다.
 
-- [ ] **Step 2: `platformio.ini` 를 쓴다**
+> 참고: v3 는 커넥터가 둘이라 둘 다 꽂으면 `/dev/cu.usbserial-*` 가 두 개 잡힌다.
+> 하나만 쓰면 된다. Arduino IDE 의 Serial Monitor 가 포트를 독점하므로,
+> `pio` 로 업로드할 때는 그 창을 닫아야 한다.
+
+- [ ] **Step 2: `platformio.ini` 를 쓴다 — 디스플레이 라이브러리 없이**
 
 ```ini
 [env:cyd]
@@ -999,54 +1016,75 @@ platform = espressif32
 board = esp32-2432S028Rv3        ; 실물 확인됨(2026-08-26) — ST7789 판이다
 framework = arduino
 monitor_speed = 115200
-platform_packages =
-    platformio/framework-arduinoespressif32
 board_build.partitions = huge_app.csv
 lib_deps =
-    rzeldent/esp32_smartdisplay
     links2004/WebSockets
     bblanchon/ArduinoJson
-build_flags =
-    -DLV_CONF_PATH=${PROJECT_DIR}/src/lv_conf.h
+    tzapu/WiFiManager
+; esp32_smartdisplay(LVGL)는 **일부러 넣지 않는다.** 이 태스크는 화면을 쓰지 않고,
+; 넣으면 빌드 시간과 플래시만 늘면서 디버깅 면적이 커진다. 다음 태스크에서 더한다.
 ```
 
 보드 정의를 쓰려면 저장소를 `platform_packages` 또는 `boards_dir` 로 잡는다 —
 `rzeldent/platformio-espressif32-sunton` README 를 따른다.
 
-- [ ] **Step 3: 화면이 켜지는 최소 스케치를 쓴다**
+- [ ] **Step 3: 살아 있다는 것만 확인하는 최소 스케치**
+
+화면도 WiFi 도 아직 없다. 툴체인·보드 id·업로드 경로가 맞는지만 본다.
 
 ```cpp
 #include <Arduino.h>
-#include <esp32_smartdisplay.h>
 
 void setup() {
     Serial.begin(115200);
-    smartdisplay_init();
-    auto disp = lv_disp_get_default();
-    lv_obj_t *label = lv_label_create(lv_scr_act());
-    lv_label_set_text(label, "AI Agent Monitor");
-    lv_obj_center(label);
+    delay(300);                       // USB CDC 가 붙을 시간
+    Serial.println();
+    Serial.printf("chip=%s rev=%d cores=%d\n",
+                  ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores());
+    Serial.printf("flash=%u bytes  free heap=%u\n",
+                  ESP.getFlashChipSize(), ESP.getFreeHeap());
+    Serial.println("AI Agent Monitor — CYD 프로토콜 펌웨어 (화면 없음)");
 }
 
 void loop() {
-    lv_timer_handler();
-    delay(5);
+    Serial.printf("alive  heap=%u\n", ESP.getFreeHeap());
+    delay(5000);
 }
 ```
 
 - [ ] **Step 4: 빌드하고 올린다**
 
 ```bash
-cd firmware/cyd && pio run -t upload && pio device monitor
+cd firmware/cyd
+pio run -t upload
+pio device monitor
 ```
-Expected: 화면에 문구가 보인다. 안 보이면 **보드 변종이 틀렸을 가능성이 가장 크다.**
+
+Expected — 시리얼에 다음이 보인다:
+
+```
+chip=ESP32 rev=… cores=2
+flash=4194304 bytes  free heap=…
+AI Agent Monitor — CYD 프로토콜 펌웨어 (화면 없음)
+alive  heap=…
+```
+
+`chip=ESP32` 와 `flash=4194304`(4MB)가 스펙 2장의 값과 맞는지 확인한다.
+**어긋나면 보드 id 나 파티션 설정이 틀린 것이고, 여기서 잡는 편이 나중보다 훨씬 싸다.**
+
+업로드가 `Resource busy` 로 실패하면 Arduino IDE 의 Serial Monitor 가 포트를
+잡고 있는 것이다 — 그 창만 닫으면 된다(IDE 전체를 끌 필요 없다).
 
 - [ ] **Step 5: 커밋**
 
 ```bash
 git add firmware/cyd/
-git commit -m "feat(cyd): PlatformIO 골격 — 화면 점등 확인"
+git commit -m "feat(cyd): PlatformIO 골격 — 화면 없이 시리얼만"
 ```
+
+> **다음 태스크로 넘기는 것**: 화면 점등(`esp32_smartdisplay` + LVGL + ST7789)은
+> 프로토콜이 시리얼로 확정된 뒤에 붙인다. 그때 실패하면 의심할 곳이 디스플레이
+> 하나뿐이다.
 
 ---
 
