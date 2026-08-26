@@ -751,9 +751,18 @@ def cmd_observe(args) -> int:
                 print("  [OK] 인가 전에는 한 바이트도 오지 않았다")
                 if 140 <= dt <= 175:
                     print("  [OK] AUTH_DEADLINE(150초)이 실제로 연결을 놓았다")
-                else:
-                    print(f"  [주의] 150초 언저리가 아니다: {dt:.1f}초")
-                return 0
+                    return 0
+                # **0바이트만으로는 통과가 아니다.** 이 명령이 판정하는 것은 둘이고
+                # 시한은 그중 하나다 — 다른 이유로(맥 종료, WiFi 끊김, 토글 꺼짐)
+                # 끊긴 것을 `AUTH_DEADLINE` 의 증거로 세면 안 된다. `watch` 도
+                # 같은 이유로 rc=1 이다.
+                print(
+                    f"  [FAIL] 150초 언저리가 아니다: {dt:.1f}초.\n"
+                    "  0바이트는 맞지만 시한이 놓았다는 증거는 아니다 — 맥이 켜진\n"
+                    "  채로 LAN 공유가 계속 켜져 있었는지 확인하고 다시 돌려라.",
+                    file=sys.stderr,
+                )
+                return 1
             frames += 1
             total += len(msg)
             print(f"  [FAIL] 받았다: {msg!r}", file=sys.stderr)
@@ -807,7 +816,24 @@ def main() -> int:
     args = p.parse_args()
 
     # 관문. 어느 명령이든 여기를 먼저 지난다.
-    gate()
+    #
+    # **여기도 감싼다.** 아래의 `except` 절은 서브커맨드만 덮는데, 관문 안의
+    # `unseal` 은 `cryptography` 의 `InvalidTag` 를 던질 수 있고 그것은
+    # `ValueError` 의 하위가 아니다. 감싸지 않으면 `[FAIL] sealed_frame_1` 을
+    # 정확히 찍은 **다음** 트레이스백이 그 줄을 화면 밖으로 밀어낸다 — 아래
+    # 주석이 말하는 그 상황이 관문에서 먼저 일어난다. 관문이 무엇으로 깨지든
+    # 사람이 읽어야 할 결론은 하나("이 클라이언트가 틀렸다")이므로 예외 종류를
+    # 좁히지 않는다. `gate()` 의 `sys.exit` 은 `SystemExit`(⊄ `Exception`)이라
+    # 여기에 걸리지 않고 그대로 나간다.
+    try:
+        gate()
+    except Exception as e:
+        print(
+            f"\n[FAIL] 골든 벡터 대조 중 예외 — {type(e).__name__}: {e}\n"
+            "  이 클라이언트가 틀렸다. 맥을 의심하기 전에 여기를 고쳐라.",
+            file=sys.stderr,
+        )
+        return 1
     if args.cmd == "selftest":
         return 0
 
