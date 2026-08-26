@@ -14,8 +14,11 @@ use std::collections::HashSet;
 /// 쪽을 잊는 드리프트를 줄이기 위해서다.
 pub struct LanBridge {
     enabled: bool,
-    /// 현재 붙어 있는 연결들. 서버 태스크가 갱신한다(이후 태스크).
-    centrals: HashSet<String>,
+    /// 현재 붙어 있는 연결들. 서버 태스크가 갱신한다(이후 태스크). `network`
+    /// 브리지가 `HashMap<CentralId, SendStream>` 로 도메인 타입을 키로 쓰듯,
+    /// 여기도 `String` 으로 낮추지 않는다 — 실제 송신 자원이 아직 없어 값
+    /// 타입은 `()` 지만, 키 타입까지 낮출 이유는 없다.
+    centrals: HashSet<CentralId>,
     /// 사용자에게 보여줄 마지막 오류. 이 앱은 로그 파일을 남기지 않으므로
     /// Devices 패널이 실패 원인(포트 점유·권한 거부 등)을 알 수 있는 유일한
     /// 경로다.
@@ -52,7 +55,7 @@ impl LanBridge {
     /// 이 전송이 지금 서비스 중인 central 목록. BLE·network 의
     /// `served_centrals`와 같은 목적이다.
     pub fn served_centrals(&self) -> Vec<CentralId> {
-        self.centrals.iter().cloned().map(CentralId).collect()
+        self.centrals.iter().cloned().collect()
     }
 
     pub fn last_error(&self) -> Option<String> {
