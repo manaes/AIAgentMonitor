@@ -4,6 +4,7 @@ mod ble;
 mod crypto;
 mod clock;
 mod emitter;
+mod lan;
 mod network;
 mod quota_proxy;
 mod settings;
