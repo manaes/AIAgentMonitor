@@ -265,6 +265,16 @@ pub enum ServerEvent {
     ///
     /// **어느 리스너인지 함께 싣는다** — `BindFailed` 와 같은 이유다.
     Listening { generation: u64 },
+    /// mDNS 게시가 **시작한 뒤에** 실패했다(멀티캐스트 차단 등).
+    ///
+    /// **이 변이만 리스너가 아니라 게시에서 온다.** 별도 통로를 파지 않은 이유는,
+    /// LAN 전송이 배선(`lib.rs`)으로 무언가를 올리는 길이 이 채널 하나이고 그
+    /// 배선이 이미 프레임 아닌 이벤트마다 패널을 다시 그리기 때문이다. 통로를
+    /// 하나 더 만들면 그 알림 경로를 처음부터 다시 엮어야 한다.
+    ///
+    /// 세대를 싣는 이유도 같다 — 게시는 리스너 세대에 묶여 있으므로, 낡은 데몬이
+    /// 늦게 올린 실패가 지금의 광고를 탓하면 안 된다.
+    AdvertiseFailed { generation: u64, message: String },
     Disconnected(CentralId),
     /// 인증 프레임(텍스트). 해석은 pairing 모듈이 한다.
     Frame { id: CentralId, text: String },

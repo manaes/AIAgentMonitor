@@ -12,9 +12,14 @@
 //!
 //! **광고는 리스너가 실제로 떠 있는 동안에만 나간다.** 그 판단은 여기가 아니라
 //! `LanBridge::advertise` 에 있다 — 이 모듈은 시키는 대로 게시하고 거둘 뿐이다.
+//!
+//! **실패는 두 통로로 나온다.** `publish` 가 돌려주는 `Err` 는 게시를 **시작조차**
+//! 못 한 경우고, 시작한 뒤에 드러나는 실패(멀티캐스트 차단 등)는 `ErrorSink` 로
+//! 온다. 둘을 하나로 뭉치지 않는 이유는 `ErrorSink` 의 doc 에 적었다.
 
-use mdns_sd::{ServiceDaemon, ServiceInfo};
+use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceInfo};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::time::Duration;
 
 /// CYD 펌웨어가 브라우즈하는 서비스 타입.
 ///
@@ -35,6 +40,31 @@ const FALLBACK_LABEL: &str = "aim";
 /// DNS 라벨 하나의 길이 상한(RFC 1035).
 const MAX_LABEL_LEN: usize = 63;
 
+/// 첫 goodbye 가 나갔다는 확인을 기다리는 상한. 넘기면 그냥 진행한다 — 확인을
+/// 못 받았다고 데몬을 붙잡고 있을 이유는 없다.
+const UNREGISTER_ACK_WAIT: Duration = Duration::from_millis(300);
+
+/// 첫 goodbye 뒤에 데몬을 살려 두는 시간. `mdns-sd` 는 goodbye 를 **120ms 뒤에 한
+/// 번 더** 보내도록 예약한다("repeat for one time just in case some peers miss the
+/// message"). 곧바로 `shutdown` 하면 데몬이 그 타이머 전에 끝나 재전송이
+/// 취소된다 — 멀티캐스트 UDP 한 장이 유실되면 CYD 는 TTL 이 만료될 때까지 죽은
+/// 포트로 재접속을 시도한다. 120ms 에 여유를 더한 값이다.
+const GOODBYE_RESEND_WAIT: Duration = Duration::from_millis(250);
+
+/// 게시가 **시작한 뒤에** 실패했음을 알리는 통로.
+///
+/// 이것이 필요한 이유는 `ServiceDaemon::new()` 가 멀티캐스트 소켓을 열지 않기
+/// 때문이다(크레이트 doc: 소켓은 데몬 스레드가 뜬 뒤 lazily 열리고, "multicast not
+/// permitted" 같은 플랫폼 문제는 생성자가 아니라 나중에 `monitor()` 의
+/// `DaemonEvent` 로 나온다). 즉 **실전에서 가장 흔한 실패**(방화벽이 5353 을 막았다,
+/// 게스트 VLAN, 멀티캐스트 금지)는 `publish()` 의 반환값에 절대 나타나지 않는다.
+/// 그 실패를 삼키면 사용자는 "켰는데 기기가 못 찾는다"만 겪고, IP 를 손으로 넣으라는
+/// 안내를 **그 안내가 존재하는 이유인 바로 그 상황에서** 받지 못한다.
+///
+/// 콜백인 이유는 이 모듈이 `ServerEvent` 를 알 필요가 없기 때문이다. 무엇을 할지는
+/// 부르는 쪽(`LanBridge::advertise`)이 정한다.
+pub type ErrorSink = Box<dyn Fn(String) + Send + 'static>;
+
 /// 살아 있는 게시 하나.
 ///
 /// 그냥 떨어뜨려도 데몬 스레드는 끝나지만 **goodbye 는 나가지 않는다** — 조회하는
@@ -51,15 +81,39 @@ impl Publication {
     /// 광고를 거둔다. `unregister` 는 goodbye 패킷을 뿌려 상대가 TTL(수 분)을
     /// 기다리지 않고 바로 잊게 한다 — 그것 없이 데몬만 내리면, 토글을 끈 뒤에도
     /// CYD 는 한참 동안 죽은 포트를 향해 재접속을 시도한다.
-    /// **goodbye 가 나갔는지 기다리지 않는다.** `unregister` 는 완료를 알려 줄
-    /// 채널을 돌려주지만, 이 함수는 토글을 내리는 동기 경로(`LanBridge::advertise`
-    /// ← `set_enabled(false)`)에서 불리므로 여기서 기다리면 UI 를 돌리는 스레드가
-    /// 망 데몬을 기다리게 된다. 기다리지 않아도 되는 이유는 데몬이 명령을 받은
-    /// 순서대로 처리하기 때문이다 — `unregister` 가 goodbye 를 소켓에 쓴 뒤에야
-    /// `shutdown` 이 처리된다.
+    /// **기다리는 부분만 따로 스레드로 옮긴다.** 이 함수는 토글을 내리는 동기
+    /// 경로(`set_enabled(false)` → `LanBridge::advertise`)에서 불리므로 여기서
+    /// 기다리면 UI 를 돌리는 스레드가 망 데몬을 기다리게 된다. 그렇다고 곧바로
+    /// `shutdown` 을 던지면 `GOODBYE_RESEND_WAIT` 가 설명하는 재전송이 취소된다.
+    /// 둘 다 피하는 길은 "부르는 쪽은 즉시 돌아가고, 기다림은 다른 스레드에서"다.
+    ///
+    /// 순서 자체는 데몬이 보장한다 — 명령이 하나의 FIFO 를 타므로 `unregister` 가
+    /// goodbye 를 소켓에 쓴 뒤에야 `shutdown` 이 처리된다. 여기서 확인을 기다리는
+    /// 것은 순서 때문이 아니라 **재전송 타이머의 기준점을 잡기 위해서**다: 확인이
+    /// 온 시점이 첫 goodbye 가 나간 시점이고, 재전송은 거기서 120ms 뒤다.
     pub fn stop(self) {
-        let _ = self.daemon.unregister(&self.fullname);
-        let _ = self.daemon.shutdown();
+        let Publication { daemon, fullname } = self;
+        // 스레드를 못 띄웠을 때 쓸 손잡이. **핸들을 그냥 떨어뜨리면 데몬 스레드가
+        // 멈추지 않는다** — 명령 채널이 끊겨도 루프는 계속 돈다(크레이트 구현).
+        // 그러니 어느 갈래로 가든 `shutdown` 은 반드시 불려야 한다.
+        let fallback = daemon.clone();
+        let teardown = move || {
+            if let Ok(ack) = daemon.unregister(&fullname) {
+                let _ = ack.recv_timeout(UNREGISTER_ACK_WAIT);
+            }
+            std::thread::sleep(GOODBYE_RESEND_WAIT);
+            let _ = daemon.shutdown();
+        };
+        if let Err(e) = std::thread::Builder::new()
+            .name("aim-mdns-stop".to_string())
+            .spawn(teardown)
+        {
+            // 사실상 자원 고갈이다. 재전송은 포기하고 데몬만 내린다 — 광고가
+            // 남는 것보다 goodbye 가 한 번만 나가는 편이 낫다. `Exit` 는
+            // 남아 있는 서비스에 대해 goodbye 를 뿌리고 끝난다(크레이트 `cleanup`).
+            tracing::warn!("mDNS 정리 스레드를 띄우지 못했다: {e}");
+            let _ = fallback.shutdown();
+        }
     }
 }
 
@@ -73,7 +127,12 @@ impl Publication {
 pub trait Advertiser: Send {
     /// 이 포트를 광고한다. 부르는 쪽이 이미 광고 중인지를 안다
     /// (`LanBridge::advertise`) — 여기서 다시 세지 않는다.
-    fn start(&mut self, port: u16) -> anyhow::Result<()>;
+    ///
+    /// **`Ok(())` 는 "광고가 망에 닿는다"가 아니라 "게시를 시작했다"는 뜻이다.**
+    /// 그 뒤에 드러나는 실패는 `on_error` 로 온다(`ErrorSink` 의 doc). 두 통로가
+    /// 나뉘어 있는 것이 이 시그니처의 요점이다 — 돌려주는 값 하나로 뭉치면
+    /// 비동기 실패가 갈 곳이 없어지고, 그게 곧 조용한 실패다.
+    fn start(&mut self, port: u16, on_error: ErrorSink) -> anyhow::Result<()>;
     /// 광고를 거둔다. 광고 중이 아니면 아무 일도 일어나지 않는다.
     fn stop(&mut self);
 }
@@ -85,11 +144,11 @@ pub struct MdnsAdvertiser {
 }
 
 impl Advertiser for MdnsAdvertiser {
-    fn start(&mut self, port: u16) -> anyhow::Result<()> {
+    fn start(&mut self, port: u16, on_error: ErrorSink) -> anyhow::Result<()> {
         // 앞선 게시가 남아 있으면 먼저 거둔다. 두 개를 동시에 등록하면 데몬이
         // 인스턴스 이름에 접미사를 붙여 갈라 놓고, 기기 목록에 유령이 하나 는다.
         self.stop();
-        self.live = Some(publish(port)?);
+        self.live = Some(publish(port, on_error)?);
         Ok(())
     }
 
@@ -116,12 +175,35 @@ impl Drop for MdnsAdvertiser {
 ///
 /// 주소는 `enable_addr_auto()` 로 데몬이 채운다. 우리가 고른 주소 하나를 박아
 /// 두면 WiFi 와 유선을 오갈 때 광고가 옛 주소를 계속 말한다.
-pub fn publish(port: u16) -> anyhow::Result<Publication> {
+pub fn publish(port: u16, on_error: ErrorSink) -> anyhow::Result<Publication> {
     let daemon = ServiceDaemon::new()?;
+    // **등록보다 먼저 건다.** 데몬 스레드는 이미 돌기 시작했고 소켓을 여는 것도
+    // 그쪽이다 — 등록 뒤에 걸면 그 사이에 나온 실패를 놓친다.
+    let events = daemon.monitor()?;
     let info = build_service_info(port)?;
     let fullname = info.get_fullname().to_string();
     daemon.register(info)?;
     tracing::info!(port, fullname = %fullname, "mDNS 게시");
+
+    // 데몬의 통지를 읽는 스레드. `tokio::spawn` 이 아닌 이유는 이 함수가 런타임
+    // 밖에서도 불릴 수 있어야 하기 때문이다(브리지의 `advertise` 는 동기다).
+    // 데몬이 내려가면 채널이 닫히고 이 스레드는 스스로 끝난다 — 그래서 join 할
+    // 핸들을 들고 있지 않는다.
+    std::thread::Builder::new()
+        .name("aim-mdns-monitor".to_string())
+        .spawn(move || {
+            while let Ok(ev) = events.recv() {
+                // `Error` 만 사용자에게 올린다. `IpAdd`/`IpDel`/`Respond` 는 정상
+                // 동작의 소음이고, `NameChange`(이름 충돌로 접미사가 붙었다)는
+                // 실패가 아니다 — CYD 는 인스턴스 이름이 아니라 타입을
+                // 브라우즈하므로 그래도 찾는다.
+                if let DaemonEvent::Error(e) = ev {
+                    tracing::warn!("mDNS 데몬 오류: {e}");
+                    on_error(e.to_string());
+                }
+            }
+        })?;
+
     Ok(Publication { daemon, fullname })
 }
 
@@ -305,8 +387,75 @@ mod tests {
         assert_eq!(sanitize_label(&awkward), "b".repeat(MAX_LABEL_LEN - 1));
     }
 
+    /// 진짜 데몬으로 한 바퀴 돈다 — 게시하고, 다른 데몬으로 브라우즈해서 우리
+    /// 레코드를 찾는다.
+    ///
+    /// **평소 실행에서 빠져 있는 이유**는 이것이 개발자의 망에 이 맥을 실제로
+    /// 광고하고, 멀티캐스트가 되는 환경을 요구하기 때문이다:
+    ///
+    /// ```text
+    /// cargo test --manifest-path src-tauri/Cargo.toml lan::discovery -- --ignored --nocapture
+    /// ```
+    ///
+    /// 이것이 덮는 층은 위쪽 테스트들이 닿지 못하는 곳이다: `enable_addr_auto` 가
+    /// 주소를 실제로 채우는가, 라벨이 레코드에서 살아남는가, TXT 가 그대로 실려
+    /// 가는가, 그리고 **`ErrorSink` 가 조용한가**(데몬이 오류를 냈다면 여기 담긴다).
+    ///
+    /// 개발 중인 앱이 같은 맥에서 이미 광고 중이면 데몬이 인스턴스 이름에 접미사를
+    /// 붙여 갈라 놓는다 — 아래 단정(포트·TXT·주소)은 어느 쪽을 찾든 참이다.
+    #[test]
+    #[ignore = "진짜 mDNS 데몬을 띄우고 이 맥을 망에 광고한다 — 손으로만"]
+    fn a_real_daemon_publishes_a_record_that_can_be_found() {
+        use mdns_sd::ServiceEvent;
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        let errors: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink_errors = errors.clone();
+        let published = publish(
+            super::super::server::PORT,
+            Box::new(move |e| sink_errors.lock().unwrap().push(e)),
+        )
+        .expect("게시하지 못했다");
+
+        let seeker = ServiceDaemon::new().expect("브라우즈용 데몬");
+        let found = seeker.browse(SERVICE_TYPE).expect("브라우즈 시작");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .expect("10초 안에 우리 레코드를 찾지 못했다");
+            match found.recv_timeout(left) {
+                Ok(ServiceEvent::ServiceResolved(info)) => {
+                    assert_eq!(info.get_port(), super::super::server::PORT);
+                    assert!(
+                        !info.get_addresses().is_empty(),
+                        "enable_addr_auto 가 주소를 채우지 못했다 — 기기가 갈 곳이 없다"
+                    );
+                    assert_eq!(
+                        info.get_property_val_str("v"),
+                        Some(PROTOCOL_GENERATION),
+                        "TXT 가 레코드까지 살아남아야 한다"
+                    );
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("브라우즈 통로가 끝났다: {e}"),
+            }
+        }
+
+        let _ = seeker.shutdown();
+        published.stop();
+        assert_eq!(
+            *errors.lock().unwrap(),
+            Vec::<String>::new(),
+            "데몬이 오류를 냈다 — 이 망에서는 게시가 조용히 실패한다"
+        );
+    }
+
     /// 진짜 이름에서 나오는 라벨도 비어 있으면 안 된다. 여기서 데몬은 띄우지
-    /// 않는다 — 게시 자체는 손으로 확인한다.
+    /// 않는다 — 게시 자체는 위의 `--ignored` 테스트와 DEVICE-TEST §8 이 본다.
     #[test]
     fn the_machine_has_a_usable_label() {
         let label = host_label();

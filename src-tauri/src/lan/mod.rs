@@ -199,23 +199,43 @@ impl LanBridge {
     /// 보지만, 기기는 "찾았는데 안 붙는다"만 겪는다.
     ///
     /// 그래서 켜는 신호는 `ServerEvent::Listening` 하나뿐이다 — `bind` 가 성공한
-    /// 뒤에만 나가는 통지다. 끄는 신호는 둘: 사용자가 토글을 내렸을 때와, 그
-    /// 리스너가 내려갔을 때.
+    /// 뒤에만 나가는 통지다. 끄는 신호는 둘: 사용자가 토글을 내렸을 때와, 리스너가
+    /// **뜨지 못했을 때**(`BindFailed`). 뜬 뒤에 죽는 경로는 오늘 없다 — 있었다면
+    /// 그것도 여기로 와야 한다(`apply_event` 의 `BindFailed` 갈래 주석 참고).
     ///
     /// 광고 자체가 실패해도 리스너는 살아 있다. 그때는 자동 검색만 없는 것이므로
     /// LAN 공유를 꺼 버리지 않는다 — 사용자는 IP 를 손으로 넣어 붙을 수 있고,
     /// 오류 문구가 그 길을 말해 준다.
+    ///
+    /// **실패는 두 갈래로 온다.** `start` 가 곧바로 `Err` 를 주는 것은 게시를
+    /// 시작조차 못 한 경우고, 시작한 뒤에 드러나는 실패는 `ErrorSink` 로 늦게
+    /// 온다(`discovery::ErrorSink` 의 doc — 실전에서 흔한 쪽이 이쪽이다).
+    /// 사용자에게는 같은 상황이므로 문장도 한 곳에서 만든다
+    /// (`advertise_failure_message`).
     fn advertise(&mut self, on: bool) {
         if on == self.advertising {
             return;
         }
         if on {
-            if let Err(e) = self.advertiser.start(self.port) {
-                // "실패"에서 끝나면 사용자가 할 수 있는 일이 없다. 무엇을 하면
-                // 되는지까지 말한다. 여기서 `advertising` 은 false 로 남는다 —
-                // 다음 `Listening` 이 다시 시도한다.
-                self.last_error =
-                    Some(format!("자동 검색 게시에 실패했습니다 — 기기에 IP 를 직접 넣으세요: {e}"));
+            // 늦게 오는 실패를 브리지 상태에 직접 쓰지 않는다 — 그 콜백은 데몬
+            // 스레드에서 불리므로 여기 상태를 만지려면 잠금을 새로 만들어야 하고,
+            // 배선(`lib.rs`)이 패널을 다시 그리는 경로도 놓친다. 이미 있는 이벤트
+            // 통로로 되돌려 `apply_event` 한 곳에서 처리한다.
+            let events = self.events.clone();
+            let generation = self.generation;
+            let sink: discovery::ErrorSink = Box::new(move |message| {
+                if let Err(e) =
+                    events.try_send(ServerEvent::AdvertiseFailed { generation, message })
+                {
+                    // 큐가 가득 찼거나(EVENT_QUEUE 256개가 밀렸다) 통로가 닫혔다.
+                    // 둘 다 이 통지보다 큰 문제가 이미 벌어진 상태다.
+                    tracing::warn!("mDNS 실패를 패널까지 올리지 못했다: {e}");
+                }
+            });
+            if let Err(e) = self.advertiser.start(self.port, sink) {
+                // 여기서 `advertising` 은 false 로 남는다 — 다음 `Listening` 이
+                // 다시 시도한다.
+                self.last_error = Some(advertise_failure_message(&e.to_string()));
                 return;
             }
         } else {
@@ -535,6 +555,27 @@ impl LanBridge {
                 }
                 self.advertise(true);
             }
+            ServerEvent::AdvertiseFailed { generation, message } => {
+                // 낡은 세대의 데몬이 늦게 올린 실패는 지금의 광고를 탓하는 것이
+                // 아니다. **꺼진 뒤에 도착한 실패도 이 검사 하나로 함께 걸러진다** —
+                // 광고를 거두는 길은 둘뿐이고(`advertise` 의 doc) 둘 다 같은 자리에서
+                // `server` 를 떨어뜨리므로, "광고는 없는데 세대는 살아 있다"는 상태가
+                // 만들어지지 않는다. 그것이 중요한 이유는 끌 때 `last_error` 를
+                // 비우기 때문이다 — 여기서 되살리면 꺼진 전송이 오류를 달고 있게 된다.
+                //
+                // `|| !self.advertising` 을 덧붙이고 싶어지지만 넣지 않았다. 위
+                // 이유로 오늘 그 조건은 한 번도 참이 되지 않고, 뮤테이션으로도
+                // 확인했다(지워도 죽는 테스트가 없다).
+                if !self.is_current_generation(*generation) {
+                    return;
+                }
+                self.last_error = Some(advertise_failure_message(message));
+                // **`advertising` 은 그대로 둔다.** 이 플래그가 뜻하는 것은 "레코드가
+                // 지금 망에 닿고 있다"가 아니라 "거두어야 할 게시기를 들고 있다"이고,
+                // 데몬은 여전히 살아 있다(막힌 인터페이스가 돌아오면 다시 닿는다).
+                // false 로 내리면 `set_enabled(false)` 가 `stop()` 을 건너뛰어 데몬이
+                // 그대로 남는다.
+            }
             ServerEvent::Connected(id) => {
                 self.centrals.insert(id.clone());
             }
@@ -567,6 +608,18 @@ impl LanBridge {
             ServerEvent::Frame { .. } => {}
         }
     }
+}
+
+/// 게시 실패를 사용자에게 보여줄 문장으로 만든다.
+///
+/// **"실패했습니다"에서 끝나면 사용자가 할 수 있는 일이 없다.** LAN 공유 자체는
+/// 살아 있으므로 손으로 붙는 길을 함께 말한다 — 그 길이 있는데도 말하지 않으면
+/// 사용자는 전송이 통째로 망가진 줄 알고 포기한다.
+///
+/// 함수로 뽑아 둔 이유는 실패가 **두 갈래**로 들어오기 때문이다(`advertise` 의
+/// doc). 사용자에게는 같은 상황이므로 문장이 갈라지면 안 된다.
+fn advertise_failure_message(cause: &str) -> String {
+    format!("자동 검색 게시에 실패했습니다 — 기기에 IP 를 직접 넣으세요: {cause}")
 }
 
 /// 봉인 지점이 이 central 에 대해 내린 판단.
@@ -658,8 +711,13 @@ mod tests {
     #[derive(Default)]
     struct AdLog {
         calls: Vec<Ad>,
-        /// 데몬을 띄우지 못하는 상황(멀티캐스트가 막힌 망 등)을 흉내 낸다.
+        /// 게시를 **시작조차** 못 하는 상황(데몬 스레드를 못 띄웠다)을 흉내 낸다.
         fail: bool,
+        /// 시작한 뒤에 실패를 알릴 통로. 진짜 게시기에서는 데몬 스레드가 이걸
+        /// 부른다 — 테스트는 원하는 시점에 직접 불러 **비동기 실패**를 만든다.
+        /// 이 통로가 가짜에도 있어야 하는 이유: 없으면 실전에서 가장 흔한 실패
+        /// 경로가 그대로 테스트 사각지대에 들어간다.
+        sink: Option<discovery::ErrorSink>,
     }
 
     /// 브리지가 하나를 들고 테스트가 같은 것을 들여다본다.
@@ -670,22 +728,35 @@ mod tests {
         fn calls(&self) -> Vec<Ad> {
             self.0.lock().unwrap().calls.clone()
         }
+        /// 다음 `start` 가 곧바로 실패한다.
         fn fail_next(&self) {
             self.0.lock().unwrap().fail = true;
+        }
+        /// 이미 시작한 게시가 **나중에** 실패했다고 알린다.
+        fn fail_after_start(&self, cause: &str) {
+            let sink = self.0.lock().unwrap().sink.take();
+            let sink = sink.expect("start 가 통로를 넘겨주지 않았다");
+            sink(cause.to_string());
+            self.0.lock().unwrap().sink = Some(sink);
         }
     }
 
     impl discovery::Advertiser for FakeAdvertiser {
-        fn start(&mut self, port: u16) -> anyhow::Result<()> {
+        fn start(&mut self, port: u16, on_error: discovery::ErrorSink) -> anyhow::Result<()> {
             let mut g = self.0.lock().unwrap();
             g.calls.push(Ad::Start(port));
             if g.fail {
                 anyhow::bail!("데몬을 띄우지 못했다");
             }
+            g.sink = Some(on_error);
             Ok(())
         }
         fn stop(&mut self) {
-            self.0.lock().unwrap().calls.push(Ad::Stop);
+            let mut g = self.0.lock().unwrap();
+            g.calls.push(Ad::Stop);
+            // 거둔 게시의 통로는 더 이상 유효하지 않다. 진짜 게시기에서는 데몬이
+            // 내려가면서 감시 스레드가 끝나는 것에 해당한다.
+            g.sink = None;
         }
     }
 
@@ -1031,6 +1102,123 @@ mod tests {
         assert!(b.server.is_some(), "리스너까지 내리면 안 된다");
         let msg = b.last_error().expect("사용자가 알 유일한 경로다");
         assert!(msg.contains("IP"), "손으로 넣는 길을 말해야 한다: {msg}");
+    }
+
+    /// 채널에서 `AdvertiseFailed` 하나를 꺼낸다. 앞에 진짜 리스너의 `Listening` 이
+    /// 섞여 들어오므로 걸러 낸다.
+    async fn next_advertise_failure(rx: &mut Receiver<ServerEvent>) -> ServerEvent {
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("게시 실패 통지가 오지 않았다")
+                .expect("이벤트 통로가 닫혔다");
+            if matches!(ev, ServerEvent::AdvertiseFailed { .. }) {
+                return ev;
+            }
+        }
+    }
+
+    /// **가장 흔한 실패는 `start` 가 `Ok` 를 준 뒤에 온다.** `ServiceDaemon::new()`
+    /// 는 멀티캐스트 소켓을 열지 않으므로(크레이트 doc) 방화벽·게스트 VLAN·
+    /// 멀티캐스트 금지는 전부 그 뒤에 드러난다. 그 실패를 삼키면 사용자는
+    /// "켰는데 기기가 못 찾는다"만 겪고, IP 를 손으로 넣으라는 안내를 **그 안내가
+    /// 존재하는 이유인 바로 그 상황에서** 받지 못한다.
+    #[tokio::test]
+    async fn a_daemon_that_fails_after_starting_still_reaches_the_user() {
+        let (mut b, mut rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+        assert!(b.advertising);
+        assert!(b.last_error().is_none(), "여기까지는 조용한 것이 맞다");
+
+        // 데몬은 떴는데 멀티캐스트가 막혔다.
+        ads.fail_after_start("multicast not permitted");
+
+        let ev = next_advertise_failure(&mut rx).await;
+        b.apply_event(&ev);
+
+        let msg = b.last_error().expect("이 실패가 사용자에게 닿아야 한다");
+        assert!(msg.contains("IP"), "손으로 넣는 길을 말해야 한다: {msg}");
+        assert!(
+            msg.contains("multicast not permitted"),
+            "원인을 실어야 한다 — 이 앱은 로그를 남기지 않는다: {msg}"
+        );
+        assert!(b.is_enabled(), "게시가 실패해도 LAN 공유는 계속된다");
+        assert!(b.server.is_some(), "리스너까지 내리면 안 된다");
+    }
+
+    /// 늦게 오는 실패도 게시기를 놓지 않는다. `advertising` 을 내리면
+    /// `set_enabled(false)` 가 `stop()` 을 건너뛰어 **데몬이 그대로 남는다** —
+    /// 사용자가 껐다고 믿는 맥이 계속 자기를 알리게 된다.
+    #[tokio::test]
+    async fn a_late_failure_still_leaves_something_to_take_down() {
+        let (mut b, mut rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+        ads.fail_after_start("interface went away");
+        let ev = next_advertise_failure(&mut rx).await;
+        b.apply_event(&ev);
+
+        assert!(b.advertising, "거두어야 할 게시기는 그대로 있다");
+        b.set_enabled(false);
+        assert_eq!(ads.calls(), vec![Ad::Start(0), Ad::Stop]);
+    }
+
+    /// 낡은 세대의 데몬이 늦게 올린 실패는 지금의 광고를 탓하는 것이 아니다.
+    #[tokio::test]
+    async fn a_stale_advertise_failure_is_ignored() {
+        let (mut b, _rx, _ads) = bridge_on(0);
+        b.set_enabled(true);
+        let stale = ServerEvent::AdvertiseFailed {
+            generation: b.generation,
+            message: "옛 데몬의 실패".into(),
+        };
+        b.set_enabled(false);
+        b.set_enabled(true); // 세대 2
+        b.apply_event(&listening_now(&b));
+
+        b.apply_event(&stale);
+
+        assert!(b.last_error().is_none(), "낡은 실패를 지금 사실처럼 보여주면 안 된다");
+    }
+
+    /// 광고를 이미 거둔 뒤에 도착한 실패도 마찬가지다. 끌 때 `last_error` 를
+    /// 비우는데 여기서 되살리면 **꺼진 전송이 오류를 달고** 있게 된다.
+    #[tokio::test]
+    async fn an_advertise_failure_after_the_toggle_went_off_is_ignored() {
+        let (mut b, _rx, _ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+        let ev = ServerEvent::AdvertiseFailed {
+            generation: b.generation,
+            message: "늦게 온 실패".into(),
+        };
+        b.set_enabled(false);
+
+        b.apply_event(&ev);
+
+        assert!(b.last_error().is_none());
+    }
+
+    /// 두 갈래(시작 실패 · 늦은 실패)가 사용자에게는 같은 상황이므로 문장도
+    /// 같아야 한다. 한쪽만 손으로 붙는 길을 말하면 나머지 한쪽 사용자는 포기한다.
+    #[tokio::test]
+    async fn both_kinds_of_failure_say_the_same_thing() {
+        let (mut early, _rx1, ads1) = bridge_on(0);
+        ads1.fail_next();
+        early.set_enabled(true);
+        early.apply_event(&listening_now(&early));
+        let from_start = early.last_error().expect("시작 실패");
+
+        let (mut late, mut rx2, ads2) = bridge_on(0);
+        late.set_enabled(true);
+        late.apply_event(&listening_now(&late));
+        ads2.fail_after_start("데몬을 띄우지 못했다");
+        let ev = next_advertise_failure(&mut rx2).await;
+        late.apply_event(&ev);
+        let from_monitor = late.last_error().expect("늦은 실패");
+
+        assert_eq!(from_start, from_monitor);
     }
 
     /// 진짜 4320 에서 토글이 소켓을 열고 닫는지 본다. 평소 실행에서 빠져 있는
