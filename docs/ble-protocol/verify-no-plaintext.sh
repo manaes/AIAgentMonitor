@@ -43,9 +43,42 @@ if [ "$bytes" -lt 1024 ]; then
 fi
 ok "${bytes}바이트"
 
-# 우리 트래픽이 잡혔는지. 봉인 프레임은 hex ASCII 로 나가므로(NDJSON),
-# 최소한 연결이 있었다는 흔적은 남는다. 없으면 엉뚱한 걸 떴을 가능성이 높다.
-echo "  (참고: 아래에서 하나도 안 잡히면 대상 트래픽이 캡처에 없을 수 있다)"
+# **캡처가 그 세션을 담았는가.** 크기만으로는 알 수 없다 — 엉뚱한 인터페이스를
+# 15분 떠도 15MB 는 쌓인다. pcap 이면 시간 창과 iroh 소켓을 실제로 보여 주고,
+# 사람이 "페어링한 시각이 이 창 안인가"를 판단하게 한다. 이 판단을 건너뛰면
+# 아래 세 항목의 "없음"은 아무것도 뜻하지 않는다.
+if tcpdump -r "$CAP" -c 1 >/dev/null 2>&1; then
+    first=$(tcpdump -r "$CAP" -tttt -c 1 2>/dev/null | awk '{print $1, $2}')
+    last=$(tcpdump -r "$CAP" -tttt 2>/dev/null | tail -1 | awk '{print $1, $2}')
+    pkts=$(tcpdump -r "$CAP" 2>/dev/null | wc -l | tr -d ' ')
+    echo "  캡처 창: $first → $last (${pkts} 패킷)"
+
+    # iroh 는 릴레이와 UDP/7842 로 말한다. 그 포트를 쓰는 로컬 포트가 곧
+    # iroh 엔드포인트 소켓이고, 같은 포트의 다른 상대가 폰(직통)이다.
+    # `IP a.b.c.d.PORT > e.f.g.h.7842:` 에서 7842 가 **아닌** 쪽 포트가 우리 것이다.
+    ep=$(tcpdump -r "$CAP" -nn 'udp port 7842' 2>/dev/null \
+         | awk '{print $3; print $5}' | sed 's/:$//' \
+         | grep -oE '[0-9]+$' | grep -v '^7842$' \
+         | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+    if [ -n "$ep" ]; then
+        peers=$(tcpdump -r "$CAP" -nn "udp port $ep" 2>/dev/null \
+                | awk '{print $3; print $5}' | sed 's/:$//' \
+                | sed 's/\.[0-9]*$//' | sort -u | grep -v '^$' | tr '\n' ' ')
+        echo "  iroh 엔드포인트 소켓: UDP $ep — 상대: $peers"
+        ok "iroh 트래픽이 캡처 안에 있다"
+    else
+        echo "  ! iroh 릴레이 포트(UDP 7842) 트래픽이 없다."
+        echo "    BLE 로만 페어링했다면 정상이다 — 다만 그 경우 이 캡처는"
+        echo "    **네트워크 경로를 검사하지 않은 것**이고, BLE 는 en0 에"
+        echo "    나타나지 않으므로 아래 '없음'은 공허하다. PacketLogger 가 필요하다."
+    fi
+
+    echo
+    echo "  ** 위 창 안에서 페어링했는지 직접 확인해라. ** 창 밖이면 아래는 전부 무의미하다."
+    echo "     토큰 발급 시각: $(stat -f '%Sm' -t '%H:%M:%S' "$PEERS" 2>/dev/null || echo '(모름)')"
+else
+    echo "  (pcap 이 아니다 — PacketLogger .pklg 등. 시간 창 확인은 생략한다)"
+fi
 echo
 
 # ── 1. 토큰 ────────────────────────────────────────────────────────────────
