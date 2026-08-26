@@ -161,8 +161,16 @@ impl LanBridge {
     /// 사용자에게 보여줄 오류를 채우거나 지운다. `BindFailed` 말고도 호출부가
     /// 이 전송의 실패(토큰 저장 실패 등)를 실어야 할 곳이 있다 — 이 앱은 로그
     /// 파일을 남기지 않으므로 여기가 사용자가 알 수 있는 유일한 경로다.
-    pub fn set_last_error(&mut self, msg: Option<String>) {
+    ///
+    /// **값이 실제로 바뀌었을 때만 `true`.** 호출부는 이걸 보고 프론트에 알릴지
+    /// 정한다 — 같은 오류를 다시 쓰는 것은 사용자에게 새 소식이 아니고, "바뀌지
+    /// 않아도 매번 알린다"는 것이 finding A 에서 고친 바로 그 형태다.
+    pub fn set_last_error(&mut self, msg: Option<String>) -> bool {
+        if self.last_error == msg {
+            return false;
+        }
         self.last_error = msg;
+        true
     }
 
     /// 이 이벤트로 끝나는 세션들. **`apply_event` 보다 먼저** 불러야 한다 —
@@ -908,6 +916,18 @@ mod tests {
         assert_eq!(p.issued_peers().len(), 1, "토큰은 복원된다");
         assert!(!p.is_authorized(&id), "복원되는 것은 토큰이지 인가가 아니다");
         assert!(b.snapshot_targets(&p).is_empty(), "다시 증명하기 전에는 아무것도 못 받는다");
+    }
+
+    /// 같은 오류를 다시 쓰는 것은 사용자에게 새 소식이 아니다. 호출부가 그걸로
+    /// 프론트 갱신 여부를 정하므로, 바뀌었는지를 이 함수가 답해야 한다.
+    #[tokio::test]
+    async fn setting_the_same_error_twice_is_not_news() {
+        let (mut b, _rx) = bridge();
+        assert!(b.set_last_error(Some("저장 실패".into())), "처음은 바뀐 것이다");
+        assert!(!b.set_last_error(Some("저장 실패".into())), "같은 값은 새 소식이 아니다");
+        assert!(b.set_last_error(Some("다른 실패".into())), "내용이 바뀌면 알려야 한다");
+        assert!(b.set_last_error(None), "지우는 것도 바뀐 것이다");
+        assert!(!b.set_last_error(None), "이미 비어 있으면 바뀐 것이 없다");
     }
 
     /// 리스너가 없을 때 응답을 보내려 해도 조용히 버려진다. 상대가 사라진 것은

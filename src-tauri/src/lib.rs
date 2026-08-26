@@ -978,11 +978,18 @@ pub fn run() {
                                             // 이 경로는 사용자 커맨드가 아니라 이벤트 루프라
                                             // Result 로 알릴 통로가 없다 — BLE 와 같은 방식으로
                                             // last_error 에 싣는다(tracing 은 전부 유실된다).
-                                            h.bridge.lock().await.set_last_error(Some(format!(
-                                                "페어링 토큰 저장 실패: {e}"
-                                            )));
-                                            // 오류가 바뀌었으면 그것만으로도 알릴 이유다.
-                                            notable = true;
+                                            // 오류가 **바뀌었으면** 그것만으로도 알릴
+                                            // 이유다. 같은 오류를 다시 쓰는 것은 새
+                                            // 소식이 아니다. 지금은 `granted` 안이라
+                                            // 이미 알리게 돼 있지만, 이 분기가 밖으로
+                                            // 나가도 판단이 함께 따라가도록 둔다.
+                                            notable |= h
+                                                .bridge
+                                                .lock()
+                                                .await
+                                                .set_last_error(Some(format!(
+                                                    "페어링 토큰 저장 실패: {e}"
+                                                )));
                                         }
                                     }
                                     if outcome.now_authorized {
