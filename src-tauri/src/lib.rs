@@ -4,6 +4,7 @@ mod ble;
 mod crypto;
 mod clock;
 mod emitter;
+mod lan;
 mod network;
 mod quota_proxy;
 mod settings;
@@ -154,6 +155,96 @@ pub struct NetworkHandle {
     pub last_error: std::sync::Mutex<Option<String>>,
 }
 
+/// LAN 전송의 앱 쪽 손잡이. `NetworkHandle` 과 달리 엔드포인트도 `last_error` 도
+/// 밖에 두지 않는다 — 리스너는 토글이 켜져 있는 동안만 존재하고(스펙 4장),
+/// 오류는 브리지가 이미 들고 있다(`LanBridge::last_error`).
+pub struct LanHandle {
+    pub bridge: Mutex<lan::LanBridge>,
+}
+
+/// LAN 전송은 **모든 플랫폼에서 지원된다** — `NETWORK_SUPPORTED` 와 같은 무조건
+/// `true` 이고, `BLE_SUPPORTED` 처럼 `cfg` 로 갈라지지 않는다.
+///
+/// BLE 가 macOS 에서만 `true` 인 이유는 CoreBluetooth 가 그 OS 에만 있고 다른
+/// 곳에서는 `FakePeripheral` 이라 토글이 성공을 보고해도 아무 일도 일어나지 않기
+/// 때문이다. LAN 에는 그런 사정이 없다: 여는 것은 그냥 WebSocket 리스너이고,
+/// 게시(`lan::discovery`)와 주소 조회(`local_ipv4`)도 서브프로세스 없이 표준
+/// 라이브러리만 쓴다 — 윈도우에서 `ipconfig` 출력을 파싱하지 않기로 한 결정이
+/// 바로 이 값을 무조건 `true` 로 둘 수 있게 하려던 것이다. 여기에 `cfg` 를
+/// 붙이면 그 작업이 통째로 버려진다.
+///
+/// 윈도우에서 실제로 돌려 본 사람은 아직 없다 — 그 확인은
+/// `docs/ble-protocol/DEVICE-TEST.md` §8-4 에 있다.
+const LAN_SUPPORTED: bool = true;
+
+#[derive(Clone, serde::Serialize)]
+pub struct LanStatus {
+    pub supported: bool,
+    pub enabled: bool,
+    /// 사용자가 기기에 **손으로 넣을 주소**. `192.168.0.12:4320` 처럼 **포트까지
+    /// 붙은 완성된 문자열**이다.
+    ///
+    /// 포트를 여기서 붙이는 이유는 프론트가 `4320` 을 베껴 적지 않게 하기
+    /// 위해서다 — 그 값은 `lan::server::PORT` 한 곳에서만 나와야 하고, 상수가
+    /// 움직이는 날 패널이 거짓말을 하면 안 된다.
+    ///
+    /// **리스너가 서 있을 때만** 값이 있다 — `enabled` 와 갈라진다: bind 에
+    /// 실패하면 토글은 켜진 채로 여기가 `None` 이 된다(`lan_address` 의 doc).
+    /// 라우팅 가능한 IPv4 를 못 찾아도 `None` 이다(`local_ipv4` 의 한계 참고).
+    pub address: Option<String>,
+    pub last_error: Option<String>,
+}
+
+/// 패널에 띄울 주소 문자열을 만든다.
+///
+/// **리스너가 서 있지 않으면 `None`.** 토글이 아니라 리스너를 따른다 — 둘은
+/// 갈라진다: `BindFailed` 는 `enabled` 를 켠 채로 리스너만 없앤다. 그 상태에서
+/// 주소를 계속 보여주면 패널이 같은 화면에서 "포트를 열지 못했습니다"와 "이
+/// 주소를 직접 넣으세요"를 동시에 말하고, 사용자는 **열려 있지 않은 포트**를
+/// 기기에 손으로 넣는다. 기기 쪽에는 왜 안 붙는지 알려 줄 화면이 없다.
+///
+/// 이것은 이 전송이 광고에 대해 이미 정해 둔 규칙과 같다
+/// (`lan::LanBridge::advertise` 의 doc — "광고는 토글이 아니라 리스너를 따른다").
+/// mDNS 와 손으로 넣는 길이 향하는 곳은 같은 포트이므로 규칙도 같아야 한다.
+/// 호출부는 `lan::LanBridge::is_listening` 을 넘긴다.
+///
+/// 리스너가 서 있는 동안에는 **mDNS 게시가 성공했든 실패했든 언제나** 값을 준다 —
+/// 방화벽이 5353 을 막은 경우는 아무 신호도 남기지 않으므로(`lan::discovery`
+/// 모듈 doc), 손으로 넣는 길을 게시 실패 표시에 매달면 가장 필요한 순간에 아무
+/// 말도 하지 않게 된다(DEVICE-TEST §8-3 의 요구사항). 즉 이 함수가 보는 것은
+/// "리스너가 있는가" 하나이지 "광고가 나가는가"가 아니다.
+///
+/// `port` 를 인자로 받는 것은 테스트가 하드코딩된 리터럴을 잡아내게 하기
+/// 위해서다 — 호출부는 언제나 `lan::server::PORT` 를 넘긴다.
+fn lan_address(listening: bool, ip: Option<String>, port: u16) -> Option<String> {
+    if !listening {
+        return None;
+    }
+    Some(format!("{}:{}", ip?, port))
+}
+
+#[tauri::command]
+async fn lan_status(state: tauri::State<'_, Arc<LanHandle>>) -> Result<LanStatus, String> {
+    let bridge = state.bridge.lock().await;
+    Ok(LanStatus {
+        supported: LAN_SUPPORTED,
+        // 토글의 상태 그대로다. `BindFailed` 가 리스너를 내려도 사용자가 켠 것은
+        // 켠 것이고, 패널은 그것을 켜짐으로 보여주면서 빨간 오류를 함께 띄운다.
+        enabled: bridge.is_enabled(),
+        // 주소는 **리스너를 따른다**(`lan_address` 의 doc). 리스너가 없을 때도
+        // `local_ipv4()` 는 불리지만(인자가 먼저 평가된다) 그 비용은 UDP 소켓 하나를
+        // 묶고 경로를 묻는 것뿐이고 패킷은 나가지 않는다 — 판단을 두 곳에 두지 않는
+        // 쪽을 택했다.
+        address: lan_address(
+            bridge.is_listening(),
+            lan::discovery::local_ipv4(),
+            lan::server::PORT,
+        ),
+        // BLE·network 와 달리 오류는 핸들이 아니라 브리지가 들고 있다.
+        last_error: bridge.last_error(),
+    })
+}
+
 #[tauri::command]
 async fn network_status(state: tauri::State<'_, Arc<NetworkHandle>>) -> Result<NetworkStatus, String> {
     let bridge = state.bridge.lock().await;
@@ -262,7 +353,7 @@ async fn begin_pairing(pairing: tauri::State<'_, SharedPairing>) -> Result<(), S
     Ok(())
 }
 
-/// 내려간 세션을 **두 브릿지 모두**에 알리고, 저장소를 갱신한다. 그 central 이
+/// 내려간 세션을 **세 브릿지 모두**에 알리고, 저장소를 갱신한다. 그 central 이
 /// 어느 전송에 붙어 있었는지 앱은 모르고 알 필요도 없다 — 모르는 id 는 무시된다.
 ///
 /// **스트림을 먼저 끊고 디스크는 나중에 쓴다.** 순서가 반대면 디스크 I/O 를
@@ -270,14 +361,38 @@ async fn begin_pairing(pairing: tauri::State<'_, SharedPairing>) -> Result<(), S
 /// 안)과 쓰기(잠금 밖)가 나뉘어 있어 인가가 살아 있을 때 봉인해 둔 프레임 한
 /// 장이 해제 뒤에 나갈 수 있다. 평문은 아니고 다음 틱에 저절로 낫지만, 디스크를
 /// 먼저 기다릴 이유가 없으므로 그냥 순서를 뒤집는다.
+///
+/// **LAN 에도 같은 창이 있고, 오히려 더 넓다.** LAN 도 봉인(`prepare_snapshot`,
+/// 페어링 잠금 안)과 쓰기(`send_prepared`, 잠금 밖)가 나뉘어 있고, 틱은 그 둘
+/// 사이에 network 의 쓰기를 **통째로** 끼워 넣는다 — `drop(p)` 다음에
+/// `network.send_prepared(...).await` 가 돌고, `lan.send_prepared(...)` 는 그
+/// 뒤에야 돈다. 그 간격에 해제가 끼어들면 해제 **이전에** 봉인된 스냅샷 한 장이
+/// 해제 **이후에** 나간다. "`revoke_peer` 가 인가를 먼저 지운다"는 이 창을 닫는
+/// 근거가 되지 못한다 — network 에도 똑같이 참이고, 어느 쪽이든 봉인은 그보다
+/// 앞서 이미 끝나 있기 때문이다.
+///
+/// 실피해는 작다: 한 장, 그 기기가 이미 가진 키로 봉인된 것, 다음 틱에 저절로
+/// 낫는다(`Outbound::Close` 가 먼저 큐에 들어간 순서라면 tungstenite 가 그
+/// 프레임을 아예 막기도 하지만, 그 순서는 보장되지 않는다). 그래서 **오늘의
+/// 배치가 맞고 여기서 고칠 것은 없다.** 다만 "LAN 은 안전하니 저 줄만 저장 뒤로
+/// 밀어도 된다"는 근거로는 쓸 수 없다는 뜻이다. 자리 회수는 이 배치와 인과가
+/// 없다: 저장 뒤로 밀려도 `drop_sessions` 는 디스크 쓰기 바로 다음에 도니 자리는
+/// 밀리초 늦게 돌아올 뿐이다.
+///
+/// 그런데도 세 줄을 한자리에 붙여 두는 이유는 **배선이 갈라지면 아무도 눈치채지
+/// 못하기 때문**이다. 이 함수는 통째로 테스트 사각지대에 있다 — 세 줄 중 무엇을
+/// 지워도 전체 스위트가 그대로 통과한다(실측). 그러니 어느 한 줄이 저장 뒤로
+/// 밀리는 날 그것을 잡아 줄 것은 "셋이 나란히 있다"는 이 모양뿐이다.
 async fn persist_and_drop(
     pairing: &SharedPairing,
     ble_state: &Arc<BleHandle>,
     network_state: &Arc<NetworkHandle>,
+    lan_state: &Arc<LanHandle>,
     dropped: Vec<ble::peripheral::CentralId>,
 ) -> Result<(), String> {
     ble_state.bridge.lock().await.drop_sessions(&dropped);
     network_state.bridge.lock().await.drop_sessions(&dropped);
+    lan_state.bridge.lock().await.drop_sessions(&dropped);
     save_paired_peers(pairing).await
 }
 
@@ -289,9 +404,10 @@ async fn unpair(
     pairing: tauri::State<'_, SharedPairing>,
     ble_state: tauri::State<'_, Arc<BleHandle>>,
     network_state: tauri::State<'_, Arc<NetworkHandle>>,
+    lan_state: tauri::State<'_, Arc<LanHandle>>,
 ) -> Result<(), String> {
     let dropped = pairing.lock().await.revoke_peer(&peer_id);
-    persist_and_drop(&pairing, &ble_state, &network_state, dropped).await
+    persist_and_drop(&pairing, &ble_state, &network_state, &lan_state, dropped).await
 }
 
 #[tauri::command]
@@ -299,9 +415,10 @@ async fn unpair_all(
     pairing: tauri::State<'_, SharedPairing>,
     ble_state: tauri::State<'_, Arc<BleHandle>>,
     network_state: tauri::State<'_, Arc<NetworkHandle>>,
+    lan_state: tauri::State<'_, Arc<LanHandle>>,
 ) -> Result<(), String> {
     let dropped = pairing.lock().await.revoke_all();
-    persist_and_drop(&pairing, &ble_state, &network_state, dropped).await
+    persist_and_drop(&pairing, &ble_state, &network_state, &lan_state, dropped).await
 }
 
 /// BLE 와 동시에 켤 수 있다(2026-08-25 스펙) — 페어링 창을 공유하므로 예전의
@@ -320,6 +437,35 @@ async fn network_set_enabled(
     if !enabled {
         pairing.lock().await.end_sessions(&served);
         *network_state.last_error.lock().unwrap() = None;
+    }
+    Ok(())
+}
+
+/// 세 토글은 서로 독립이다 — LAN 을 켜고 끄는 것이 BLE·network 를 건드리지
+/// 않는다. `network_set_enabled` 와 같은 모양을 일부러 유지한다.
+///
+/// **실패는 여기서 나오지 않는다.** `LanBridge::set_enabled(true)` 는 리스너
+/// 태스크를 띄우고 곧바로 돌아오므로, 포트 점유(`EADDRINUSE`) 같은 실패는 잠시 뒤
+/// `ServerEvent::BindFailed` 로 온다. 그 경로는 이미 이어져 있다 — `apply_event`
+/// 가 `last_error` 를 채우고 배선이 `lan_status` 이벤트를 쏘면 패널이 다시 읽는다
+/// (setup 의 LAN 이벤트 루프). 그래서 여기서 성공을 돌려준 뒤에 빨간 오류가 뜨는
+/// 것이 정상이고, 프론트가 폴링할 이유가 없다.
+#[tauri::command]
+async fn lan_set_enabled(
+    enabled: bool,
+    lan_state: tauri::State<'_, Arc<LanHandle>>,
+    pairing: tauri::State<'_, SharedPairing>,
+) -> Result<(), String> {
+    let mut bridge = lan_state.bridge.lock().await;
+    // 끄기 전에 받아둔다 — set_enabled(false) 가 목록을 비운다. 공유 매니저이므로
+    // **이 전송의 세션만** 내려야 BLE·network 세션이 살아남는다(스펙 4장).
+    let served = if enabled { Vec::new() } else { bridge.served_centrals() };
+    bridge.set_enabled(enabled);
+    drop(bridge);
+    if !enabled {
+        pairing.lock().await.end_sessions(&served);
+        // `last_error` 를 지우는 것은 브리지가 스스로 한다(`set_enabled` 의 doc) —
+        // BLE·network 처럼 배선이 기억해야 하는 정리를 여기 두지 않는다.
     }
     Ok(())
 }
@@ -696,6 +842,8 @@ pub fn run() {
             ble_set_enabled,
             network_status,
             network_set_enabled,
+            lan_status,
+            lan_set_enabled,
             // 페어링은 두 전송이 공유한다(2026-08-25 스펙) — 전송별 커맨드가
             // 아니라 앱 레벨 커맨드 하나씩이다.
             pairing_status,
@@ -907,6 +1055,114 @@ pub fn run() {
                     });
                 }
 
+                // LAN(WebSocket) 전송. iroh 와 달리 여기서 여는 것은 이벤트 통로뿐이다 —
+                // 리스너 자체는 토글이 켜져 있는 동안만 존재한다(스펙 4장). 통로는
+                // 브리지와 수명을 같이해서 수신 루프를 한 번만 걸면 되게 한다.
+                let (lan_tx, mut lan_rx) = mpsc::channel(lan::server::EVENT_QUEUE);
+                let lan_handle = Arc::new(LanHandle {
+                    bridge: Mutex::new(lan::LanBridge::new(lan_tx)),
+                });
+                {
+                    use tauri::Manager;
+                    app.manage(lan_handle.clone());
+                }
+
+                // LAN 이벤트 → 인증 처리 + 프론트로 상태 push. BLE 루프와 같은 모양이다:
+                // 판단은 전부 브리지·PairingManager 에 있고 여기서는 그 결과를 잇는다.
+                {
+                    let h = lan_handle.clone();
+                    let app_for_lan = app.handle().clone();
+                    let pairing_for_lan = shared_pairing.clone();
+                    tauri::async_runtime::spawn(async move {
+                        while let Some(ev) = lan_rx.recv().await {
+                            let ending = {
+                                let mut b = h.bridge.lock().await;
+                                // 무엇이 끝나는지는 `apply_event` 가 목록에서 지우기
+                                // **전에** 물어야 한다(`sessions_to_end` 의 doc).
+                                let ending = b.sessions_to_end(&ev);
+                                b.apply_event(&ev);
+                                ending
+                            };
+                            if !ending.is_empty() {
+                                // 링크가 끊기면 인가도 즉시 사라진다 — BLE 의
+                                // `Disconnected` 와 같은 규칙이다. 공유 매니저이므로
+                                // 이 전송이 서비스하던 세션만 내린다.
+                                pairing_for_lan.lock().await.end_sessions(&ending);
+                            }
+                            // 프레임은 인증 이전에 아무나 보낼 수 있으므로, 상태를
+                            // 실제로 바꿨을 때만 프론트에 알린다. 나머지 이벤트는
+                            // 연결·리스너 상태가 바뀐 것이라 언제나 알린다.
+                            let mut notable =
+                                !matches!(ev, lan::server::ServerEvent::Frame { .. });
+                            if let lan::server::ServerEvent::Frame { id, text } = &ev {
+                                let now = std::time::SystemTime::now();
+                                let outcome = {
+                                    let mut p = pairing_for_lan.lock().await;
+                                    h.bridge.lock().await.handle_auth(
+                                        id,
+                                        text.as_bytes(),
+                                        now,
+                                        &mut p,
+                                    )
+                                };
+                                // `None` 은 우리가 서비스하지 않는 연결이라는 뜻이다 —
+                                // 그 경우 브리지가 pairing 을 아예 건드리지 않았다.
+                                if let Some(outcome) = outcome {
+                                    notable = outcome.changed_visible_state();
+                                    h.bridge.lock().await.send_auth_reply(id, outcome.payload);
+                                    // **인가 통지가 디스크보다 먼저다.** 아래 토큰
+                                    // 저장과 이 통지는 서로 독립인데, 순서가 반대면
+                                    // 보안 타이머(인증 시한)의 해제 시점이 디스크
+                                    // 속도에 매달린다. 저장이 오래 걸린 채 150초
+                                    // 경계에 걸리면, 방금 페어링에 **성공한** 기기가
+                                    // 성공하는 순간 끊긴다. 재연결은 사람 없이
+                                    // `AUTH2`/`PROOF2` 로 되므로 잠기지는 않지만,
+                                    // 보안 판단이 I/O 지연에 의존하는 관계 자체를
+                                    // 두지 않는다.
+                                    //
+                                    // 통지 자체를 빠뜨리면 정상적으로 페어링한
+                                    // 기기가 150초 뒤에 끊긴다 — 그것도 미러가
+                                    // 잘 나오는 중에.
+                                    //
+                                    // network 는 여기서 스냅샷 uni-stream 을 열지만
+                                    // LAN 은 열 것이 없다 — 스냅샷은 이미 붙어 있는
+                                    // 같은 WebSocket 으로 나간다(틱이
+                                    // `prepare_snapshot` 으로 대상을 고른다).
+                                    if outcome.now_authorized {
+                                        h.bridge.lock().await.mark_authorized(id);
+                                        tracing::info!(id = %id.0, "LAN 세션 인가됨");
+                                    }
+                                    if outcome.granted {
+                                        // 새 토큰이 발급됐다. 여기서 디스크에 쓰지 않으면
+                                        // 이 세션에서는 멀쩡히 동작하다가 맥을 껐다 켜는
+                                        // 순간 사라져 영영 재연결하지 못한다.
+                                        if let Err(e) = save_paired_peers(&pairing_for_lan).await {
+                                            // 이 경로는 사용자 커맨드가 아니라 이벤트 루프라
+                                            // Result 로 알릴 통로가 없다 — BLE 와 같은 방식으로
+                                            // last_error 에 싣는다(tracing 은 전부 유실된다).
+                                            // 오류가 **바뀌었으면** 그것만으로도 알릴
+                                            // 이유다. 같은 오류를 다시 쓰는 것은 새
+                                            // 소식이 아니다. 지금은 `granted` 안이라
+                                            // 이미 알리게 돼 있지만, 이 분기가 밖으로
+                                            // 나가도 판단이 함께 따라가도록 둔다.
+                                            notable |= h
+                                                .bridge
+                                                .lock()
+                                                .await
+                                                .set_last_error(Some(format!(
+                                                    "페어링 토큰 저장 실패: {e}"
+                                                )));
+                                        }
+                                    }
+                                }
+                            }
+                            if notable {
+                                let _ = app_for_lan.emit("lan_status", ());
+                            }
+                        }
+                    });
+                }
+
                 // BLE 이벤트 → 구독자 사본 갱신 + 프론트로 상태 push
                 {
                     let h = ble_handle.clone();
@@ -993,6 +1249,7 @@ pub fn run() {
                 let antigravity_for_tick = antigravity_quota.clone();
                 let ble_for_tick = ble_handle.clone();
                 let network_for_tick = network_handle.clone();
+                let lan_for_tick = lan_handle.clone();
                 let settings_for_tick = settings_state.clone();
                 let pairing_for_tick = shared_pairing.clone();
                 // **이 루프가 하나의 순차 태스크라는 점이 v2 프레임 순서의 근거다.**
@@ -1084,9 +1341,14 @@ pub fn run() {
                             // 인증 경로와 같다.
                             let mut p = pairing_for_tick.lock().await;
                             // BLE 는 큐에 넘기고 끝나는 동기 호출이라 잠금 안에서
-                            // 마쳐도 된다. 네트워크는 봉인까지만 여기서 한다.
+                            // 마쳐도 된다. 네트워크와 LAN 은 봉인까지만 여기서 한다.
                             ble_for_tick.bridge.lock().await.on_snapshot(&snap, now, &mut p);
                             let lines = network_for_tick
+                                .bridge
+                                .lock()
+                                .await
+                                .prepare_snapshot(&snap, now, &mut p);
+                            let lan_frames = lan_for_tick
                                 .bridge
                                 .lock()
                                 .await
@@ -1097,6 +1359,10 @@ pub fn run() {
                             // 시작·BLE/네트워크 인증 처리가 전부 멈춘다.
                             drop(p);
                             network_for_tick.bridge.lock().await.send_prepared(lines).await;
+                            // LAN 의 쓰기는 오늘 막히지 않지만(무한 채널에 넣고
+                            // 끝난다) 잠금 밖이라는 위치는 지킨다 — 세 전송이 같은
+                            // 모양이어야 한쪽만 고치는 드리프트가 눈에 띈다.
+                            lan_for_tick.bridge.lock().await.send_prepared(lan_frames).await;
                         }
                     }
                 });
@@ -1106,4 +1372,57 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 리스너가 없으면 주소를 보여주지 않는다. 주소를 내밀면 사용자는 그것을
+    /// 기기에 넣고, 기기 쪽에는 왜 안 붙는지 알려 줄 화면이 없다.
+    ///
+    /// 토글을 껐을 때가 그 경우의 하나지만 **유일한 경우가 아니다** — `BindFailed`
+    /// 는 토글을 켠 채로 리스너만 없앤다. 그래서 이 함수는 `enabled` 가 아니라
+    /// `listening` 을 받고, 호출부(`lan_status`)가 `is_listening()` 을 넘긴다.
+    /// 그 두 값이 실제로 갈라진다는 사실은 `lan::tests` 의
+    /// `bind_failure_takes_the_listener_down_but_leaves_the_toggle_on` 이 잡는다.
+    /// 여기서 그것을 한 번 더 검사해 봐야 인자가 `false` 로 같아 같은 줄만 다시
+    /// 짚을 뿐이라 넣지 않았다.
+    #[test]
+    fn lan_address_is_hidden_while_sharing_is_off() {
+        assert_eq!(lan_address(false, Some("192.168.0.12".into()), 4320), None);
+    }
+
+    /// 켜져 있으면 **주소와 포트를 한 문자열로** 준다. 프론트는 이 값을 그대로
+    /// 찍기만 하면 되고 포트를 스스로 알 필요가 없다.
+    ///
+    /// **일부러 4320 이 아닌 포트로 검사한다.** 그래야 함수 안에 리터럴을 박는
+    /// 변경을 잡는다 — 운영 포트로 검사하면 `format!("{ip}:4320")` 이라고 고쳐 놔도
+    /// 통과해 버리고, 그것이 바로 이 함수가 막으려는 형태다(포트 상수는
+    /// `lan::server::PORT` 한 곳에만 있어야 한다).
+    #[test]
+    fn lan_address_carries_the_port_it_is_given() {
+        assert_eq!(
+            lan_address(true, Some("10.0.0.5".into()), 9999),
+            Some("10.0.0.5:9999".to_string())
+        );
+    }
+
+    /// 호출부가 넘기는 포트는 언제나 리스너가 실제로 여는 그 포트다. 둘이 갈라지면
+    /// 패널이 열려 있지 않은 포트를 안내한다.
+    #[test]
+    fn lan_address_uses_the_listener_port_in_production() {
+        assert_eq!(
+            lan_address(true, Some("10.0.0.5".into()), lan::server::PORT),
+            Some(format!("10.0.0.5:{}", lan::server::PORT))
+        );
+    }
+
+    /// 라우팅 가능한 IPv4 가 없으면(랜선이 빠졌다, 기본 경로가 없다) 주소도 없다.
+    /// 여기서 "알 수 없음" 같은 문자열을 만들어 내면 패널이 그것을 주소처럼
+    /// 보여준다 — 없다는 사실은 패널이 자기 문구로 말한다.
+    #[test]
+    fn lan_address_is_none_without_a_routable_ip() {
+        assert_eq!(lan_address(true, None, lan::server::PORT), None);
+    }
 }

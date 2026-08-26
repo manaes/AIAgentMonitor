@@ -101,7 +101,45 @@ pub enum AuthReply {
     Authorized2,
 }
 
+/// 응답 하나가 전송 계층에 알려주는 두 가지 사실.
+///
+/// **세 전송이 각자 판정하지 않는다.** 예전에는 BLE·네트워크·LAN 이 같은
+/// `matches!` 를 각자 베껴 두고 있었고, 그 형태가 정확히 `Granted2` 를 빠뜨리는
+/// 사고를 낳았다 — 빠뜨려도 컴파일되고, 그 세션에서는 멀쩡히 동작하며, 맥을
+/// 재시작해야 드러난다. 판정은 `AuthReply` 를 소유한 이 모듈에 한 벌만 둔다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplySignals {
+    /// 이 응답이 central 을 인가된 상태로 만들었는가. 전송은 이걸 보고
+    /// 스냅샷 경로를 연다.
+    pub authorized: bool,
+    /// **새 토큰이 발급됐는가.** 앱은 이걸 보고 페어링 목록을 디스크에 쓴다.
+    /// 빠뜨리면 그 기기는 맥을 껐다 켜는 순간 영영 재연결하지 못한다.
+    pub granted: bool,
+}
+
 impl AuthReply {
+    /// 이 응답의 의미를 전송이 쓸 수 있는 두 신호로 옮긴다.
+    ///
+    /// `matches!` 가 아니라 **모든 변형을 적는 `match`** 인 것이 요점이다.
+    /// 프로토콜에 응답이 하나 늘면 여기서 컴파일이 깨져 사람이 판정을 다시
+    /// 보게 된다 — `matches!` 는 조용히 `false` 를 돌려준다.
+    pub fn signals(&self) -> ReplySignals {
+        let (authorized, granted) = match self {
+            // 인가 + 새 토큰.
+            AuthReply::Granted { .. } | AuthReply::Granted2 { .. } => (true, true),
+            // 인가만 — 재연결은 이미 아는 토큰을 확인했을 뿐이라 저장할 것이 없다.
+            AuthReply::Authorized | AuthReply::Authorized2 => (true, false),
+            // 아직 핸드셰이크 중이거나 거절이다.
+            AuthReply::AwaitingCode
+            | AuthReply::AwaitingCode2 { .. }
+            | AuthReply::Nonce { .. }
+            | AuthReply::Nonce2 { .. }
+            | AuthReply::Denied { .. }
+            | AuthReply::Rejected => (false, false),
+        };
+        ReplySignals { authorized, granted }
+    }
+
     /// 전송 계층(BLE Auth 특성 notify, 네트워크 제어 스트림)에 그대로 실어
     /// 보낼 JSON 바이트. 두 전송 모두 같은 인증 프로토콜을 쓰므로 응답
     /// 포맷도 여기 한 곳에서만 정의한다 — 하나만 고치고 다른 쪽을 잊는
@@ -1019,6 +1057,57 @@ mod tests {
 
     use crate::crypto::{self, channel::SealedChannel};
     use super::test_client::{epk_and_nonce, hex_encode, V2Client};
+
+    /// 응답 하나하나가 전송에 무엇을 뜻하는지 한자리에서 못박는다. 세 전송이
+    /// 각자 판정하던 것을 여기로 모았으므로, 이 표가 그 유일한 기준이다.
+    /// `signals()` 가 모든 변형을 적는 `match` 라서 응답이 늘면 컴파일이 먼저
+    /// 깨지고, 그다음을 이 표가 잡는다.
+    #[test]
+    fn every_reply_has_signals() {
+        let table = vec![
+            (AuthReply::Granted { token: "t".into() }, true, true),
+            (AuthReply::Granted2 { sealed: "s".into() }, true, true),
+            (AuthReply::Authorized, true, false),
+            (AuthReply::Authorized2, true, false),
+            (AuthReply::AwaitingCode, false, false),
+            (AuthReply::AwaitingCode2 { epk: "e".into(), nonce: "n".into() }, false, false),
+            (AuthReply::Nonce { nonce: "n".into() }, false, false),
+            (AuthReply::Nonce2 { epk: "e".into(), nonce: "n".into() }, false, false),
+            (AuthReply::Denied { left: 2 }, false, false),
+            (AuthReply::Rejected, false, false),
+        ];
+        for (reply, authorized, granted) in table {
+            assert_eq!(
+                reply.signals(),
+                ReplySignals { authorized, granted },
+                "{reply:?} 의 판정이 다르다"
+            );
+        }
+    }
+
+    /// 새 토큰을 발급하는 응답은 정확히 둘이다. 이 성질이 깨지면 어떤 기기는
+    /// 페어링에 성공하고도 토큰이 디스크에 남지 않아 재부팅 후 사라진다.
+    #[test]
+    fn granted_implies_authorized_and_only_grants_carry_a_new_token() {
+        let all = vec![
+            AuthReply::Granted { token: "t".into() },
+            AuthReply::Granted2 { sealed: "s".into() },
+            AuthReply::Authorized,
+            AuthReply::Authorized2,
+            AuthReply::AwaitingCode,
+            AuthReply::AwaitingCode2 { epk: "e".into(), nonce: "n".into() },
+            AuthReply::Nonce { nonce: "n".into() },
+            AuthReply::Nonce2 { epk: "e".into(), nonce: "n".into() },
+            AuthReply::Denied { left: 2 },
+            AuthReply::Rejected,
+        ];
+        let granting: Vec<&AuthReply> = all.iter().filter(|r| r.signals().granted).collect();
+        assert_eq!(granting.len(), 2, "발급 응답은 v1/v2 각각 하나씩뿐이다: {granting:?}");
+        for r in &all {
+            let s = r.signals();
+            assert!(!s.granted || s.authorized, "{r:?}: 발급했는데 인가가 아니다");
+        }
+    }
 
     #[test]
     fn v2_pairing_delivers_the_token_sealed() {

@@ -1,0 +1,2203 @@
+//! LAN 전송 브리지 (스펙 2026-08-25-cyd-client-design.md).
+//!
+//! `network/mod.rs`(iroh)와 같은 표면을 갖는다. WebSocket 연결 하나가 세션
+//! 하나이고 `CentralId` 하나에 대응한다 — BLE 링크와 같은 모델이다. 실제
+//! 리스너는 `server` 가 띄우고, 이 브리지는 "지금 누가 붙어 있고 무엇이
+//! 잘못됐는지"만 안다(BLE 의 `peripheral` / 네트워크의 accept 루프와 같은
+//! 역할 분리).
+
+pub mod discovery;
+pub mod server;
+
+use crate::ble::pairing::{self, PairingManager};
+use crate::ble::peripheral::CentralId;
+use crate::ble::wire::MirrorSnapshot;
+use crate::emitter::EmitGate;
+use crate::types::Snapshot;
+use server::{Outbound, ServerEvent, ServerHandle};
+use std::collections::HashSet;
+use std::time::{Duration, SystemTime};
+use tokio::sync::mpsc::Sender;
+
+/// 미러 갱신 주기. BLE·network 와 같은 값이다 — 두 전송을 나란히 켜고 껐을 때
+/// 체감 차이가 없어야 하고, `server::SINK_QUEUE`(8) 의 "여덟이 밀렸다는 건
+/// 상대가 8초째 읽지 않는다는 뜻" 이라는 계산이 바로 이 1Hz 를 전제한다.
+/// 이 값을 줄이면 그 큐가 뜻하는 시간도 함께 줄어든다.
+const LAN_THROTTLE: Duration = Duration::from_millis(1000);
+
+/// `handle_auth` 한 번의 결과. `network::AuthOutcome` 과 **필드까지 같다** —
+/// 세 전송이 같은 표면을 유지해야 빠진 분기가 눈에 띈다.
+///
+/// `granted` 를 빼고 싶어지는 순간이 온다("LAN 은 v2 전용인데?"). 틀렸다.
+/// v2 페어링도 `Granted2` 로 **새 토큰을 발급**하고, 이 플래그가 호출부가
+/// 그 토큰을 디스크에 쓰는 유일한 신호다. 빠뜨리면 LAN 으로 페어링한 기기가
+/// 그 세션에서는 멀쩡히 동작하다가 맥을 껐다 켜는 순간 토큰이 사라져 영영
+/// 재연결하지 못한다(`ble/mod.rs` 의 같은 주석 참고).
+pub struct AuthOutcome {
+    /// 이 central 에게 그대로 되돌려보낼 바이트. `AuthReply::to_json_bytes()`
+    /// 그대로다 — LAN 만 새 포맷을 만들 이유가 없다.
+    pub payload: Vec<u8>,
+    /// 이 응답이 central 을 인가된 상태로 만들었는가.
+    pub now_authorized: bool,
+    /// 새 토큰이 발급됐는가. 호출부가 페어링 목록을 디스크에 쓴다.
+    pub granted: bool,
+}
+
+impl AuthOutcome {
+    /// 이 결과가 **프론트가 보는 상태**를 바꿨는가.
+    ///
+    /// 바꾸지 않았으면 상태 이벤트를 내보내지 않는다. 프레임은 인증 이전에
+    /// 아무나 보낼 수 있고 소비자 속도에 맞춰 보내면 큐 상한에도 걸리지
+    /// 않으므로, 프레임마다 내보내면 **인증하지 않은 피어가 시간 제한 없이
+    /// 프론트를 계속 다시 그리게** 만들 수 있다. 형제 전송도 이벤트마다
+    /// 내보내지만 거기서 이벤트를 만들려면 근접(BLE)하거나 상대가 걸어와야
+    /// 한다(iroh) — LAN 리스너만 같은 WiFi 의 아무에게나 열려 있다.
+    ///
+    /// 핸드셰이크 중간 응답(`AwaitingCode2`/`Nonce2`)이나 거절은 패널에 보이는
+    /// 것을 아무것도 바꾸지 않는다. 인가와 발급만 바꾼다.
+    pub fn changed_visible_state(&self) -> bool {
+        self.now_authorized || self.granted
+    }
+}
+
+/// LAN 전송이 지금 서비스 중인 central 들과, 사용자에게 보여줄 마지막 오류를
+/// 들고 있는다. `network::NetworkBridge`와 표면을 맞춘 이유는 `lib.rs` 배선을
+/// 세 전송(BLE/network/lan) 모두 같은 모양으로 유지해, 하나만 고치고 다른
+/// 쪽을 잊는 드리프트를 줄이기 위해서다.
+pub struct LanBridge {
+    enabled: bool,
+    /// 현재 붙어 있는 연결들. 서버 이벤트(`apply_event`)가 갱신한다. `network`
+    /// 브리지가 `HashMap<CentralId, SendStream>` 로 도메인 타입을 키로 쓰듯,
+    /// 여기도 `String` 으로 낮추지 않는다 — 실제 송신 자원이 아직 없어 값
+    /// 타입은 `()` 지만, 키 타입까지 낮출 이유는 없다.
+    centrals: HashSet<CentralId>,
+    /// 사용자에게 보여줄 마지막 오류. 이 앱은 로그 파일을 남기지 않으므로
+    /// Devices 패널이 실패 원인(포트 점유·권한 거부 등)을 알 수 있는 유일한
+    /// 경로다.
+    last_error: Option<String>,
+    /// 살아 있는 리스너. `Some` 인 동안만 포트가 열려 있다. 토글을 끄면
+    /// 플래그만 내리는 게 아니라 이 핸들을 내려서 소켓까지 실제로 닫는다.
+    server: Option<ServerHandle>,
+    /// 방금 내린 리스너의 태스크. 다음 리스너가 이것이 끝난 뒤에 bind 하도록
+    /// 넘겨준다 — 끄자마자 켰을 때 우리가 만든 `EADDRINUSE` 를 사용자에게
+    /// 보여주지 않기 위해서다(`ServerHandle::stop` 의 doc).
+    stopping: Option<tokio::task::JoinHandle<()>>,
+    /// 지금까지 띄운 리스너의 수 = 현재 세대 번호. `BindFailed` 가 어느
+    /// 리스너의 것인지 가리는 데 쓴다.
+    generation: u64,
+    /// 서버 태스크가 이벤트를 올릴 통로. 리스너는 켰다 껐다 하지만 이 통로는
+    /// 브리지와 수명을 같이한다 — 배선(`lib.rs`)이 수신 루프를 한 번만 걸면
+    /// 되도록.
+    events: Sender<ServerEvent>,
+    /// 리스너가 붙을 포트. 운영에서는 언제나 `server::PORT` 다.
+    port: u16,
+    /// 미러 갱신 게이트. 앱의 틱은 250ms 인데 미러는 1Hz 로 묶는다
+    /// (`LAN_THROTTLE`). 내용이 그대로면 아예 내보내지 않으므로, 조용한
+    /// 시간에는 봉인 카운터도 전진하지 않는다.
+    gate: EmitGate,
+    /// mDNS 게시기. 운영에서는 진짜 데몬이고 테스트에서는 기록만 하는 가짜다
+    /// (`discovery::Advertiser` 의 doc).
+    advertiser: Box<dyn discovery::Advertiser>,
+    /// 지금 광고 중인가. `enabled` 도 `server.is_some()` 도 아니다 — 왜 셋이
+    /// 다른지는 `advertise` 의 doc.
+    advertising: bool,
+}
+
+impl LanBridge {
+    pub fn new(events: Sender<ServerEvent>) -> Self {
+        Self::with_parts(
+            events,
+            server::PORT,
+            Box::new(discovery::MdnsAdvertiser::default()),
+        )
+    }
+
+    /// 포트와 게시기를 갈아 끼울 수 있는 생성자. 테스트만 쓴다 — 임시 포트로
+    /// 띄우고(서로, 그리고 개발 중인 앱의 4320 을 밟지 않게), 진짜 mDNS 데몬 대신
+    /// 가짜를 넣기 위해서다(`discovery::Advertiser` 의 doc).
+    fn with_parts(
+        events: Sender<ServerEvent>,
+        port: u16,
+        advertiser: Box<dyn discovery::Advertiser>,
+    ) -> Self {
+        Self {
+            enabled: false,
+            centrals: HashSet::new(),
+            last_error: None,
+            server: None,
+            stopping: None,
+            generation: 0,
+            events,
+            port,
+            gate: EmitGate::new(LAN_THROTTLE),
+            advertiser,
+            advertising: false,
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// 지금 **리스너가 실제로 서 있는가**. `is_enabled` 와 갈라진다 —
+    /// `BindFailed` 는 `enabled` 를 켠 채로 `server` 만 `None` 으로 만든다.
+    ///
+    /// 이 신호가 필요한 이유는 `advertise` 의 doc 이 광고에 대해 적어 둔 것과
+    /// 똑같다: 포트가 열리지 않은 맥을 계속 광고하면 CYD 가 죽은 포트를 향해
+    /// 걸어간다. **사람이 주소를 손으로 넣는 길도 향하는 곳은 같은 죽은 포트다** —
+    /// 그래서 패널의 LAN 주소 줄도 토글이 아니라 이것을 따라야 한다
+    /// (`lib.rs` 의 `lan_address`).
+    ///
+    /// 판단의 근거를 `advertising` 이 아니라 `server` 로 두는 것이 중요하다.
+    /// `advertising` 은 mDNS 게시가 시작됐는지까지 함께 뜻하므로, 게시만
+    /// 실패하고 리스너는 멀쩡한 경우에 false 가 된다 — 그런데 그때가 바로
+    /// 손으로 넣는 주소가 **가장 필요한** 순간이다. 그것으로 주소를 감추면
+    /// 이 브랜치가 세워 둔 대비가 통째로 무너진다.
+    ///
+    /// 토글을 켠 직후부터 `Listening`/`BindFailed` 가 올라오기 전까지의 짧은
+    /// 구간에서는 true 다(핸들은 이미 있다). 그 구간의 주소는 "아직 실패했다고
+    /// 알려진 바 없는" 주소이므로 보여주는 쪽이 맞다.
+    pub fn is_listening(&self) -> bool {
+        self.server.is_some()
+    }
+
+    /// BLE·network 브리지와 같은 이유로 상태를 정리한다 — 꺼졌다 켜졌을 때
+    /// 예전 연결이 여전히 붙어 있는 것으로 남지 않게. LAN 공유는 기본 꺼짐이고
+    /// 리스너는 이 토글이 켜져 있는 동안만 존재한다(스펙 4장).
+    ///
+    /// `tokio` 런타임 안에서 불러야 한다 — 여기서 리스너 태스크를 띄운다.
+    pub fn set_enabled(&mut self, on: bool) {
+        if on == self.enabled {
+            return;
+        }
+        self.enabled = on;
+        if on {
+            // 다시 켜는 순간 지난 실패는 더 이상 사실이 아니다. 여기서 지우지
+            // 않으면 사용자가 포트를 비우고 다시 켜도 패널은 계속 예전 오류를
+            // 보여준다 — 고쳤는데 고쳐지지 않은 것처럼 보이는 게 오류를 아예
+            // 안 보여주는 것만큼 나쁘다. 이번 시도도 실패하면 `BindFailed` 가
+            // 곧바로 다시 채운다.
+            self.last_error = None;
+            // 되돌리지 않으면, 꺼져 있는 동안 내용이 그대로였을 때 다시 켠
+            // 기기가 **다음 변화가 생길 때까지** 빈 화면을 본다. 게이트는
+            // "내용이 같으면 안 보낸다"이기 때문이다.
+            //
+            // 다만 `reset()` 이 지우는 것은 `last_hash` 뿐이고 `last_emit_at` 은
+            // 남는다 — 직전 송출로부터 `LAN_THROTTLE`(1초) 안에 다시 켜면 첫
+            // 미러는 여전히 그만큼 밀린다. 실사용에서 재활성화는 bind + 재연결 +
+            // `AUTH2`/`PROOF2` 왕복을 거쳐 1초를 훌쩍 넘으므로 보이지 않지만,
+            // "곧바로"는 아니다.
+            self.gate.reset();
+            self.generation += 1;
+            self.server = Some(server::spawn(
+                self.port,
+                self.events.clone(),
+                self.generation,
+                // 방금 내린 리스너가 있으면 그것이 끝난 뒤에 bind 한다.
+                self.stopping.take(),
+            ));
+        } else {
+            self.centrals.clear();
+            // 꺼진 전송의 오류를 계속 보여줄 이유가 없다 — BLE·network 도 끌 때
+            // 지운다(`lib.rs`). `last_error` 를 브리지가 소유하기로 한 이상 지우는
+            // 책임도 여기 있다. 배선이 기억해야 하는 정리는 언젠가 잊힌다.
+            self.last_error = None;
+            // 광고를 **먼저** 거둔다. 소켓이 닫히기를 기다렸다가 거두면, 그
+            // 사이에 조회한 기기가 방금 사라진 포트를 향해 출발한다.
+            self.advertise(false);
+            if let Some(h) = self.server.take() {
+                self.stopping = Some(h.stop());
+            }
+        }
+    }
+
+    /// mDNS 광고를 켜거나 끈다.
+    ///
+    /// **토글이 아니라 리스너를 따른다.** 둘은 갈라진다: `BindFailed` 는
+    /// `server` 를 `None` 으로 만들면서 `enabled` 는 `true` 로 남긴다(Task 4 에서
+    /// 확인된 동작이다). 광고를 `set_enabled(true)` 에 매달면 포트가 열리지 않은
+    /// 맥이 계속 광고되고, CYD 는 죽은 포트를 향해 걸어간다 — 그리고 그쪽에는
+    /// 무엇이 잘못됐는지 알려 줄 화면이 없다. 사람은 맥 패널에서 빨간 오류를
+    /// 보지만, 기기는 "찾았는데 안 붙는다"만 겪는다.
+    ///
+    /// 그래서 켜는 신호는 `ServerEvent::Listening` 하나뿐이다 — `bind` 가 성공한
+    /// 뒤에만 나가는 통지다. 끄는 신호는 둘: 사용자가 토글을 내렸을 때와, 리스너가
+    /// **뜨지 못했을 때**(`BindFailed`). 뜬 뒤에 죽는 경로는 오늘 없다 — 있었다면
+    /// 그것도 여기로 와야 한다(`apply_event` 의 `BindFailed` 갈래 주석 참고).
+    ///
+    /// 광고 자체가 실패해도 리스너는 살아 있다. 그때는 자동 검색만 없는 것이므로
+    /// LAN 공유를 꺼 버리지 않는다 — 사용자는 IP 를 손으로 넣어 붙을 수 있다.
+    ///
+    /// **다만 그 안내를 오류 문구가 해 줄 것이라고 기대하면 안 된다.** 우리가 실제로
+    /// 알아채는 실패는 게시를 **시작조차 못 한** 경우뿐이고(데몬을 못 띄웠다), 실전에서
+    /// 가장 흔한 실패 — 방화벽이 5353 을 막았다, 게스트 VLAN, 멀티캐스트 금지 — 는
+    /// `mdns-sd 0.21.0` 이 `debug!` 로 삼켜 **아무 신호도 남기지 않는다**
+    /// (`discovery::ErrorSink` 의 doc 에 file:line 까지 적어 뒀다). 그래서 손으로 붙는
+    /// 길은 패널이 LAN 주소를 **리스너가 서 있는 동안 언제나** 보여주는 것으로
+    /// 대비한다(`local_ipv4`, 배선은 Task 6) — 오류가 뜨는 날에만 알려 주는 것으로는
+    /// 부족하다. 「언제나」의 기준이 토글이 아니라 리스너인 이유는 위 규칙과 같다:
+    /// bind 에 실패한 포트를 손으로 넣게 하는 것도 죽은 포트를 광고하는 것과 같은
+    /// 일이다(`is_listening`).
+    ///
+    /// 알아채는 실패는 두 갈래로 온다: `start` 의 `Err`(시작 실패)와 `ErrorSink`
+    /// (시작한 뒤). 사용자에게는 같은 상황이므로 문장은 한 곳에서 만든다
+    /// (`advertise_failure_message`).
+    fn advertise(&mut self, on: bool) {
+        if on == self.advertising {
+            return;
+        }
+        if on {
+            // 늦게 오는 실패를 브리지 상태에 직접 쓰지 않는다 — 그 콜백은 데몬
+            // 스레드에서 불리므로 여기 상태를 만지려면 잠금을 새로 만들어야 하고,
+            // 배선(`lib.rs`)이 패널을 다시 그리는 경로도 놓친다. 이미 있는 이벤트
+            // 통로로 되돌려 `apply_event` 한 곳에서 처리한다.
+            let events = self.events.clone();
+            let generation = self.generation;
+            let sink: discovery::ErrorSink = Box::new(move |message| {
+                if let Err(e) =
+                    events.try_send(ServerEvent::AdvertiseFailed { generation, message })
+                {
+                    // 큐가 가득 찼거나(EVENT_QUEUE 256개가 밀렸다) 통로가 닫혔다.
+                    // 둘 다 이 통지보다 큰 문제가 이미 벌어진 상태다.
+                    tracing::warn!("mDNS 실패를 패널까지 올리지 못했다: {e}");
+                }
+            });
+            if let Err(e) = self.advertiser.start(self.port, sink) {
+                // 여기서 `advertising` 은 false 로 남는다 — 다음 `Listening` 이
+                // 다시 시도한다.
+                self.last_error = Some(advertise_failure_message(&e.to_string()));
+                return;
+            }
+        } else {
+            self.advertiser.stop();
+        }
+        self.advertising = on;
+    }
+
+    /// 이 전송이 지금 서비스 중인 central 목록. BLE·network 의
+    /// `served_centrals`와 같은 목적이다.
+    pub fn served_centrals(&self) -> Vec<CentralId> {
+        self.centrals.iter().cloned().collect()
+    }
+
+    /// 연결이 끊긴 central 의 자원을 정리한다. `network::forget_central` 과
+    /// 같다 — 세션 인가는 앱이 공유 `PairingManager` 에서 지운다.
+    pub fn forget_central(&mut self, central: &CentralId) {
+        self.centrals.remove(central);
+    }
+
+    /// 사용자가 기기를 해제했다(`unpair`/`unpair_all`). 그 central 들의 LAN 세션을
+    /// 끝낸다 — `ble::BleBridge::drop_sessions`·`network::NetworkBridge::drop_sessions`
+    /// 와 **같은 이름·같은 시그니처**다. 앱은 그 central 이 어느 전송에 붙어
+    /// 있었는지 모르는 채로 세 브리지 모두에 같은 목록을 넘긴다.
+    ///
+    /// **목록에서 지우는 것만으로는 부족하다.** 지우면 다음 틱부터 스냅샷이
+    /// 나가지 않지만(`snapshot_targets`) 소켓은 그대로 살아 있다. 게다가 인가된
+    /// 연결은 인증 시한이 이미 걷혀 다시 걸리지 않으므로
+    /// (`server::Deadline::Lift`) 그 연결을 놓아 줄 시간 상한이 아예 없다 —
+    /// 해제된 기기가 `server::MAX_CONNECTIONS`(8) 중 한 자리를 영영 쥐게 된다.
+    /// 그래서 `Outbound::Close` 를 함께 보낸다. 그것이 소켓까지 나가야 연결
+    /// 핸들러가 루프를 빠져나가고 `Slot` 이 떨어져 자리가 돌아온다.
+    ///
+    /// **모르는 id 는 건너뛴다.** 한 사용자가 BLE 로도 network 로도 페어링했을 수
+    /// 있고 `revoke_all` 은 그 전부를 돌려주므로, 이 목록에는 LAN 이 서비스한 적
+    /// 없는 id 가 언제나 섞여 든다. 그런 id 에 `Close` 를 쏘아도 펌프가 버리지만
+    /// (`server::push_to_sink`), 공유 목록에 모르는 id 를 넣지 않는다는 이 모듈의
+    /// 규칙(`sessions_to_end` 의 doc)을 여기서도 지킨다. 다만 건너뛰는 것이
+    /// **루프를 멈추지는 않는다** — 모르는 id 하나가 아는 id 들의 처리를 막으면
+    /// 그것이 바로 이 함수가 고치려는 그 누수다.
+    pub fn drop_sessions(&mut self, ids: &[CentralId]) {
+        for id in ids {
+            if !self.centrals.contains(id) {
+                continue;
+            }
+            // 지우는 뜻이 무엇인지는 `forget_central` 한 곳에만 둔다 — 여기에
+            // 베껴 두면 그쪽이 자라날 때 이쪽만 옛 동작에 남는다.
+            self.forget_central(id);
+            // 리스너가 없으면(토글이 꺼졌다) 보낼 곳이 없다. **이 조합은 실제로
+            // 닿는다** — `set_enabled(false)` 가 `centrals` 를 비우고 핸들을
+            // 내려도, 서버 태스크가 종료되는 동안 늦은 `Connected` 가 올라와
+            // 목록을 다시 채울 수 있고 `apply_event` 는 `enabled` 를 보지 않고
+            // 넣는다(`serves` 의 doc). 그러면 `centrals` 에는 있는데 `server` 는
+            // `None` 이다.
+            if let Some(h) = &self.server {
+                let _ = h.outbound.send(Outbound::Close(id.clone()));
+            }
+        }
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.clone()
+    }
+
+    /// 사용자에게 보여줄 오류를 채우거나 지운다. `BindFailed` 말고도 호출부가
+    /// 이 전송의 실패(토큰 저장 실패 등)를 실어야 할 곳이 있다 — 이 앱은 로그
+    /// 파일을 남기지 않으므로 여기가 사용자가 알 수 있는 유일한 경로다.
+    ///
+    /// **값이 실제로 바뀌었을 때만 `true`.** 호출부는 이걸 보고 프론트에 알릴지
+    /// 정한다 — 같은 오류를 다시 쓰는 것은 사용자에게 새 소식이 아니고, "바뀌지
+    /// 않아도 매번 알린다"는 것이 finding A 에서 고친 바로 그 형태다.
+    pub fn set_last_error(&mut self, msg: Option<String>) -> bool {
+        if self.last_error == msg {
+            return false;
+        }
+        self.last_error = msg;
+        true
+    }
+
+    /// 이 이벤트로 끝나는 세션들. **`apply_event` 보다 먼저** 불러야 한다 —
+    /// `apply_event` 가 먼저 돌면 이 central 은 이미 목록에서 빠져 있어 언제나
+    /// 빈 결과가 나온다(BLE 의 `sessions_to_end_before` 와 같은 순서 규칙).
+    ///
+    /// 인가는 공유 `PairingManager` 가 갖고 있고 이 브리지는 그것을 소유하지
+    /// 않는다. 그래서 "누구의 인가가 끝나야 하는가"라는 **판단만** 여기서 하고,
+    /// 실제 삭제는 호출부가 한다 — 판단을 배선 코드에 두면 테스트가 닿지 않는다.
+    ///
+    /// 우리가 서비스하지 않는 id 는 돌려주지 않는다. LAN 의 id 는 `lan:N` 이라
+    /// 다른 전송과 겹치지 않지만, 공유 매니저를 건드리는 목록에 모르는 id 를
+    /// 넣지 않는다는 규칙 자체를 지킨다.
+    pub fn sessions_to_end(&self, ev: &ServerEvent) -> Vec<CentralId> {
+        match ev {
+            ServerEvent::Disconnected(id) if self.centrals.contains(id) => vec![id.clone()],
+            // 나머지는 세션을 끝내지 않는다: 리스너가 뜨거나(`Listening`) 뜨지
+            // 못한 것(`BindFailed`)은 연결이 아직 없다는 뜻이고, 프레임은 이미
+            // 붙어 있는 연결의 말이다.
+            _ => Vec::new(),
+        }
+    }
+
+    /// 이 전송이 **지금** 이 central 을 서비스하고 있는가. 인증과 스냅샷이
+    /// 공유하는 문이다.
+    ///
+    /// `enabled` 를 따로 보는 이유: `set_enabled(false)` 는 `centrals` 를 비우지만,
+    /// 서버 태스크가 종료되는 동안 직전에 업그레이드된 연결의 `Connected` 가
+    /// 뒤늦게 올라와 목록을 다시 채울 수 있다. 그 이벤트를 버리지 않는 것은
+    /// 일부러다 — 무엇을 기억할지는 이벤트 순서대로 두고, "꺼져 있으면 아무도
+    /// 서비스하지 않는다"는 판단은 쓰는 쪽에서 한 번만 한다.
+    fn serves(&self, central: &CentralId) -> bool {
+        self.enabled && self.centrals.contains(central)
+    }
+
+    /// 인증 프레임 하나를 `PairingManager` 에 그대로 넘기고 응답을 돌려준다.
+    /// I/O 는 없다 — `ble::BleBridge::handle_auth`·`network` 와 마찬가지로
+    /// 동기 상태 기계 호출일 뿐이다.
+    ///
+    /// **우리가 서비스 중인 연결이 아니면 `None` 이고, `pairing` 을 아예 건드리지
+    /// 않는다.** 이 문이 없으면 이미 `Disconnected` 로 정리된(혹은 토글이 꺼져
+    /// 정리된) id 의 프레임이 뒤늦게 처리되면서 **살아 있는 링크가 없는 central 을
+    /// 인가**할 수 있다. 그 인가를 지워 줄 `Disconnected` 는 다시 오지 않으므로
+    /// 링크보다 오래 사는 인가가 남는다 — LAN 리스너가 켜져 있는 한 스냅샷을 받을
+    /// 자격이 있는 유령이다.
+    ///
+    /// v1 이라고 거절하지 않는다. 맥은 두 세대를 모두 받아들이고, 그 판단은
+    /// `PairingManager` 의 것이지 전송의 것이 아니다.
+    pub fn handle_auth(
+        &mut self,
+        central: &CentralId,
+        data: &[u8],
+        now: SystemTime,
+        pairing: &mut PairingManager,
+    ) -> Option<AuthOutcome> {
+        if !self.serves(central) {
+            return None;
+        }
+        let reply = pairing.handle(central, pairing::parse_auth_request(data), now);
+        // 판정은 `AuthReply` 를 소유한 pairing 모듈에 한 벌만 있다 — 세 전송이
+        // 각자 베끼면 한쪽만 고치고 다른 쪽을 잊는다(`ReplySignals` 의 doc).
+        let s = reply.signals();
+        Some(AuthOutcome {
+            payload: reply.to_json_bytes(),
+            now_authorized: s.authorized,
+            granted: s.granted,
+        })
+    }
+
+    /// 인증 응답을 이 central 에게 텍스트 프레임으로 돌려보낸다. 인증 프레임은
+    /// 양방향 모두 텍스트다 — BLE·network 가 쓰는 바이트 그대로이고, 스냅샷만
+    /// 바이너리다(Task 4).
+    ///
+    /// 리스너가 없거나(토글이 꺼졌다) 그 사이 상대가 사라졌으면 조용히
+    /// 버려진다. 상대가 끊은 것은 오류가 아니므로 `last_error` 를 건드리지
+    /// 않는다 — 그 필드는 사용자가 고칠 수 있는 실패만 담는다.
+    pub fn send_auth_reply(&self, central: &CentralId, payload: Vec<u8>) {
+        if let Some(h) = &self.server {
+            let _ = h.outbound.send(Outbound::Text(central.clone(), payload));
+        }
+    }
+
+    /// 이 연결이 인가됐음을 서버에 알린다 — 그래야 서버가 이 연결의 **인증
+    /// 시한**을 걷는다(`server::AUTH_DEADLINE`). 호출부는 `handle_auth` 가
+    /// `now_authorized` 를 세운 바로 그 자리에서 부른다.
+    ///
+    /// 인가 자체는 공유 `PairingManager` 가 갖고 있는데도 서버에 따로 알려야
+    /// 하는 이유는, 연결 핸들러가 그 매니저를 볼 수 없기 때문이다 — 볼 수 있게
+    /// 만들면 연결 태스크 여덟 개가 페어링 잠금을 다투게 된다. 시한이 필요로
+    /// 하는 것은 불리언 하나이므로 그것만 건넨다.
+    ///
+    /// 리스너가 없으면(토글이 꺼졌다) 조용히 버려진다. 그 경우 `handle_auth`
+    /// 도 애초에 아무도 인가하지 않는다(`serves`).
+    pub fn mark_authorized(&self, central: &CentralId) {
+        if let Some(h) = &self.server {
+            let _ = h.outbound.send(Outbound::Authorized(central.clone()));
+        }
+    }
+
+    /// 스냅샷을 보낼 대상. **인가되지 않은 연결은 들어가지 않는다** — 붙어
+    /// 있다는 것과 볼 자격이 있다는 것은 다르다. "누구에게 보낼 수 있는가"는
+    /// 인증의 결론이므로 봉인(`prepare_snapshot`)과 떼어 여기서 정한다.
+    pub fn snapshot_targets(&self, pairing: &PairingManager) -> Vec<CentralId> {
+        self.centrals
+            .iter()
+            .filter(|id| self.serves(id) && pairing.is_authorized(id))
+            .cloned()
+            .collect()
+    }
+
+    /// 스냅샷 틱의 **앞쪽 절반** — 이번 틱에 각 central 에게 나갈 봉인 프레임을
+    /// 만든다. 인가된 central 이 하나도 없거나 꺼져 있으면 빈 목록이다(BLE 의
+    /// "구독자 없으면 직렬화도 안 함" 과 같은 절약).
+    ///
+    /// **쓰기와 나눠 둔 이유는 페어링 잠금 시간이다.** 봉인에는 `&mut
+    /// PairingManager` 가 필요하지만(카운터가 전진한다) 쓰기에는 필요 없다.
+    /// 그래서 호출부는 이 함수까지만 잠금 안에서 부르고, 잠금을 놓은 뒤
+    /// `send_prepared` 를 부른다 — `network::prepare_snapshot` 과 같은 모양이다.
+    ///
+    /// 정직하게 말하면 **LAN 의 쓰기는 오늘 막히지 않는다**(`send_prepared` 의
+    /// doc). 그런데도 같은 모양을 유지하는 이유는 두 가지다: 세 전송의 표면이
+    /// 같아야 배선에서 한쪽만 고치는 드리프트가 눈에 띄고, 봉인과 쓰기가 함수
+    /// 경계로 갈라져 있어야 나중에 이 쓰기가 정말 await 를 타게 되어도 잠금이
+    /// 이미 바깥에 있기 때문이다.
+    ///
+    /// 게이트를 대상 검사 **뒤에** 두는 것은 일부러다. 아무도 없는데 게이트를
+    /// 소비하면, 기기가 붙은 직후의 첫 스냅샷이 "방금 보냈다"는 이유로 밀린다.
+    pub fn prepare_snapshot(
+        &mut self,
+        snap: &Snapshot,
+        now: SystemTime,
+        pairing: &mut PairingManager,
+    ) -> Vec<(CentralId, Vec<u8>)> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        let targets = self.snapshot_targets(pairing);
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        if !self.gate.should_emit(snap, now) {
+            return Vec::new();
+        }
+
+        let json = match serde_json::to_vec(&MirrorSnapshot::from(snap)) {
+            Ok(j) => j,
+            Err(e) => {
+                // `last_error` 에 싣지 않는다 — 그 필드는 사용자가 고칠 수 있는
+                // 실패(포트 점유·권한 거부)만 담는다는 것이 이 모듈의 규칙이고
+                // (`send_auth_reply`·`upgrade` 의 doc), 직렬화 실패는 사용자가
+                // 할 수 있는 일이 없는 우리 쪽 결함이다. 게이트는 이미 "보냈다"로
+                // 커밋했으므로 되돌려 다음 틱에 다시 시도되게 한다.
+                tracing::error!("LAN 스냅샷 직렬화 실패: {e}");
+                self.gate.reset();
+                return Vec::new();
+            }
+        };
+
+        // 봉인은 central 마다 다른 키와 카운터를 쓰므로 프레임도 central 마다
+        // 따로 만든다. 하나가 빠져도 나머지는 그대로 나간다.
+        let mut out = Vec::with_capacity(targets.len());
+        for central in targets {
+            match seal_for(pairing, &central, &json) {
+                Sealed::Frame(frame) => out.push((central, frame)),
+                // 인가가 없는 것은 사고가 아니다 — 방금 해제됐거나 아직 인증
+                // 전이다. 조용히 건너뛴다.
+                Sealed::NotAuthorized => {}
+                // 인가됐는데 봉인 채널이 없다. LAN 클라이언트는 E2EE v2 이후에만
+                // 존재하므로 여기 닿을 기기는 없어야 한다 — 닿았다면 그 자체가
+                // 알아야 할 사실이다(`seal_for` 의 doc).
+                Sealed::NoChannel => tracing::warn!(
+                    id = %central.0,
+                    "LAN 세션에 봉인 채널이 없다 — 평문을 내보내는 대신 건너뛴다"
+                ),
+            }
+        }
+        out
+    }
+
+    /// 스냅샷 틱의 **뒤쪽 절반** — 준비된 프레임을 각 central 의 큐로 넘긴다.
+    /// 페어링 잠금 없이 돈다(`prepare_snapshot` 의 doc).
+    ///
+    /// **여기서 실제로 막히는 일은 없다.** `outbound` 는 무한 채널이라
+    /// `send` 가 기다리지 않는다. 상대가 읽지 않아 밀리는 것은 그 뒤의 central
+    /// 별 큐(`server::SINK_QUEUE`)가 받아 내고, 밀린 연결은 서버가 놓는다 —
+    /// 이 함수는 그 판단을 하지 않는다.
+    ///
+    /// 한 central 의 실패가 다른 central 을 막지 않는다 — central 마다 따로
+    /// 넣고, 버려진 프레임의 카운터는 되돌리지 않는다(`seal_for` 의 doc).
+    ///
+    /// **리스너가 그 사이 내려갔으면 이 배치는 그대로 사라지고, 여기서
+    /// `gate.reset()` 을 부르지 않는다.** `prepare_snapshot` 이 이미 게이트를
+    /// 소비한 뒤인데도 그렇다 — `EmitGate::reset` 의 doc 이 "나가지 못한 프레임은
+    /// **반드시** 되돌려라"라고 적어 둔 것을 알면서 그렇게 하지 않는다:
+    ///
+    /// 그 지침은 **다음 틱이 성공할 수 있는** 일시적 실패를 위한 것이다. 여기는
+    /// 아니다. `self.server` 가 다시 `Some` 이 되는 길은 `set_enabled(true)`
+    /// 하나뿐이고(`BindFailed` 는 `None` 으로 만들 뿐 되살리지 않는다), 그 함수가
+    /// 이미 `gate.reset()` 을 부른다. 즉 여기서 되돌리는 것은 **아무것도 사지
+    /// 못한다**: 리스너가 계속 죽어 있는 동안엔 무엇을 만들어도 배달되지 않고,
+    /// 사용자가 다시 켜는 순간엔 게이트가 어차피 되돌아간다. 되살리는 책임은
+    /// `set_enabled` 한 곳에 둔다.
+    ///
+    /// **비용 쪽 크기는 작다 — 크게 적지 않도록 주의한다.** 되돌린다 해도
+    /// `reset()` 은 `last_hash` 만 지우고 `last_emit_at` 은 남기므로 게이트가
+    /// `LAN_THROTTLE`(1초)을 계속 강제한다. 250ms 틱마다가 아니라 초당 한 번이다.
+    /// 게다가 되돌리지 않아도 **스냅샷 내용이 바뀌는 동안에는 같은 일이 이미
+    /// 일어난다** — `BindFailed` 는 `enabled` 와 `centrals` 를 남기므로 다음 틱의
+    /// 대상 목록이 비지 않고, 내용이 달라졌으면 게이트도 통과해 봉인까지 갔다가
+    /// 여기서 버려진다. 그러니 `reset()` 의 실제 한계 비용은 **내용이 그대로인
+    /// 유휴 구간**에서 초당 한 번이 더해지는 것뿐이다. 판단의 근거는 이 크기가
+    /// 아니라 위 문단의 "아무것도 사지 못한다" 쪽이다.
+    pub async fn send_prepared(&mut self, frames: Vec<(CentralId, Vec<u8>)>) {
+        let Some(h) = &self.server else {
+            return;
+        };
+        for (central, frame) in frames {
+            // 봉인 프레임은 UTF-8 이 아니다 — 반드시 바이너리로 나가야 한다.
+            let _ = h.outbound.send(Outbound::Binary(central, frame));
+        }
+    }
+
+    /// 이 이벤트가 **지금 살아 있는 리스너**의 것인가. 리스너가 없으면(꺼졌거나
+    /// 이미 실패로 내려갔다) 어느 세대의 통지든 반영할 것이 없다.
+    fn is_current_generation(&self, generation: u64) -> bool {
+        self.server.as_ref().map(|h| h.generation) == Some(generation)
+    }
+
+    /// 서버 태스크가 올린 이벤트를 상태에 반영한다. 배선(`lib.rs`)에 흩어 두지
+    /// 않고 여기에 모은 이유는, "무엇을 기억하고 무엇을 잊을지"가 이 브리지의
+    /// 결정이기 때문이다 — 연결 코드 안에 두면 테스트가 닿지 않는다.
+    pub fn apply_event(&mut self, ev: &ServerEvent) {
+        match ev {
+            ServerEvent::Listening { generation } => {
+                // 낡은 세대의 통지는 지금의 사실이 아니다 — `BindFailed` 와 같은
+                // 이유다. 토글이 꺼져 있으면 `server` 가 `None` 이라 이 검사가
+                // 곧바로 걸러 낸다: **꺼진 전송은 광고하지 않는다.**
+                if !self.is_current_generation(*generation) {
+                    return;
+                }
+                self.advertise(true);
+            }
+            ServerEvent::AdvertiseFailed { generation, message } => {
+                // 낡은 세대의 데몬이 늦게 올린 실패는 지금의 광고를 탓하는 것이
+                // 아니다. **꺼진 뒤에 도착한 실패도 이 검사 하나로 함께 걸러진다** —
+                // 광고를 거두는 길은 둘뿐이고(`advertise` 의 doc) 둘 다 같은 자리에서
+                // `server` 를 떨어뜨리므로, "광고는 없는데 세대는 살아 있다"는 상태가
+                // 만들어지지 않는다. 그것이 중요한 이유는 끌 때 `last_error` 를
+                // 비우기 때문이다 — 여기서 되살리면 꺼진 전송이 오류를 달고 있게 된다.
+                //
+                // `|| !self.advertising` 을 덧붙이고 싶어지지만 넣지 않았다. 위
+                // 이유로 오늘 그 조건은 한 번도 참이 되지 않고, 뮤테이션으로도
+                // 확인했다(지워도 죽는 테스트가 없다).
+                if !self.is_current_generation(*generation) {
+                    return;
+                }
+                self.last_error = Some(advertise_failure_message(message));
+                // **`advertising` 은 그대로 둔다.** 이 플래그가 뜻하는 것은 "레코드가
+                // 지금 망에 닿고 있다"가 아니라 "거두어야 할 게시기를 들고 있다"이고,
+                // 데몬은 여전히 살아 있다(막힌 인터페이스가 돌아오면 다시 닿는다).
+                // false 로 내리면 `set_enabled(false)` 가 `stop()` 을 건너뛰어 데몬이
+                // 그대로 남는다.
+            }
+            ServerEvent::Connected(id) => {
+                self.centrals.insert(id.clone());
+            }
+            ServerEvent::Disconnected(id) => self.forget_central(id),
+            ServerEvent::BindFailed { generation, message } => {
+                // 낡은 세대의 실패는 지금의 사실이 아니다. 이 문이 없으면
+                // 이벤트가 한 사이클만 밀려도 **정상적으로 뜬 리스너를 죽인다**:
+                // 핸들을 떨어뜨리면 watch 송신자가 사라지고, `wait_shutdown` 은
+                // 그것을 종료로 해석해 멀쩡한 소켓을 닫는다. 남는 상태는
+                // "켜져 있는데 리스너는 없고 화면에는 옛날 오류" 다.
+                if !self.is_current_generation(*generation) {
+                    return;
+                }
+                self.last_error = Some(message.clone());
+                // 바인딩에 실패했으면 리스너는 없다. 핸들을 계속 들고 있으면
+                // 상태가 "켜져 있고 서버도 있다"로 보여 실제와 어긋난다.
+                self.server = None;
+                // 리스너가 없으면 광고도 없다. **오늘 이 자리에서 실제로 거두는
+                // 일은 일어나지 않는다** — `BindFailed` 와 `Listening` 은 한 세대에
+                // 함께 오지 않으므로(bind 는 성공하거나 실패하거나 하나다) 여기서
+                // `advertising` 은 언제나 false 이고 `advertise` 가 곧바로
+                // 돌아간다. 그래도 적어 두는 이유는 "리스너가 없다"와 "광고를
+                // 거둔다"가 갈라져 있으면, 리스너가 뜬 **뒤에** 죽는 경로가 생기는
+                // 날 광고만 살아남기 때문이다. 규칙을 상태를 바꾸는 자리에 붙여
+                // 둔다.
+                self.advertise(false);
+            }
+            // 프레임은 세션 목록을 바꾸지 않는다. 해석은 `handle_auth` 가
+            // 하고, 그 결과(인가)는 공유 `PairingManager` 에 남는다.
+            ServerEvent::Frame { .. } => {}
+        }
+    }
+}
+
+/// 게시 실패를 사용자에게 보여줄 문장으로 만든다.
+///
+/// **"실패했습니다"에서 끝나면 사용자가 할 수 있는 일이 없다.** LAN 공유 자체는
+/// 살아 있으므로 손으로 붙는 길을 함께 말한다 — 그 길이 있는데도 말하지 않으면
+/// 사용자는 전송이 통째로 망가진 줄 알고 포기한다.
+///
+/// 함수로 뽑아 둔 이유는 실패가 **두 갈래**로 들어오기 때문이다(`advertise` 의
+/// doc). 사용자에게는 같은 상황이므로 문장이 갈라지면 안 된다.
+fn advertise_failure_message(cause: &str) -> String {
+    format!("자동 검색 게시에 실패했습니다 — 기기에 IP 를 직접 넣으세요: {cause}")
+}
+
+/// 봉인 지점이 이 central 에 대해 내린 판단.
+///
+/// **왜 `Option` 이 아닌가.** 바이트가 나가지 않는 이유가 둘인데 그 둘의 뜻이
+/// 정반대다. `NotAuthorized` 는 평범한 일상이고(아직 인증 전이거나 방금
+/// 해제됐다), `NoChannel` 은 LAN 에서 일어나면 안 되는 조합이다. `Option` 으로
+/// 뭉치면 둘이 구분되지 않고, 구분되지 않으면 **인가 검사를 지워도 결과가
+/// 똑같아 보인다** — 실제로 리뷰가 그 세 줄을 지우고 전체 스위트를 통과시켰다.
+/// 지금 이 열거형이 그 변형을 잡는다.
+#[derive(Debug, PartialEq, Eq)]
+enum Sealed {
+    /// 봉인된 프레임(`counter || ciphertext || tag`). 이대로 나간다.
+    Frame(Vec<u8>),
+    /// 인가되지 않았다 — 0바이트.
+    NotAuthorized,
+    /// 인가는 됐는데 봉인 채널이 없다(= v1 세션) — 역시 0바이트.
+    NoChannel,
+}
+
+/// 이 central 에게 무엇을 보낼지 정한다. 나갈 바이트를 만드는 **유일한 지점**이고,
+/// 그래서 스스로 닫혀 있어야 한다. 로그를 남기지 않는 순수한 판단이다 — 흔적은
+/// 부르는 쪽이 남긴다.
+///
+/// **인가 검사가 여기 또 있는 이유.** `snapshot_targets` 가 이미 걸렀다. 그래도
+/// 다시 보는 것은, 형제 전송에서 정확히 이 검사가 없어서 언페어링과 스냅샷 틱이
+/// 겹치는 창에 **방금 해제한 기기에게 평문 JSON** 이 나갔기 때문이다
+/// (`network::snapshot_line` 의 doc). 지금 LAN 에는 대상 선정과 봉인 사이에
+/// await 가 없어 그 창이 없다 — 그래서 이 검사는 오늘 **바이트를 바꾸지 않는다**
+/// (인가가 사라질 때 `end_session` 이 채널도 함께 지우므로 아래 `NoChannel`
+/// 갈래로도 0바이트가 된다). 검사가 지키는 것은 바이트가 아니라 **판단의
+/// 독립성**이다: 이 지점이 "인가되지 않았다"를 스스로 알고 있어야, 두 맵의
+/// 수명이 같다는 우연이 깨져도 결론이 따라 바뀌지 않는다. `drop_sessions` 가
+/// 배선된 지금도 그 창은 열리지 않는데(해제는 `revoke_peer` 가 **먼저** 인가를
+/// 지우고 나서 세 브리지를 도는 순서다), 그 순서가 바뀌는 날에도 이 지점의
+/// 결론은 그대로여야 한다.
+///
+/// **v1 세션에는 아무것도 보내지 않는다.** 형제 전송은 채널이 없으면 평문 JSON
+/// 을 보낸다 — BLE 는 10m 안에서, iroh 는 상대가 걸어온 QUIC 위에서다. LAN 은
+/// 망 전체에 열려 있고, 이 전송이 받아들여진 근거 자체가 "미러가 봉인돼 있어
+/// 같은 WiFi 의 다른 기기가 읽을 수 없다"였다(스펙 7.2). 그러니 여기서 평문으로
+/// 떨어지는 것은 전환기 호환이 아니라 downgrade 다. 세대 정책은 여전히
+/// `PairingManager` 가 정한다 — v1 로 붙는 것을 이 전송이 막지는 않는다
+/// (`handle_auth` 의 doc). 다만 **그 세션에 평문을 실어 보내지는 않는다.**
+///
+/// **카운터는 되돌리지 않는다.** `Frame` 이 만들어진 순간 `(키, 논스)` 한 쌍이
+/// 소비된다. 그 프레임이 끝내 나가지 못해도 다음 프레임은 다음 카운터를 쓴다 —
+/// 수신 측은 카운터의 빈 칸을 견디지만(`SealedChannel::open`), 같은 논스를 두 번
+/// 쓰는 것은 ChaCha20-Poly1305 에서 회복 불가능한 사고다.
+fn seal_for(pairing: &mut PairingManager, central: &CentralId, json: &[u8]) -> Sealed {
+    if !pairing.is_authorized(central) {
+        return Sealed::NotAuthorized;
+    }
+    match pairing.channel_mut(central) {
+        Some(ch) => Sealed::Frame(ch.seal(json)),
+        None => Sealed::NoChannel,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ble::pairing::test_client::{self, hex_encode, V2Client};
+    use crate::ble::pairing::AuthReply;
+    use crate::crypto::{self, channel::SealedChannel};
+    use crate::types::{
+        ActivityStatus, AgentKind, AgentState, ProjectActivity, TokenCounts,
+    };
+    use std::path::PathBuf;
+    use std::time::UNIX_EPOCH;
+    use tokio::sync::mpsc::{channel, Receiver};
+
+    fn t(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    /// 광고 호출을 기록만 하는 가짜 게시기.
+    ///
+    /// 진짜 데몬을 띄우면 `cargo test` 가 **개발자의 망에 이 맥을 실제로
+    /// 광고한다** — 게다가 테스트마다 스레드와 멀티캐스트 소켓이 하나씩 는다.
+    /// 여기서 봐야 하는 것은 데몬이 아니라 "언제 켜고 언제 끄는가"라는 브리지의
+    /// 판단이다(`LanBridge::advertise`).
+    #[derive(Debug, PartialEq, Eq, Clone)]
+    enum Ad {
+        Start(u16),
+        Stop,
+    }
+
+    #[derive(Default)]
+    struct AdLog {
+        calls: Vec<Ad>,
+        /// 게시를 **시작조차** 못 하는 상황(데몬 스레드를 못 띄웠다)을 흉내 낸다.
+        fail: bool,
+        /// 시작한 뒤에 실패를 알릴 통로. 진짜 게시기에서는 데몬 스레드가 이걸
+        /// 부른다 — 테스트는 원하는 시점에 직접 불러 **비동기 실패**를 만든다.
+        /// 이 통로가 가짜에도 있어야 하는 이유: 없으면 실전에서 가장 흔한 실패
+        /// 경로가 그대로 테스트 사각지대에 들어간다.
+        sink: Option<discovery::ErrorSink>,
+    }
+
+    /// 브리지가 하나를 들고 테스트가 같은 것을 들여다본다.
+    #[derive(Clone, Default)]
+    struct FakeAdvertiser(std::sync::Arc<std::sync::Mutex<AdLog>>);
+
+    impl FakeAdvertiser {
+        fn calls(&self) -> Vec<Ad> {
+            self.0.lock().unwrap().calls.clone()
+        }
+        /// 다음 `start` 가 곧바로 실패한다.
+        fn fail_next(&self) {
+            self.0.lock().unwrap().fail = true;
+        }
+        /// 이미 시작한 게시가 **나중에** 실패했다고 알린다.
+        fn fail_after_start(&self, cause: &str) {
+            let sink = self.0.lock().unwrap().sink.take();
+            let sink = sink.expect("start 가 통로를 넘겨주지 않았다");
+            sink(cause.to_string());
+            self.0.lock().unwrap().sink = Some(sink);
+        }
+    }
+
+    impl discovery::Advertiser for FakeAdvertiser {
+        fn start(&mut self, port: u16, on_error: discovery::ErrorSink) -> anyhow::Result<()> {
+            let mut g = self.0.lock().unwrap();
+            g.calls.push(Ad::Start(port));
+            if g.fail {
+                anyhow::bail!("데몬을 띄우지 못했다");
+            }
+            g.sink = Some(on_error);
+            Ok(())
+        }
+        fn stop(&mut self) {
+            let mut g = self.0.lock().unwrap();
+            g.calls.push(Ad::Stop);
+            // 거둔 게시의 통로는 더 이상 유효하지 않다. 진짜 게시기에서는 데몬이
+            // 내려가면서 감시 스레드가 끝나는 것에 해당한다.
+            g.sink = None;
+        }
+    }
+
+    /// 테스트는 임시 포트(0)로 띄운다 — 서로, 그리고 개발 중인 앱의 4320 을
+    /// 밟지 않기 위해서다. 실제 포트가 열리고 닫히는지는 `server` 쪽 테스트가 본다.
+    fn bridge() -> (LanBridge, Receiver<ServerEvent>) {
+        let (b, rx, _ads) = bridge_on(0);
+        (b, rx)
+    }
+
+    /// 광고까지 들여다보는 브리지. 포트를 받는 이유는 "광고한 포트가 bind 한
+    /// 포트인가"를 볼 수 있어야 하기 때문이다.
+    fn bridge_on(port: u16) -> (LanBridge, Receiver<ServerEvent>, FakeAdvertiser) {
+        let (tx, rx) = channel(server::EVENT_QUEUE);
+        let ads = FakeAdvertiser::default();
+        let b = LanBridge::with_parts(tx, port, Box::new(ads.clone()));
+        (b, rx, ads)
+    }
+
+    /// 지금 살아 있는 리스너가 떴다는 통지.
+    fn listening_now(b: &LanBridge) -> ServerEvent {
+        ServerEvent::Listening { generation: b.generation }
+    }
+
+    /// 다음 이벤트를 **브리지에 먹이면서** 가져온다. `Listening` 은 반영한 뒤
+    /// 건너뛴다 — 배선(`lib.rs`)이 모든 이벤트를 `apply_event` 에 넘기는 것과 같은
+    /// 모양이고, 그래야 아래 소켓 테스트들이 리스너가 뜬 뒤의 상태에서 시작한다.
+    async fn next_applied(b: &mut LanBridge, rx: &mut Receiver<ServerEvent>) -> ServerEvent {
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("이벤트가 오지 않았다")
+                .expect("이벤트 통로가 닫혔다");
+            b.apply_event(&ev);
+            if !matches!(ev, ServerEvent::Listening { .. }) {
+                return ev;
+            }
+        }
+    }
+
+    #[test]
+    fn starts_disabled() {
+        let (b, _rx) = bridge();
+        assert!(!b.is_enabled(), "LAN 공유는 기본 꺼짐이다");
+        assert!(b.server.is_none(), "켜기 전에는 리스너가 없어야 한다");
+    }
+
+    #[tokio::test]
+    async fn toggling_on_and_off_is_idempotent() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        b.set_enabled(true);
+        assert!(b.is_enabled());
+        b.set_enabled(false);
+        b.set_enabled(false);
+        assert!(!b.is_enabled());
+    }
+
+    #[test]
+    fn has_no_centrals_when_disabled() {
+        let (b, _rx) = bridge();
+        assert!(b.served_centrals().is_empty());
+    }
+
+    /// 끄면 리스너 핸들이 사라져야 한다. 플래그만 내리고 핸들을 들고 있으면
+    /// 소켓은 계속 열려 있다.
+    #[tokio::test]
+    async fn disabling_drops_the_listener() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        assert!(b.server.is_some(), "켜면 리스너가 있어야 한다");
+        b.set_enabled(false);
+        assert!(b.server.is_none(), "끄면 리스너 핸들도 없어야 한다");
+    }
+
+    #[test]
+    fn connecting_and_disconnecting_tracks_that_central_only() {
+        let (mut b, _rx) = bridge();
+        let a = server::central_id(0);
+        let c = server::central_id(1);
+
+        b.apply_event(&ServerEvent::Connected(a.clone()));
+        b.apply_event(&ServerEvent::Connected(c.clone()));
+        assert_eq!(b.served_centrals().len(), 2);
+
+        // 하나가 끊겼다고 나머지까지 내려가면 안 된다 — `set_enabled(false)` 만이
+        // 전부를 비운다.
+        b.apply_event(&ServerEvent::Disconnected(a.clone()));
+        assert_eq!(b.served_centrals(), vec![c]);
+    }
+
+    #[test]
+    fn forgetting_an_unknown_central_is_harmless() {
+        let (mut b, _rx) = bridge();
+        b.apply_event(&ServerEvent::Disconnected(server::central_id(42)));
+        assert!(b.served_centrals().is_empty());
+    }
+
+    /// 프레임은 아직 이 브리지의 관심사가 아니다 — 세션 목록을 건드리면 안 된다.
+    #[test]
+    fn a_frame_does_not_invent_a_session() {
+        let (mut b, _rx) = bridge();
+        b.apply_event(&ServerEvent::Frame {
+            id: server::central_id(0),
+            text: "AUTH:...".to_string(),
+        });
+        assert!(b.served_centrals().is_empty());
+    }
+
+    /// 지금 살아 있는 리스너의 바인딩 실패. 세대를 브리지에서 읽어 오므로
+    /// "몇 번째 리스너인가"를 테스트가 세고 있을 필요가 없다.
+    fn bind_failed_now(b: &LanBridge) -> ServerEvent {
+        ServerEvent::BindFailed {
+            generation: b.generation,
+            message: "포트 4320 이 이미 쓰이는 중".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bind_failure_becomes_the_error_the_panel_shows() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        assert!(b.last_error().is_none());
+        b.apply_event(&bind_failed_now(&b));
+        assert_eq!(b.last_error().as_deref(), Some("포트 4320 이 이미 쓰이는 중"));
+    }
+
+    /// **패널의 주소 줄이 토글을 따르면 안 되는 이유.** `BindFailed` 는 사용자가
+    /// 켠 토글은 그대로 두고 리스너만 없앤다 — 즉 `is_enabled` 와 `is_listening`
+    /// 은 실제로 갈라진다. 토글을 보고 주소를 보여주면 패널이 "포트를 열지
+    /// 못했습니다"와 "이 주소를 직접 넣으세요"를 같은 화면에서 동시에 말하고,
+    /// 그 주소가 가리키는 곳은 **열려 있지 않은 포트**다. 광고가 같은 이유로 이미
+    /// 리스너를 따르고 있다(`advertise` 의 doc). 주소를 쓰는 쪽은
+    /// `lib.rs` 의 `lan_address` 다.
+    #[tokio::test]
+    async fn bind_failure_takes_the_listener_down_but_leaves_the_toggle_on() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        assert!(b.is_listening(), "켠 직후에는 리스너 핸들이 있다");
+        b.apply_event(&bind_failed_now(&b));
+        assert!(b.is_enabled(), "사용자가 켠 토글은 그대로 남는다");
+        assert!(!b.is_listening(), "bind 에 실패했으면 리스너는 없다");
+    }
+
+    /// 오류를 채우기만 하고 지우지 않으면, 사용자가 원인을 고치고 다시 켜도
+    /// 패널이 계속 예전 실패를 보여준다. 켜는 쪽이 반드시 지워야 한다.
+    #[tokio::test]
+    async fn restarting_clears_a_stale_bind_failure() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        b.apply_event(&bind_failed_now(&b));
+        assert!(b.last_error().is_some());
+
+        b.set_enabled(false);
+        b.set_enabled(true);
+        assert!(b.last_error().is_none(), "다시 켰으면 지난 실패는 사실이 아니다");
+    }
+
+    /// 끄면 오류도 사실이 아니게 된다 — 꺼진 전송의 실패를 계속 보여줄 이유가
+    /// 없다. BLE·network 는 끌 때 지운다(`lib.rs`). `last_error` 를 브리지가
+    /// 소유하기로 한 이상 지우는 책임도 브리지에 있다.
+    #[tokio::test]
+    async fn disabling_clears_the_error_too() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        b.apply_event(&bind_failed_now(&b));
+        assert!(b.last_error().is_some());
+
+        b.set_enabled(false);
+        assert!(b.last_error().is_none(), "꺼진 전송의 실패를 계속 보여주면 안 된다");
+    }
+
+    /// 켜져 있는 상태에서 다시 `set_enabled(true)` 를 부르는 건 아무 일도
+    /// 하지 않는다 — 재시작이 아니므로 오류도 지우면 안 된다. 지워버리면
+    /// 방금 실패한 서버가 정상인 것처럼 보인다.
+    #[tokio::test]
+    async fn a_redundant_enable_does_not_hide_a_live_failure() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        b.apply_event(&bind_failed_now(&b));
+        b.set_enabled(true);
+        assert!(b.last_error().is_some());
+    }
+
+    /// **낡은 세대의 실패는 지금 리스너를 죽이면 안 된다.** 이벤트가 한 사이클만
+    /// 밀려도(Task 3 의 소비자는 이벤트마다 락을 잡는다) 껐다 켠 뒤에 도착할 수
+    /// 있고, 그때 핸들을 떨어뜨리면 watch 송신자가 사라져 **정상 동작 중인
+    /// 소켓이 닫힌다** — 남는 상태는 "켜져 있는데 리스너 없음 + 옛 오류".
+    #[tokio::test]
+    async fn a_stale_bind_failure_does_not_kill_the_live_listener() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        let stale = bind_failed_now(&b); // 세대 1 의 실패
+        b.set_enabled(false);
+        b.set_enabled(true); // 세대 2 가 정상적으로 떴다
+
+        b.apply_event(&stale);
+
+        assert!(b.server.is_some(), "낡은 통지가 살아 있는 리스너를 내렸다");
+        assert!(b.last_error().is_none(), "낡은 실패를 지금 사실처럼 보여주면 안 된다");
+    }
+
+    /// 꺼져 있을 때 도착한 실패도 반영하지 않는다 — 리스너가 없으니 어느
+    /// 세대의 통지든 지금의 사실이 아니다.
+    #[tokio::test]
+    async fn a_bind_failure_after_the_toggle_went_off_is_ignored() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        let ev = bind_failed_now(&b);
+        b.set_enabled(false);
+
+        b.apply_event(&ev);
+        assert!(b.last_error().is_none());
+    }
+
+    /// 세대 판정 자체. `apply_event` 를 거치지 않고 판단만 본다.
+    #[tokio::test]
+    async fn only_the_live_listeners_generation_counts() {
+        let (mut b, _rx) = bridge();
+        assert!(!b.is_current_generation(0), "리스너가 없으면 어느 세대도 아니다");
+
+        b.set_enabled(true);
+        let g = b.generation;
+        assert!(b.is_current_generation(g));
+        assert!(!b.is_current_generation(g - 1));
+        assert!(!b.is_current_generation(g + 1));
+    }
+
+    // --- mDNS 광고 (Task 5) ---
+
+    /// **광고는 토글이 아니라 리스너를 따른다.** 토글을 켠 것만으로 광고하면, bind
+    /// 가 아직 끝나지도 않은(혹은 실패할) 포트가 이미 광고된 상태가 된다.
+    #[tokio::test]
+    async fn the_toggle_alone_does_not_advertise() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+
+        assert!(!b.advertising, "bind 성공 전에 광고하면 안 된다");
+        assert_eq!(ads.calls(), vec![], "게시기를 건드리지도 않는다");
+    }
+
+    /// 리스너가 실제로 떴다는 통지가 광고를 켠다. 광고에 실리는 포트는 **그
+    /// 리스너가 잡은 포트**여야 한다 — 다른 포트를 광고하면 CYD 는 찾자마자 막힌다.
+    #[tokio::test]
+    async fn a_live_listener_starts_the_advertisement() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+
+        assert!(b.advertising);
+        assert_eq!(ads.calls(), vec![Ad::Start(0)]);
+    }
+
+    /// 운영 브리지가 쓰는 포트. 위 테스트가 "광고한 포트 = 브리지의 포트"를
+    /// 보고(`Ad::Start(0)`), 여기가 "브리지의 포트 = 스펙의 4320"을 본다 — 둘을
+    /// 이으면 광고에 실리는 것이 실제로 열리는 포트다.
+    #[test]
+    fn a_production_bridge_uses_the_spec_port() {
+        let (tx, _rx) = channel(server::EVENT_QUEUE);
+        let b = LanBridge::new(tx);
+        assert_eq!(b.port, server::PORT);
+    }
+
+    /// **bind 실패는 광고를 만들지 않는다.** `BindFailed` 는 `enabled` 를 켠 채로
+    /// 리스너만 없애므로, 광고를 토글에 매달았다면 여기서 죽은 포트가 계속
+    /// 광고된다 — CYD 는 맥을 찾아내고, 걸어가고, 붙지 못한다.
+    #[tokio::test]
+    async fn a_bind_failure_leaves_nothing_advertised() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&bind_failed_now(&b));
+
+        assert!(b.is_enabled(), "토글은 그대로 켜져 있다 — 그것이 이 테스트의 전제다");
+        assert!(b.server.is_none());
+        assert!(!b.advertising, "리스너가 없는데 광고가 남았다");
+        assert_eq!(ads.calls(), vec![], "게시기를 건드리지도 않는다");
+    }
+
+    /// 토글을 내리면 광고도 거둔다. 거두지 않으면 사용자가 껐다고 믿는 맥이
+    /// 계속 같은 망에 자기를 알린다.
+    #[tokio::test]
+    async fn disabling_takes_the_advertisement_down() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+        b.set_enabled(false);
+
+        assert!(!b.advertising);
+        assert_eq!(ads.calls(), vec![Ad::Start(0), Ad::Stop]);
+    }
+
+    /// 껐다 켜면 다시 광고한다 — 한 번 거둔 뒤 되살아나지 않으면 두 번째부터는
+    /// 기기가 맥을 찾지 못한다.
+    #[tokio::test]
+    async fn re_enabling_advertises_again() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+        b.set_enabled(false);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+
+        assert!(b.advertising);
+        assert_eq!(ads.calls(), vec![Ad::Start(0), Ad::Stop, Ad::Start(0)]);
+    }
+
+    /// 낡은 세대의 `Listening` 은 지금의 사실이 아니다. 이벤트가 한 사이클 밀린
+    /// 사이에 껐다 켜면, 죽은 리스너의 통지가 새 리스너의 광고인 척 도착한다.
+    #[tokio::test]
+    async fn a_stale_listening_notice_does_not_advertise() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        let stale = listening_now(&b); // 세대 1
+        b.set_enabled(false);
+        b.set_enabled(true); // 세대 2 는 아직 뜨지 않았다
+
+        b.apply_event(&stale);
+
+        assert!(!b.advertising, "낡은 통지가 광고를 켰다");
+        assert_eq!(ads.calls(), vec![]);
+    }
+
+    /// 토글이 꺼진 뒤에 도착한 통지도 마찬가지다. **꺼진 전송은 광고하지
+    /// 않는다** — LAN 공유는 기본 꺼짐이고, 광고는 이 맥을 망 전체에 알리는
+    /// 일이라 사용자가 켜기 전에 일어나면 안 된다.
+    #[tokio::test]
+    async fn a_listening_notice_after_the_toggle_went_off_is_ignored() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        let ev = listening_now(&b);
+        b.set_enabled(false);
+
+        b.apply_event(&ev);
+
+        assert!(!b.advertising);
+        assert_eq!(ads.calls(), vec![], "켠 적 없는 광고를 거두는 일도 없다");
+    }
+
+    /// 갓 만든 브리지는 아무것도 광고하지 않는다. 켜기 전에 광고가 나가면 LAN
+    /// 공유가 기본 꺼짐이라는 약속이 깨진다.
+    #[test]
+    fn a_fresh_bridge_advertises_nothing() {
+        let (b, _rx, ads) = bridge_on(0);
+        assert!(!b.advertising);
+        assert_eq!(ads.calls(), vec![]);
+    }
+
+    /// 광고에 실패해도 리스너는 살아 있다 — LAN 공유 자체는 동작한다. 그래서
+    /// 토글을 되돌리지 않고, 대신 **무엇을 하면 되는지** 를 패널에 적는다. IP 를
+    /// 손으로 넣는 길이 남아 있는데 "실패"만 보여주면 사용자는 포기한다.
+    #[tokio::test]
+    async fn a_failed_advertisement_tells_the_user_the_manual_way() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        ads.fail_next();
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+
+        assert!(!b.advertising, "실패했으면 광고 중이라고 기억하면 안 된다");
+        assert!(b.is_enabled(), "광고가 실패해도 LAN 공유는 계속된다");
+        assert!(b.server.is_some(), "리스너까지 내리면 안 된다");
+        let msg = b.last_error().expect("사용자가 알 유일한 경로다");
+        assert!(msg.contains("IP"), "손으로 넣는 길을 말해야 한다: {msg}");
+    }
+
+    /// 채널에서 `AdvertiseFailed` 하나를 꺼낸다. 앞에 진짜 리스너의 `Listening` 이
+    /// 섞여 들어오므로 걸러 낸다.
+    async fn next_advertise_failure(rx: &mut Receiver<ServerEvent>) -> ServerEvent {
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("게시 실패 통지가 오지 않았다")
+                .expect("이벤트 통로가 닫혔다");
+            if matches!(ev, ServerEvent::AdvertiseFailed { .. }) {
+                return ev;
+            }
+        }
+    }
+
+    /// 게시가 `start` 이후에 실패했다고 알려 오는 경우, 그것이 사용자에게 닿아야
+    /// 한다. 브리지 쪽 절반을 여기서 본다.
+    ///
+    /// **이 테스트가 증명하지 않는 것**: 진짜 데몬이 그런 통지를 낸다는 것. 오늘
+    /// `mdns-sd 0.21.0` 은 우리가 겪을 실패에서 통지를 내지 않는다
+    /// (`discovery::ErrorSink` 의 doc). 여기서 고정하는 것은 "통지가 온다면 브리지가
+    /// 무엇을 하는가"이고, 원래 비어 있던 곳도 그 절반이다.
+    #[tokio::test]
+    async fn a_daemon_that_fails_after_starting_still_reaches_the_user() {
+        let (mut b, mut rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+        assert!(b.advertising);
+        assert!(b.last_error().is_none(), "여기까지는 조용한 것이 맞다");
+
+        // 데몬은 떴는데 멀티캐스트가 막혔다.
+        ads.fail_after_start("multicast not permitted");
+
+        let ev = next_advertise_failure(&mut rx).await;
+        b.apply_event(&ev);
+
+        let msg = b.last_error().expect("이 실패가 사용자에게 닿아야 한다");
+        assert!(msg.contains("IP"), "손으로 넣는 길을 말해야 한다: {msg}");
+        assert!(
+            msg.contains("multicast not permitted"),
+            "원인을 실어야 한다 — 이 앱은 로그를 남기지 않는다: {msg}"
+        );
+        assert!(b.is_enabled(), "게시가 실패해도 LAN 공유는 계속된다");
+        assert!(b.server.is_some(), "리스너까지 내리면 안 된다");
+    }
+
+    /// 늦게 오는 실패도 게시기를 놓지 않는다. `advertising` 을 내리면
+    /// `set_enabled(false)` 가 `stop()` 을 건너뛰어 **데몬이 그대로 남는다** —
+    /// 사용자가 껐다고 믿는 맥이 계속 자기를 알리게 된다.
+    #[tokio::test]
+    async fn a_late_failure_still_leaves_something_to_take_down() {
+        let (mut b, mut rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+        ads.fail_after_start("interface went away");
+        let ev = next_advertise_failure(&mut rx).await;
+        b.apply_event(&ev);
+
+        assert!(b.advertising, "거두어야 할 게시기는 그대로 있다");
+        b.set_enabled(false);
+        assert_eq!(ads.calls(), vec![Ad::Start(0), Ad::Stop]);
+    }
+
+    /// 낡은 세대의 데몬이 늦게 올린 실패는 지금의 광고를 탓하는 것이 아니다.
+    #[tokio::test]
+    async fn a_stale_advertise_failure_is_ignored() {
+        let (mut b, _rx, _ads) = bridge_on(0);
+        b.set_enabled(true);
+        let stale = ServerEvent::AdvertiseFailed {
+            generation: b.generation,
+            message: "옛 데몬의 실패".into(),
+        };
+        b.set_enabled(false);
+        b.set_enabled(true); // 세대 2
+        b.apply_event(&listening_now(&b));
+
+        b.apply_event(&stale);
+
+        assert!(b.last_error().is_none(), "낡은 실패를 지금 사실처럼 보여주면 안 된다");
+    }
+
+    /// 광고를 이미 거둔 뒤에 도착한 실패도 마찬가지다. 끌 때 `last_error` 를
+    /// 비우는데 여기서 되살리면 **꺼진 전송이 오류를 달고** 있게 된다.
+    #[tokio::test]
+    async fn an_advertise_failure_after_the_toggle_went_off_is_ignored() {
+        let (mut b, _rx, _ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+        let ev = ServerEvent::AdvertiseFailed {
+            generation: b.generation,
+            message: "늦게 온 실패".into(),
+        };
+        b.set_enabled(false);
+
+        b.apply_event(&ev);
+
+        assert!(b.last_error().is_none());
+    }
+
+    /// 두 갈래(시작 실패 · 늦은 실패)가 사용자에게는 같은 상황이므로 문장도
+    /// 같아야 한다. 한쪽만 손으로 붙는 길을 말하면 나머지 한쪽 사용자는 포기한다.
+    #[tokio::test]
+    async fn both_kinds_of_failure_say_the_same_thing() {
+        let (mut early, _rx1, ads1) = bridge_on(0);
+        ads1.fail_next();
+        early.set_enabled(true);
+        early.apply_event(&listening_now(&early));
+        let from_start = early.last_error().expect("시작 실패");
+
+        let (mut late, mut rx2, ads2) = bridge_on(0);
+        late.set_enabled(true);
+        late.apply_event(&listening_now(&late));
+        ads2.fail_after_start("데몬을 띄우지 못했다");
+        let ev = next_advertise_failure(&mut rx2).await;
+        late.apply_event(&ev);
+        let from_monitor = late.last_error().expect("늦은 실패");
+
+        assert_eq!(from_start, from_monitor);
+    }
+
+    /// 진짜 4320 에서 토글이 소켓을 열고 닫는지 본다. 평소 실행에서 빠져 있는
+    /// 이유는 개발 중인 앱이나 다른 테스트와 같은 포트를 다투기 때문이다 —
+    /// 손으로 확인할 때만 돌린다:
+    /// `cargo test --manifest-path src-tauri/Cargo.toml lan:: -- --ignored --test-threads=1`
+    #[tokio::test]
+    #[ignore = "실제 4320 을 잡는다 — 손으로만"]
+    async fn the_real_port_opens_and_closes_with_the_toggle() {
+        let (tx, _rx) = channel(server::EVENT_QUEUE);
+        let mut b = LanBridge::new(tx);
+
+        assert!(
+            tokio::net::TcpListener::bind(("0.0.0.0", server::PORT)).await.is_ok(),
+            "시작하기 전에 4320 이 비어 있어야 한다"
+        );
+
+        b.set_enabled(true);
+        let mut opened = false;
+        for _ in 0..200 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", server::PORT)).await.is_ok() {
+                opened = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(opened, "토글을 켰는데 4320 이 열리지 않았다");
+
+        b.set_enabled(false);
+        for _ in 0..200 {
+            if tokio::net::TcpListener::bind(("0.0.0.0", server::PORT)).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("토글을 껐는데 4320 이 그대로 열려 있다");
+    }
+
+    /// 끄면 붙어 있던 central 이 전부 사라진다 — 다시 켰을 때 예전 연결이
+    /// 여전히 붙어 있는 것으로 남지 않게.
+    #[tokio::test]
+    async fn disabling_clears_every_central() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        b.apply_event(&ServerEvent::Connected(server::central_id(0)));
+        b.apply_event(&ServerEvent::Connected(server::central_id(1)));
+        b.set_enabled(false);
+        assert!(b.served_centrals().is_empty());
+    }
+
+    // --- 인증 (Task 3) ---
+
+    /// 켜져 있고 central 하나가 붙어 있는 브리지. 인증 경로의 출발점이다.
+    /// `set_enabled(true)` 가 리스너 태스크를 띄우므로 런타임 안에서만 부른다.
+    fn live_bridge(id: &CentralId) -> (LanBridge, Receiver<ServerEvent>) {
+        let (mut b, rx) = bridge();
+        b.set_enabled(true);
+        b.apply_event(&ServerEvent::Connected(id.clone()));
+        (b, rx)
+    }
+
+    fn field(bytes: &[u8], key: &str) -> String {
+        let v: serde_json::Value = serde_json::from_slice(bytes).expect("응답은 JSON 이다");
+        v[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("{key} 필드가 없다: {v}"))
+            .to_string()
+    }
+
+    /// 브리지의 `handle_auth` 만으로 v2 페어링을 끝까지 밟는다 — 응답 바이트를
+    /// 클라이언트가 실제로 열 수 있는지까지 확인하므로, 배선이 페이로드를
+    /// 건드렸다면 여기서 깨진다.
+    ///
+    /// 클라이언트 쪽 `SealedChannel` 도 함께 돌려준다. 그래야 스냅샷 테스트가
+    /// "봉인된 것처럼 보인다"가 아니라 **이 기기가 실제로 열 수 있는가**를 볼 수
+    /// 있다 — 앞의 것은 키가 어긋나도 통과한다.
+    fn v2_pair(
+        b: &mut LanBridge,
+        p: &mut PairingManager,
+        central: &CentralId,
+        now: SystemTime,
+    ) -> (AuthOutcome, SealedChannel) {
+        let code = p.begin_pairing(now);
+        let mut c = V2Client::new();
+
+        let out = b
+            .handle_auth(central, format!("HELLO2:{}", hex_encode(&c.public)).as_bytes(), now, p)
+            .expect("서비스 중인 연결이다");
+        let (epk, nonce) = (field(&out.payload, "epk"), field(&out.payload, "nonce"));
+        let (ss, tr) = c.agree(&epk);
+
+        let cbind = hex_encode(&crypto::code_binding(&code, &tr));
+        let out = b
+            .handle_auth(central, format!("CODE2:{cbind}").as_bytes(), now, p)
+            .expect("서비스 중인 연결이다");
+        let sealed = field(&out.payload, "sealed");
+        let (_token, ch) = test_client::open_pairing_and_session(&ss, &nonce, &sealed);
+        (out, ch)
+    }
+
+    /// 인증 프레임은 그대로 `PairingManager` 에 넘어가고, 응답은
+    /// `AuthReply::to_json_bytes()` 그대로다. LAN 만 새 포맷을 만들지 않는다.
+    #[tokio::test]
+    async fn passes_auth_frames_through_unchanged() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        p.begin_pairing(t(1000));
+
+        let out = b.handle_auth(&id, b"HELLO2:short", t(1001), &mut p).expect("서비스 중이다");
+        assert_eq!(
+            out.payload,
+            AuthReply::Rejected.to_json_bytes(),
+            "형식 오류는 그대로 Rejected 가 나가야 한다"
+        );
+        assert!(!out.now_authorized);
+        assert!(!out.granted);
+    }
+
+    /// **이 태스크에서 가장 비싼 실수.** v2 페어링도 새 토큰을 발급하므로
+    /// `granted` 가 서야 한다. 서지 않으면 LAN 으로 페어링한 기기가 그 세션에서는
+    /// 멀쩡히 동작하다가, 맥을 껐다 켜는 순간 토큰이 디스크에 없어 영영 재연결하지
+    /// 못한다 — 테스트로 잡지 않으면 사용자 책상에서만 드러난다.
+    #[tokio::test]
+    async fn v2_pairing_is_reported_as_authorized_and_worth_persisting() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+
+        let (out, _ch) = v2_pair(&mut b, &mut p, &id, t(1000));
+
+        assert!(out.now_authorized, "v2 페어링 성공은 인가로 이어져야 한다");
+        assert!(out.granted, "v2 도 새 토큰을 발급한다 — 저장하지 않으면 재부팅 후 사라진다");
+        assert_eq!(p.issued_peers().len(), 1);
+    }
+
+    /// 재연결(`AUTH2`/`PROOF2`)은 인가지만 발급이 아니다. 여기서 `granted` 가
+    /// 서면 붙을 때마다 같은 목록을 디스크에 다시 쓴다.
+    #[tokio::test]
+    async fn v2_reconnect_is_authorized_but_not_persisted() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        let token = "aa".repeat(16);
+        p.load_peers(vec![(token.clone(), 900)]);
+        let mut c = V2Client::new();
+        let now = t(1000);
+
+        let out = b
+            .handle_auth(&id, format!("AUTH2:{}", hex_encode(&c.public)).as_bytes(), now, &mut p)
+            .expect("서비스 중이다");
+        let (epk, nonce) = (field(&out.payload, "epk"), field(&out.payload, "nonce"));
+        let (_ss, tr) = c.agree(&epk);
+        let proof = hex_encode(&crypto::session_proof(
+            &test_client::hex_decode(&token),
+            &test_client::hex_decode(&nonce),
+            &tr,
+        ));
+
+        let out = b
+            .handle_auth(&id, format!("PROOF2:{proof}").as_bytes(), now, &mut p)
+            .expect("서비스 중이다");
+        assert!(out.now_authorized, "재연결 성공은 인가로 이어져야 한다");
+        assert!(!out.granted, "재연결은 새 토큰을 발급하지 않는다 — 저장할 것이 없다");
+        assert!(p.is_authorized(&id));
+    }
+
+    /// v1 도 그대로 통과시킨다. 맥은 두 세대를 모두 받아들이고, 세대 판단은
+    /// `PairingManager` 의 것이지 전송의 것이 아니다.
+    #[tokio::test]
+    async fn v1_is_not_rejected_by_this_transport() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        let code = p.begin_pairing(t(1000));
+
+        let out = b.handle_auth(&id, b"HELLO", t(1001), &mut p).expect("서비스 중이다");
+        assert_eq!(out.payload, AuthReply::AwaitingCode.to_json_bytes());
+
+        let out = b
+            .handle_auth(&id, format!("CODE:{code}").as_bytes(), t(1002), &mut p)
+            .expect("서비스 중이다");
+        assert!(out.now_authorized && out.granted, "v1 CODE 성공도 인가이자 발급이다");
+    }
+
+    /// 인증하지 않은 피어가 프레임만 보내서 프론트를 계속 다시 그리게 만들 수
+    /// 있으면 안 된다. 상태를 실제로 바꾼 결과만 이벤트가 된다.
+    /// (응답 10종의 판정 자체는 `ble::pairing` 의 `every_reply_has_signals` 가 본다.)
+    #[test]
+    fn only_a_real_change_is_worth_telling_the_frontend() {
+        let out = |now_authorized, granted| AuthOutcome {
+            payload: Vec::new(),
+            now_authorized,
+            granted,
+        };
+        assert!(out(true, true).changed_visible_state(), "새 페어링은 알려야 한다");
+        assert!(out(true, false).changed_visible_state(), "재연결도 알려야 한다");
+        assert!(
+            !out(false, false).changed_visible_state(),
+            "거절·핸드셰이크 중간 응답은 패널에 보이는 것을 바꾸지 않는다"
+        );
+    }
+
+    /// 인증 프레임을 아무리 보내도, 통과하지 못하면 알릴 것이 없다.
+    /// `handle_auth` 를 실제로 태워 확인한다 — 위 표가 손으로 만든 값이라면
+    /// 이쪽은 진짜 응답에서 나온 값이다.
+    #[tokio::test]
+    async fn a_rejected_frame_is_not_worth_telling_the_frontend() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+
+        // 창이 닫혀 있으므로 무엇을 보내도 Rejected 다.
+        for frame in [&b"HELLO"[..], b"HELLO2:short", b"PROOF:zz"] {
+            let out = b.handle_auth(&id, frame, t(1000), &mut p).expect("서비스 중이다");
+            assert!(
+                !out.changed_visible_state(),
+                "통과하지 못한 프레임이 프론트 갱신을 유발하면 안 된다"
+            );
+        }
+    }
+
+    /// 우리가 서비스하지 않는 id 의 프레임은 `pairing` 을 아예 건드리지 않는다.
+    /// 건드리면 살아 있는 링크가 없는 central 이 인가되고, 그 인가를 지워 줄
+    /// `Disconnected` 는 다시 오지 않는다.
+    #[tokio::test]
+    async fn a_frame_from_a_central_we_do_not_serve_is_ignored() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        let id = server::central_id(0); // Connected 를 받은 적이 없다
+        let mut p = PairingManager::new();
+        // 창이 열려 있고 코드도 맞다 — 통과시켰다면 토큰이 발급됐을 상황이다.
+        let code = p.begin_pairing(t(1000));
+
+        assert!(b.handle_auth(&id, format!("CODE:{code}").as_bytes(), t(1001), &mut p).is_none());
+        assert!(!p.is_authorized(&id));
+        assert!(p.issued_peers().is_empty(), "토큰이 발급되면 안 된다");
+    }
+
+    /// 끊긴 뒤 뒤늦게 도착한 프레임도 마찬가지다. 이벤트는 순서대로 오지만
+    /// `Disconnected` 뒤의 프레임이 처리되면 링크보다 오래 사는 인가가 남는다.
+    #[tokio::test]
+    async fn a_frame_after_the_disconnect_is_ignored() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        p.begin_pairing(t(1000));
+
+        b.apply_event(&ServerEvent::Disconnected(id.clone()));
+        assert!(b.handle_auth(&id, b"HELLO", t(1001), &mut p).is_none());
+        assert!(!p.is_authorized(&id));
+    }
+
+    /// 토글을 끈 뒤 뒤늦게 올라온 `Connected` 는 목록을 채울 수 있다(서버
+    /// 태스크가 종료되는 동안 벌어질 수 있다). 그래도 인증은 열리면 안 된다 —
+    /// 공유가 꺼져 있는데 누군가를 인가하는 것이 이 전송의 최악이다.
+    #[tokio::test]
+    async fn a_frame_while_sharing_is_off_is_ignored() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        p.begin_pairing(t(1000));
+
+        b.set_enabled(false);
+        b.apply_event(&ServerEvent::Connected(id.clone())); // 지각 이벤트
+        assert!(b.handle_auth(&id, b"HELLO", t(1001), &mut p).is_none());
+        assert!(!p.is_authorized(&id));
+    }
+
+    /// 연결이 끊기면 그 세션의 인가가 즉시 끝나야 한다. 브리지는 인가를
+    /// 소유하지 않으므로 "누구를 끝낼지"만 말하고, 지우는 것은 호출부다.
+    #[tokio::test]
+    async fn dropping_a_connection_ends_its_session() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+        assert!(p.is_authorized(&id));
+
+        let ending = b.sessions_to_end(&ServerEvent::Disconnected(id.clone()));
+        assert_eq!(ending, vec![id.clone()]);
+
+        // 호출부(lib.rs)가 하는 일 그대로.
+        p.end_sessions(&ending);
+        b.apply_event(&ServerEvent::Disconnected(id.clone()));
+
+        assert!(!p.is_authorized(&id), "링크가 끊겼는데 인가가 남아 있다");
+        assert!(b.served_centrals().is_empty());
+        assert!(b.snapshot_targets(&p).is_empty());
+    }
+
+    /// `apply_event` 를 먼저 부르면 목록에서 이미 빠져 언제나 빈 결과가 된다.
+    /// 순서 규칙을 못박아 둔다 — 이 순서가 뒤집히면 인가가 조용히 살아남는다.
+    #[tokio::test]
+    async fn asking_after_applying_is_too_late() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        b.apply_event(&ServerEvent::Disconnected(id.clone()));
+        assert!(
+            b.sessions_to_end(&ServerEvent::Disconnected(id)).is_empty(),
+            "apply_event 뒤에 물으면 늦다 — 호출부가 먼저 물어야 한다"
+        );
+    }
+
+    /// 끊김만이 세션을 끝낸다. 프레임이나 바인딩 실패로 남의 인가를 내리면 안 된다.
+    #[tokio::test]
+    async fn only_a_disconnect_ends_a_session() {
+        let id = server::central_id(0);
+        let (b, _rx) = live_bridge(&id);
+        assert!(b.sessions_to_end(&ServerEvent::Connected(id.clone())).is_empty());
+        assert!(b
+            .sessions_to_end(&ServerEvent::Frame { id: id.clone(), text: "HELLO".into() })
+            .is_empty());
+        assert!(b
+            .sessions_to_end(&ServerEvent::BindFailed { generation: 1, message: "x".into() })
+            .is_empty());
+    }
+
+    /// 우리가 서비스한 적 없는 id 는 공유 매니저를 건드리는 목록에 넣지 않는다.
+    #[test]
+    fn ending_a_session_we_never_served_touches_nothing() {
+        let (b, _rx) = bridge();
+        assert!(b
+            .sessions_to_end(&ServerEvent::Disconnected(server::central_id(42)))
+            .is_empty());
+    }
+
+    /// 인가되기 전에는 스냅샷 대상이 아니다 — 붙어 있다는 것과 볼 자격이
+    /// 있다는 것은 다르다.
+    #[tokio::test]
+    async fn sends_nothing_before_authorization() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        p.begin_pairing(t(1000));
+        assert!(b.snapshot_targets(&p).is_empty(), "인가되지 않으면 대상이 없다");
+
+        // 핸드셰이크 중간(AwaitingCode2)도 아직 아니다.
+        let c = V2Client::new();
+        b.handle_auth(&id, format!("HELLO2:{}", hex_encode(&c.public)).as_bytes(), t(1001), &mut p);
+        assert!(b.snapshot_targets(&p).is_empty(), "핸드셰이크 중에는 대상이 아니다");
+    }
+
+    #[tokio::test]
+    async fn an_authorized_central_becomes_a_target() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+        assert_eq!(b.snapshot_targets(&p), vec![id]);
+    }
+
+    /// 인가된 기기가 붙어 있어도 공유를 끄면 대상이 없다.
+    #[tokio::test]
+    async fn turning_sharing_off_leaves_no_targets() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+
+        b.set_enabled(false);
+        b.apply_event(&ServerEvent::Connected(id.clone())); // 지각 이벤트
+        assert!(b.snapshot_targets(&p).is_empty(), "꺼져 있으면 아무도 대상이 아니다");
+    }
+
+    /// 인가된 기기 옆에 인가되지 않은 기기가 붙어 있어도 그쪽은 대상이 아니다.
+    #[tokio::test]
+    async fn an_unauthorized_neighbour_is_not_carried_along() {
+        let paired = server::central_id(0);
+        let stranger = server::central_id(1);
+        let (mut b, _rx) = live_bridge(&paired);
+        b.apply_event(&ServerEvent::Connected(stranger.clone()));
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &paired, t(1000));
+
+        assert_eq!(b.snapshot_targets(&p), vec![paired]);
+    }
+
+    /// 인증 프레임이 진짜 소켓으로 들어와 응답이 **텍스트 프레임으로** 되돌아가는
+    /// 것까지 본다. 여기서만 `send_auth_reply` 가 실제 WebSocket 에 닿는다 —
+    /// 나머지 테스트는 전부 I/O 없는 상태 기계 호출이다.
+    #[tokio::test]
+    async fn an_auth_frame_gets_its_reply_over_the_socket() {
+        use server::test_socket::*;
+        use tokio::io::AsyncWriteExt;
+
+        let port = free_port().await;
+        let (mut b, mut rx, _ads) = bridge_on(port);
+        let mut p = PairingManager::new();
+        b.set_enabled(true);
+        wait_until_listening(port).await;
+
+        let mut sock = handshake(port).await;
+        let ev = next_applied(&mut b, &mut rx).await;
+        // id 는 프로세스 전역 발급기가 준다 — 절대값을 가정하지 않는다.
+        assert!(matches!(ev, ServerEvent::Connected(_)), "Connected 를 기대했다: {ev:?}");
+
+        // 창이 열려 있지 않으므로 응답은 Rejected 다 — 여기서 보려는 것은
+        // 페어링 결과가 아니라 "프레임이 오가는 통로"다.
+        sock.write_all(&masked_text_frame(b"HELLO")).await.unwrap();
+        let ServerEvent::Frame { id, text } = rx.recv().await.expect("Frame 이 와야 한다") else {
+            panic!("Frame 을 기대했다");
+        };
+
+        let out = b
+            .handle_auth(&id, text.as_bytes(), t(1000), &mut p)
+            .expect("서비스 중인 연결이다");
+        b.send_auth_reply(&id, out.payload.clone());
+
+        let got = read_text_frame(&mut sock).await;
+        assert_eq!(got, out.payload, "응답 바이트가 그대로 나가야 한다");
+        assert_eq!(got, AuthReply::Rejected.to_json_bytes());
+
+        b.set_enabled(false);
+    }
+
+    /// 맥을 껐다 켜면 일련번호는 다시 0부터 시작한다(`static` 은 프로세스와
+    /// 수명을 같이한다). 그래도 예전 `lan:0` 의 인가를 물려받지 않는 이유는
+    /// **인가가 디스크에 남지 않기 때문**이다 — 저장되는 것은 토큰뿐이고
+    /// (`PairingManager::load_peers`), 세션 인가는 프로세스와 함께 사라진다.
+    /// 이 성질이 깨지는 순간 재시작이 I2 와 똑같은 사고가 된다.
+    #[tokio::test]
+    async fn a_restored_peer_list_authorizes_nobody() {
+        let id = server::central_id(0);
+        let (b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        p.load_peers(vec![("aa".repeat(16), 900)]);
+
+        assert_eq!(p.issued_peers().len(), 1, "토큰은 복원된다");
+        assert!(!p.is_authorized(&id), "복원되는 것은 토큰이지 인가가 아니다");
+        assert!(b.snapshot_targets(&p).is_empty(), "다시 증명하기 전에는 아무것도 못 받는다");
+    }
+
+    /// 같은 오류를 다시 쓰는 것은 사용자에게 새 소식이 아니다. 호출부가 그걸로
+    /// 프론트 갱신 여부를 정하므로, 바뀌었는지를 이 함수가 답해야 한다.
+    #[tokio::test]
+    async fn setting_the_same_error_twice_is_not_news() {
+        let (mut b, _rx) = bridge();
+        assert!(b.set_last_error(Some("저장 실패".into())), "처음은 바뀐 것이다");
+        assert!(!b.set_last_error(Some("저장 실패".into())), "같은 값은 새 소식이 아니다");
+        assert!(b.set_last_error(Some("다른 실패".into())), "내용이 바뀌면 알려야 한다");
+        assert!(b.set_last_error(None), "지우는 것도 바뀐 것이다");
+        assert!(!b.set_last_error(None), "이미 비어 있으면 바뀐 것이 없다");
+    }
+
+    /// 리스너가 없을 때 응답을 보내려 해도 조용히 버려진다. 상대가 사라진 것은
+    /// 사용자가 고칠 수 있는 실패가 아니므로 `last_error` 를 건드리면 안 된다.
+    #[test]
+    fn replying_with_no_listener_is_harmless() {
+        let (b, _rx) = bridge();
+        b.send_auth_reply(&server::central_id(0), b"{}".to_vec());
+        assert!(b.last_error().is_none());
+    }
+
+    /// 리스너가 없을 때의 인가 통지도 마찬가지다. 토글이 꺼져 있으면 애초에
+    /// 아무도 인가되지 않지만(`serves`), 그 성질에 기대지 않는다.
+    #[test]
+    fn marking_authorized_with_no_listener_is_harmless() {
+        let (b, _rx) = bridge();
+        b.mark_authorized(&server::central_id(0));
+        assert!(b.last_error().is_none());
+    }
+
+    // --- 봉인 스냅샷 (Task 4) ---
+
+    /// 미러 한 장. `rate` 를 인자로 받는 이유는 게이트가 내용 해시를 보기
+    /// 때문이다 — 같은 값을 두 번 넣으면 두 번째는 나가지 않는다.
+    fn sample_snapshot(rate: f32) -> Snapshot {
+        Snapshot {
+            emitted_at: UNIX_EPOCH + Duration::from_secs(1_755_500_000),
+            agents: vec![AgentState {
+                kind: AgentKind::Claude,
+                rate_tok_per_sec: rate,
+                tokens_5h: TokenCounts {
+                    tokens_in: 1_000,
+                    tokens_out: 2_000,
+                    tokens_cache_read: 40_000,
+                    tokens_cache_create: 7_000,
+                },
+                quota_limit: None,
+                quota_reset_at: Some(UNIX_EPOCH + Duration::from_secs(1_755_512_400)),
+                quota_used_pct: Some(62.0),
+                quota_reset_at_weekly: None,
+                quota_used_pct_weekly: None,
+                projects: vec![ProjectActivity {
+                    path: PathBuf::from("/Users/me/dev/foo"),
+                    name: "foo".to_string(),
+                    model: "claude-opus-5".to_string(),
+                    rate_tok_per_sec: 98.25,
+                    last_event_at: UNIX_EPOCH + Duration::from_secs(1_755_499_987),
+                    status: ActivityStatus::Active,
+                }],
+            }],
+        }
+    }
+
+    /// 봉인 프레임 하나가 나가고, **그 기기가 실제로 연다.** "평문이 아니다"
+    /// 까지만 보면 키가 어긋나도 통과하므로 여기서 열어 본다.
+    ///
+    /// LAN 은 청킹하지 않는다 — WebSocket 이 프레이밍을 하므로 프레임 하나가
+    /// 그대로 메시지 하나다.
+    #[tokio::test]
+    async fn a_v2_session_gets_one_sealed_frame_it_can_open() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        let (_out, mut client) = v2_pair(&mut b, &mut p, &id, t(1000));
+
+        let snap = sample_snapshot(1.0);
+        let frames = b.prepare_snapshot(&snap, t(1001), &mut p);
+
+        assert_eq!(frames.len(), 1, "청킹하지 않으므로 한 건뿐이다");
+        let (target, frame) = &frames[0];
+        assert_eq!(target, &id);
+        assert!(!frame.starts_with(b"{"), "평문 JSON 이 나갔다");
+        assert!(frame.len() > 8 + 16, "카운터 8 + 태그 16 보다 길어야 한다");
+
+        let opened = client.open(frame).expect("이 기기의 세션 키로 열려야 한다");
+        assert_eq!(
+            opened,
+            serde_json::to_vec(&MirrorSnapshot::from(&snap)).unwrap(),
+            "열고 나면 이번 틱의 미러 DTO 그대로여야 한다"
+        );
+    }
+
+    /// 인가되지 않은 연결에는 **0바이트**다. 붙어 있다는 것과 볼 자격이 있다는
+    /// 것은 다르다.
+    #[tokio::test]
+    async fn an_unauthorized_connection_receives_zero_bytes() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        p.begin_pairing(t(1000));
+
+        assert!(b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).is_empty());
+
+        // 핸드셰이크 중간(AwaitingCode2)도 아직 아니다 — 사람이 코드를 넣기
+        // 전까지는 인가가 아니다.
+        let c = V2Client::new();
+        b.handle_auth(&id, format!("HELLO2:{}", hex_encode(&c.public)).as_bytes(), t(1001), &mut p);
+        assert!(b.prepare_snapshot(&sample_snapshot(2.0), t(1002), &mut p).is_empty());
+    }
+
+    /// 인가된 기기 옆에 낯선 기기가 붙어 있어도 그쪽에는 아무것도 나가지 않고,
+    /// 그렇다고 인가된 기기까지 막히지도 않는다.
+    #[tokio::test]
+    async fn a_stranger_beside_a_paired_device_gets_nothing() {
+        let paired = server::central_id(0);
+        let stranger = server::central_id(1);
+        let (mut b, _rx) = live_bridge(&paired);
+        b.apply_event(&ServerEvent::Connected(stranger.clone()));
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &paired, t(1000));
+
+        let frames = b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, paired, "낯선 기기에게 나간 프레임이 있다");
+    }
+
+    /// 인가된 뒤에도 공유를 끄면 아무것도 나가지 않는다.
+    #[tokio::test]
+    async fn turning_sharing_off_stops_the_bytes() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+
+        b.set_enabled(false);
+        b.apply_event(&ServerEvent::Connected(id.clone())); // 지각 이벤트
+        assert!(b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).is_empty());
+    }
+
+    /// **언페어링된 기기에게는 다음 틱부터 0바이트.** 링크는 아직 붙어 있고
+    /// 브리지의 `centrals` 에도 남아 있지만, 인가가 사라진 것으로 충분하다 —
+    /// 형제 전송은 이 검사가 없어서 방금 해제한 기기에게 평문을 보냈다.
+    #[tokio::test]
+    async fn a_device_that_just_lost_authorization_gets_nothing() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+        assert_eq!(b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).len(), 1);
+
+        // 사용자가 이 기기를 해제했다(`unpair` → `revoke_peer`).
+        let peer = p.paired_peers()[0].peer_id.clone();
+        assert!(!p.revoke_peer(&peer).is_empty(), "해제할 세션이 있어야 한다");
+
+        assert!(
+            b.prepare_snapshot(&sample_snapshot(2.0), t(1002), &mut p).is_empty(),
+            "해제한 기기에게 한 바이트라도 나가면 안 된다"
+        );
+    }
+
+    /// **봉인 지점은 인가 여부를 스스로 안다.**
+    ///
+    /// 이 테스트가 없으면 `seal_for` 의 `is_authorized` 세 줄을 통째로 지워도
+    /// 스위트가 전부 통과한다(리뷰가 실제로 해 봤다). 이유는 두 가지가 겹쳐서다:
+    /// `prepare_snapshot` 은 `snapshot_targets` 가 빈 목록을 주면 봉인 지점까지
+    /// 가지도 않고, 설령 갔더라도 인가를 지우는 `end_session` 이 봉인 채널도 함께
+    /// 지우므로 `NoChannel` 갈래로 떨어져 **바이트는 똑같이 0** 이다.
+    ///
+    /// 그래서 여기서 보는 것은 바이트가 아니라 **이유**다. 이 지점이 "인가되지
+    /// 않았다"를 스스로 알고 있어야, 두 맵의 수명이 같다는 우연이 깨져도(혹은
+    /// 해제 경로에 await 창이 생겨도) 결론이 따라 바뀌지 않는다. 자유 함수라
+    /// `prepare_snapshot` 을 거치지 않고 직접 부른다.
+    #[tokio::test]
+    async fn the_sealing_point_knows_on_its_own_that_a_central_is_unauthorized() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+        assert!(
+            matches!(seal_for(&mut p, &id, b"{}"), Sealed::Frame(_)),
+            "인가된 v2 세션에는 봉인 프레임이 나와야 한다"
+        );
+
+        let peer = p.paired_peers()[0].peer_id.clone();
+        assert!(!p.revoke_peer(&peer).is_empty(), "해제할 세션이 있어야 한다");
+
+        assert_eq!(
+            seal_for(&mut p, &id, b"{}"),
+            Sealed::NotAuthorized,
+            "인가가 사라졌으면 봉인 지점이 그 이유로 거절해야 한다 — \
+             `NoChannel` 이 나온다면 인가 검사가 사라진 것이다"
+        );
+    }
+
+    /// 인증을 시작조차 하지 않은 연결도 마찬가지다. 위 테스트는 "인가를 잃은"
+    /// 경우이고 이쪽은 "한 번도 얻은 적 없는" 경우다 — 두 상태가 같은 이유로
+    /// 거절되는지 본다.
+    #[test]
+    fn the_sealing_point_refuses_a_central_that_never_authenticated() {
+        let mut p = PairingManager::new();
+        assert_eq!(
+            seal_for(&mut p, &server::central_id(0), b"{}"),
+            Sealed::NotAuthorized
+        );
+    }
+
+    /// **v1 세션에는 평문을 보내지 않는다.** 형제 전송은 채널이 없으면 평문
+    /// JSON 을 보내지만, LAN 은 망 전체에 열려 있고 이 전송이 받아들여진 근거
+    /// 자체가 "미러가 봉인돼 있다"였다(스펙 7.2). 여기서 평문으로 떨어지는 것은
+    /// 전환기 호환이 아니라 downgrade 다.
+    ///
+    /// 인가는 됐으므로 거절의 이유는 `NoChannel` 이어야 한다 — 위 두 테스트와
+    /// 짝이 되어, 봉인 지점이 두 상황을 실제로 **구분**하는지까지 고정한다.
+    #[tokio::test]
+    async fn a_v1_session_gets_no_plaintext_over_the_lan() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        let code = p.begin_pairing(t(1000));
+
+        b.handle_auth(&id, b"HELLO", t(1001), &mut p);
+        let out = b
+            .handle_auth(&id, format!("CODE:{code}").as_bytes(), t(1002), &mut p)
+            .expect("서비스 중이다");
+        assert!(out.now_authorized, "v1 도 인가는 된다 — 세대 판단은 전송의 것이 아니다");
+        assert!(p.channel_mut(&id).is_none(), "v1 이므로 봉인 채널이 없다");
+
+        assert_eq!(
+            seal_for(&mut p, &id, b"{}"),
+            Sealed::NoChannel,
+            "인가는 됐으나 봉인할 수 없다 — 거절의 이유가 그것이어야 한다"
+        );
+        assert!(
+            b.prepare_snapshot(&sample_snapshot(1.0), t(1003), &mut p).is_empty(),
+            "봉인할 수 없으면 평문으로 떨어지지 말고 아무것도 보내지 않아야 한다"
+        );
+    }
+
+    /// 미러는 1Hz 다. 앱의 틱은 250ms 이므로, 게이트가 없으면 초당 네 장이
+    /// 나가고 `server::SINK_QUEUE`(8) 가 뜻하는 시간이 8초에서 2초로 줄어든다.
+    #[tokio::test]
+    async fn the_mirror_is_gated_to_one_frame_per_second() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+
+        assert_eq!(b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).len(), 1);
+        assert!(
+            b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).is_empty(),
+            "내용이 같으면 다시 보내지 않는다"
+        );
+        assert!(
+            b.prepare_snapshot(&sample_snapshot(2.0), t(1001), &mut p).is_empty(),
+            "내용이 달라도 1초 안이면 아직이다"
+        );
+        assert_eq!(
+            b.prepare_snapshot(&sample_snapshot(2.0), t(1002), &mut p).len(),
+            1,
+            "1초가 지나고 내용도 바뀌었으면 나가야 한다"
+        );
+    }
+
+    /// 아무도 인가되지 않았을 때는 게이트를 **소비하지 않는다.** 소비해 버리면
+    /// 기기가 붙은 직후의 첫 미러가 "방금 보냈다"는 이유로 1초 밀린다.
+    #[tokio::test]
+    async fn an_empty_tick_does_not_spend_the_gate() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+
+        // 아직 아무도 인가되지 않았다.
+        assert!(b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).is_empty());
+
+        v2_pair(&mut b, &mut p, &id, t(1001));
+        assert_eq!(
+            b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p).len(),
+            1,
+            "붙자마자의 첫 미러가 게이트에 걸렸다"
+        );
+    }
+
+    /// **카운터는 전진하기만 한다.** 봉인이 끝난 순간 `(키, 논스)` 한 쌍이
+    /// 소비되고, 그 프레임이 끝내 나가지 못해도 되돌리지 않는다 — 수신 측은
+    /// 빈 칸을 견디지만 같은 논스를 두 번 쓰는 것은 회복 불가능한 사고다.
+    ///
+    /// 첫 프레임을 **보내지 않고 버린** 뒤 두 번째 프레임만 여는 것으로 그
+    /// 성질을 확인한다. 카운터를 되돌렸다면 두 번째 프레임이 0번이 되어,
+    /// 이미 0번을 본 적 없는 클라이언트에게는 그대로 열리므로 이 테스트는
+    /// 카운터 자체를 본다.
+    #[tokio::test]
+    async fn a_dropped_frame_never_makes_a_counter_repeat() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        let (_out, mut client) = v2_pair(&mut b, &mut p, &id, t(1000));
+
+        let first = b.prepare_snapshot(&sample_snapshot(1.0), t(1001), &mut p);
+        let second = b.prepare_snapshot(&sample_snapshot(2.0), t(1002), &mut p);
+
+        let counter = |f: &[u8]| u64::from_be_bytes(f[..8].try_into().unwrap());
+        assert_eq!(counter(&first[0].1), 0);
+        assert_eq!(counter(&second[0].1), 1, "버려진 프레임의 번호를 재사용했다");
+
+        // 첫 프레임은 나가지 못했다고 치고 두 번째만 연다 — 수신 측은 빈 칸을
+        // 견뎌야 한다.
+        client.open(&second[0].1).expect("빈 칸이 있어도 열려야 한다");
+    }
+
+    /// **봉인된 스냅샷이 64 KiB 프레임 상한에 실제로 들어가는가.** 상한을
+    /// 넘으면 서버가 자기 프레임을 보내지 못하는 것이 아니라(상한은 수신
+    /// 방향이다) 기기 쪽 조립이 무너지므로, 값을 재서 못박아 둔다.
+    ///
+    /// 현실적인 최대치를 만든다: 에이전트 셋 각각에 프로젝트 24개, 이름과
+    /// 모델명을 길게. 실제 사용에서 이보다 큰 미러는 나오기 어렵다.
+    ///
+    /// 2026-08-26 측정값: 이 무거운 스냅샷이 평문 9,649 · 봉인 9,673 바이트로
+    /// 상한의 **14.8%** 다. 평범한 한 장(에이전트 하나·프로젝트 하나)은 188
+    /// 바이트다. 상한을 올려야 할 이유는 지금 없다.
+    #[tokio::test]
+    async fn a_sealed_snapshot_fits_the_frame_budget_with_room_to_spare() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        v2_pair(&mut b, &mut p, &id, t(1000));
+
+        let mut snap = sample_snapshot(1.0);
+        let base = snap.agents[0].clone();
+        snap.agents = [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity]
+            .into_iter()
+            .map(|kind| {
+                let mut a = base.clone();
+                a.kind = kind;
+                a.projects = (0..24)
+                    .map(|i| ProjectActivity {
+                        path: PathBuf::from(format!("/Users/someone/work/monorepo/services/{i}")),
+                        name: format!("service-with-a-fairly-long-name-{i}"),
+                        model: "claude-opus-5-with-a-long-identifier".to_string(),
+                        rate_tok_per_sec: 12.5,
+                        last_event_at: UNIX_EPOCH + Duration::from_secs(1_755_499_987),
+                        status: ActivityStatus::Active,
+                    })
+                    .collect();
+                a
+            })
+            .collect();
+
+        let frames = b.prepare_snapshot(&snap, t(1001), &mut p);
+        let sealed = &frames[0].1;
+        let plain = serde_json::to_vec(&MirrorSnapshot::from(&snap)).unwrap();
+
+        // 봉인은 카운터 8 + 태그 16 만 더한다 — 압축도 패딩도 없다.
+        assert_eq!(sealed.len(), plain.len() + 24);
+        assert!(
+            sealed.len() * 4 < server::MAX_FRAME_BYTES,
+            "봉인된 스냅샷 {}바이트 — 64 KiB 상한의 4분의 1을 넘었다. \
+             상한을 올리기 전에 미러 DTO 가 왜 이렇게 커졌는지 먼저 보라.",
+            sealed.len()
+        );
+    }
+
+    // --- 언페어링 (Task 4b) ---
+
+    /// 해제된 central 은 이 전송의 목록에서 사라지고, **모르는 id 가 앞뒤에 섞여
+    /// 있어도** 아는 id 는 정상 처리된다. 한 사용자가 BLE 로도 network 로도
+    /// 페어링했을 수 있고 `revoke_all` 은 그 전부를 돌려주므로, 섞여 드는 것은
+    /// 예외가 아니라 평상시다 — 그중 하나에서 루프가 멈추면 뒤에 있는 진짜 LAN
+    /// 세션이 그대로 남는다.
+    #[tokio::test]
+    async fn unpairing_forgets_only_the_centrals_we_serve() {
+        let mine = server::central_id(0);
+        let neighbour = server::central_id(1);
+        let (mut b, _rx) = live_bridge(&mine);
+        b.apply_event(&ServerEvent::Connected(neighbour.clone()));
+
+        b.drop_sessions(&[
+            CentralId("ble:aa".into()),
+            mine,
+            CentralId("iroh:bb".into()),
+        ]);
+
+        assert_eq!(
+            b.served_centrals(),
+            vec![neighbour],
+            "해제한 세션만 사라져야 한다 — 모르는 id 하나가 처리를 막았거나, \
+             해제하지 않은 옆 기기까지 내렸다"
+        );
+    }
+
+    /// 해제할 것이 하나도 없을 때(다른 전송의 기기만 해제됐다) 이 전송의 목록은
+    /// 그대로다. `unpair` 는 그 central 이 어느 전송에 붙어 있었는지 모르는 채로
+    /// 세 브리지 모두를 부르므로 이쪽이 평범한 경우다.
+    ///
+    /// **이름이 목록까지만 약속하는 것은 일부러다.** `drop_sessions` 의 doc 은
+    /// "모르는 id 에는 `Close` 를 쏘지 않는다"고도 적지만 그 규칙은 이 테스트가
+    /// 보지 못한다 — 브리지 테스트에는 `outbound` 를 관측할 수단이 없고(수신자는
+    /// 서버 태스크 안이다), 설령 쏘더라도 `server::push_to_sink` 가 모르는 id 를
+    /// 버리므로 바이트도 상태도 달라지지 않아 밖에서 구분할 방법 자체가 없다.
+    /// 그 문지기는 관측 가능한 결과가 아니라 규칙(`sessions_to_end` 의 doc)이고,
+    /// 여기에 `changes_nothing` 같은 이름을 붙이면 단언보다 많이 약속하게 된다.
+    #[tokio::test]
+    async fn unpairing_a_central_from_another_transport_leaves_our_list_alone() {
+        let mine = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&mine);
+        b.drop_sessions(&[CentralId("ble:aa".into())]);
+        assert_eq!(b.served_centrals(), vec![mine]);
+    }
+
+    /// **이 태스크의 요점.** 목록에서 지우면 스냅샷은 멎지만(그건 Task 4 가 이미
+    /// 고정했다) 소켓은 살아 있고 자리도 그대로다. 인가된 연결에는 그 자리를
+    /// 되돌려 줄 시간 상한이 없으므로(`server::Deadline::Lift`) 해제된 기기가
+    /// 여덟 자리 중 하나를 영영 쥐게 된다.
+    ///
+    /// 그래서 여기서 보는 것은 상태가 아니라 **소켓으로 나가는 바이트**다:
+    /// Close 프레임이 실제로 도착하는가, 그리고 상대가 규약대로 되받았을 때
+    /// 서버가 연결을 실제로 끝내는가. `Disconnected` 가 그 증거다 — 그 이벤트는
+    /// 연결 핸들러가 루프를 빠져나온 뒤에만 나가고, 그 직후 `Slot` 이 떨어진다.
+    /// 자리가 정말 회수되는지까지는 `server` 쪽의
+    /// `closing_a_connection_gives_its_slot_back` 이 본다.
+    #[tokio::test]
+    async fn unpairing_closes_the_socket() {
+        use server::test_socket::*;
+        use tokio::io::AsyncWriteExt;
+
+        let port = free_port().await;
+        let (mut b, mut rx, _ads) = bridge_on(port);
+        let mut p = PairingManager::new();
+        b.set_enabled(true);
+        wait_until_listening(port).await;
+
+        let mut sock = handshake(port).await;
+        let ServerEvent::Connected(id) = next_applied(&mut b, &mut rx).await else {
+            panic!("Connected 를 기대했다");
+        };
+        v2_pair(&mut b, &mut p, &id, t(1000));
+
+        // 사용자가 이 기기를 해제했다 — `lib.rs::persist_and_drop` 이 하는 일 그대로.
+        let peer = p.paired_peers()[0].peer_id.clone();
+        let dropped = p.revoke_peer(&peer);
+        assert_eq!(dropped, vec![id.clone()], "해제할 LAN 세션이 있어야 한다");
+        b.drop_sessions(&dropped);
+
+        let (opcode, _) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut sock))
+            .await
+            .expect("해제했는데 Close 프레임이 소켓으로 나오지 않았다");
+        assert_eq!(opcode, 0x88, "Close 프레임(FIN+opcode 8)이어야 한다");
+
+        // 규약대로 되받는다 — 정상적인 클라이언트가 하는 일이다.
+        sock.write_all(&masked_close_frame()).await.unwrap();
+
+        let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("Close 를 되받았는데 연결이 끝나지 않았다")
+            .unwrap();
+        assert_eq!(
+            ev,
+            ServerEvent::Disconnected(id),
+            "해제된 연결이 실제로 끝나야 자리가 돌아온다"
+        );
+
+        b.set_enabled(false);
+    }
+
+    /// 봉인 프레임이 **진짜 소켓으로, 바이너리 프레임으로** 나가는 것까지 본다.
+    /// 위의 테스트들은 전부 I/O 없는 상태 기계 호출이라, 펌프가 이것을 텍스트로
+    /// 옮기거나(봉인 바이트는 UTF-8 이 아니라 손실된다) 아예 흘려버려도 잡히지
+    /// 않는다. 여기가 그 한 겹을 덮는다.
+    #[tokio::test]
+    async fn a_sealed_snapshot_arrives_over_the_socket_as_one_binary_frame() {
+        use server::test_socket::*;
+
+        let port = server::test_socket::free_port().await;
+        let (mut b, mut rx, _ads) = bridge_on(port);
+        let mut p = PairingManager::new();
+        b.set_enabled(true);
+        wait_until_listening(port).await;
+
+        let mut sock = handshake(port).await;
+        let ServerEvent::Connected(id) = next_applied(&mut b, &mut rx).await else {
+            panic!("Connected 를 기대했다");
+        };
+
+        // `v2_pair` 는 `handle_auth` 만 태운다 — 응답을 소켓에 쓰는 것은
+        // `send_auth_reply` 이고 여기서는 부르지 않으므로, 소켓으로 나가는
+        // 첫 바이트는 아래 스냅샷이 된다.
+        let (_out, mut client) = v2_pair(&mut b, &mut p, &id, t(1000));
+
+        let snap = sample_snapshot(1.0);
+        let frames = b.prepare_snapshot(&snap, t(1001), &mut p);
+        b.send_prepared(frames).await;
+
+        let got = read_binary_frame(&mut sock).await;
+        assert_eq!(
+            client.open(&got).expect("이 기기의 세션 키로 열려야 한다"),
+            serde_json::to_vec(&MirrorSnapshot::from(&snap)).unwrap()
+        );
+
+        b.set_enabled(false);
+    }
+}

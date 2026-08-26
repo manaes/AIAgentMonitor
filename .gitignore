@@ -30,3 +30,7 @@ vite.config.ts.timestamp-*
 # Added by code-review-graph
 .code-review-graph/
 .code-review-graphignore
+
+# LAN 종단 검증이 발급받은 토큰 (scripts/lan-e2e.md). CYD 의 NVS 자리이고
+# 실제 페어링 토큰이므로 절대 커밋하지 않는다.
+scripts/.lan-e2e-token.json

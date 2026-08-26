@@ -980,18 +980,35 @@ git commit -m "test(lan): 하드웨어 없는 종단 검증 절차와 참조 클
 > 아래 코드는 **컴파일해 보지 않았다.** 문서화된 API 를 근거로 썼으므로 첫 빌드에서
 > 시그니처가 어긋날 수 있다. 각 태스크는 빌드 확인부터 시작한다.
 
-## Task 8: PlatformIO 골격과 화면 점등
+## Task 8: PlatformIO 골격 — **화면 없이 시리얼만**
+
+> **재구성 2026-08-26.** 초안은 이 태스크가 화면 점등부터였다. 그러면 첫 실패에서
+> "암호가 틀렸나 / WebSocket 배선이 틀렸나 / ST7789 설정이 틀렸나"를 **동시에**
+> 의심하게 된다. v3 판은 디스플레이 컨트롤러가 ILI9341 이 아니라 ST7789 라
+> 설정을 틀리면 화면이 아예 안 켜지고, 그 상태에서 프로토콜까지 의심하면 훨씬 힘들다.
+>
+> 그래서 순서를 바꾼다. **이 태스크는 디스플레이를 전혀 건드리지 않는다** — WiFi ·
+> mDNS · WebSocket · monocypher · 페어링 · 재연결을 전부 **시리얼 출력만으로** 확정한다.
+> 화면은 그 다음 태스크에서 붙인다. 실패하면 의심할 곳이 하나뿐이다.
+>
+> 하드웨어는 CYD 본체를 그대로 쓴다 — 별도 dev board 가 필요 없다. 실물 확인 결과
+> 실크스크린이 `esp32-2432s028` 이고 칩은 ESP32 classic(WROOM-32) 이다(2026-08-26).
 
 **Files:**
 - Create: `firmware/cyd/platformio.ini`
 - Create: `firmware/cyd/src/main.cpp`
 
-- [ ] **Step 1: 보드 변종을 확인한다**
+- [ ] **Step 1: 보드 변종 — 확인 완료**
 
-실물의 USB 커넥터를 본다. 마이크로 USB 만 있으면 `esp32-2432S028R`,
-USB-C 면 `v2`, 둘 다 있으면 `v3`(디스플레이가 **ST7789** 다).
+USB-C 와 마이크로 USB 가 **둘 다** 있는 판이므로 `esp32-2432S028Rv3` 다.
+디스플레이 컨트롤러는 **ST7789** — 이 태스크에서는 쓰지 않지만 다음 태스크에서
+이 값이 틀리면 화면이 안 켜진다.
 
-- [ ] **Step 2: `platformio.ini` 를 쓴다**
+> 참고: v3 는 커넥터가 둘이라 둘 다 꽂으면 `/dev/cu.usbserial-*` 가 두 개 잡힌다.
+> 하나만 쓰면 된다. Arduino IDE 의 Serial Monitor 가 포트를 독점하므로,
+> `pio` 로 업로드할 때는 그 창을 닫아야 한다.
+
+- [ ] **Step 2: `platformio.ini` 를 쓴다 — 디스플레이 라이브러리 없이**
 
 ```ini
 [env:cyd]
@@ -999,54 +1016,101 @@ platform = espressif32
 board = esp32-2432S028Rv3        ; 실물 확인됨(2026-08-26) — ST7789 판이다
 framework = arduino
 monitor_speed = 115200
-platform_packages =
-    platformio/framework-arduinoespressif32
 board_build.partitions = huge_app.csv
 lib_deps =
-    rzeldent/esp32_smartdisplay
     links2004/WebSockets
     bblanchon/ArduinoJson
-build_flags =
-    -DLV_CONF_PATH=${PROJECT_DIR}/src/lv_conf.h
+    tzapu/WiFiManager
+; esp32_smartdisplay(LVGL)는 **일부러 넣지 않는다.** 이 태스크는 화면을 쓰지 않고,
+; 넣으면 빌드 시간과 플래시만 늘면서 디버깅 면적이 커진다. 다음 태스크에서 더한다.
 ```
 
 보드 정의를 쓰려면 저장소를 `platform_packages` 또는 `boards_dir` 로 잡는다 —
 `rzeldent/platformio-espressif32-sunton` README 를 따른다.
 
-- [ ] **Step 3: 화면이 켜지는 최소 스케치를 쓴다**
+- [ ] **Step 3: 살아 있다는 것만 확인하는 최소 스케치**
+
+화면도 WiFi 도 아직 없다. 툴체인·보드 id·업로드 경로가 맞는지만 본다.
 
 ```cpp
 #include <Arduino.h>
-#include <esp32_smartdisplay.h>
 
 void setup() {
     Serial.begin(115200);
-    smartdisplay_init();
-    auto disp = lv_disp_get_default();
-    lv_obj_t *label = lv_label_create(lv_scr_act());
-    lv_label_set_text(label, "AI Agent Monitor");
-    lv_obj_center(label);
+    delay(300);                       // USB CDC 가 붙을 시간
+    Serial.println();
+    Serial.printf("chip=%s rev=%d cores=%d\n",
+                  ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores());
+    Serial.printf("flash=%u bytes  free heap=%u\n",
+                  ESP.getFlashChipSize(), ESP.getFreeHeap());
+    Serial.println("AI Agent Monitor — CYD 프로토콜 펌웨어 (화면 없음)");
 }
 
 void loop() {
-    lv_timer_handler();
-    delay(5);
+    Serial.printf("alive  heap=%u\n", ESP.getFreeHeap());
+    delay(5000);
 }
 ```
+
+> **제약 — `loop()` 한 바퀴는 30초를 넘겨 블로킹하지 않는다. Task 8~15 전부에
+> 걸린다.**
+>
+> 맥은 30초마다 WebSocket Ping 을 보내고, 이 기기에게서 **무언가** 받은 지
+> 90초가 지나면 사라진 것으로 보고 연결을 놓는다(`src-tauri/src/lan/server.rs`
+> 의 `PING_INTERVAL` · `IDLE_TIMEOUT`). 그 Ping 에 Pong 을 돌려주는 것은
+> **OS 의 TCP 스택이 아니라 `links2004/WebSockets` 라이브러리이고, 그것은
+> `webSocket.loop()` 가 불릴 때만 응답한다.** 즉 메인 루프가 90초 넘게
+> 블로킹하면 WiFi 도 소켓도 멀쩡한 보드가 맥에서 끊긴다 — **그리고 이 기기에는
+> 이유를 설명할 화면도 키보드도 없다.** 이 전송을 만든 이유가 된 바로 그
+> 비대칭이 여기서 사람을 문다.
+>
+> 그래서 예산은 90초가 아니라 **30초**다. Ping 한 번 놓치는 정도까지만 허용하는
+> 값이고, 90초에 바짝 붙여 두면 전체 화면 갱신이 한 번 느려지는 날 곧바로
+> 넘긴다. 지키는 방법:
+>
+> - 주기를 `delay()` 로 만들지 않는다 — `millis()` 비교로 넘긴다.
+> - 블로킹이 불가피한 구간(WiFi 재접속, 전체 화면 갱신, NVS 쓰기)은 조각을 내고
+>   사이사이에 `webSocket.loop()` 를 부른다.
+> - Task 12 에서 WebSocket 이 붙은 뒤에는 `loop()` 한 바퀴의 최장 시간을 시리얼로
+>   찍어 둔다. 그러면 이 제약이 깨지는 날이 눈에 보인다.
+>
+> **위 스케치의 `delay(5000)` 은 이 태스크 한정으로만 무해하다** — 아직 WebSocket
+> 이 없기 때문이다. Task 12 에서 소켓이 붙는 순간 이 모양이 그대로 결함이 되므로,
+> 그때 이 루프를 `millis()` 기반으로 바꾸는 것을 잊지 말라.
 
 - [ ] **Step 4: 빌드하고 올린다**
 
 ```bash
-cd firmware/cyd && pio run -t upload && pio device monitor
+cd firmware/cyd
+pio run -t upload
+pio device monitor
 ```
-Expected: 화면에 문구가 보인다. 안 보이면 **보드 변종이 틀렸을 가능성이 가장 크다.**
+
+Expected — 시리얼에 다음이 보인다:
+
+```
+chip=ESP32 rev=… cores=2
+flash=4194304 bytes  free heap=…
+AI Agent Monitor — CYD 프로토콜 펌웨어 (화면 없음)
+alive  heap=…
+```
+
+`chip=ESP32` 와 `flash=4194304`(4MB)가 스펙 2장의 값과 맞는지 확인한다.
+**어긋나면 보드 id 나 파티션 설정이 틀린 것이고, 여기서 잡는 편이 나중보다 훨씬 싸다.**
+
+업로드가 `Resource busy` 로 실패하면 Arduino IDE 의 Serial Monitor 가 포트를
+잡고 있는 것이다 — 그 창만 닫으면 된다(IDE 전체를 끌 필요 없다).
 
 - [ ] **Step 5: 커밋**
 
 ```bash
 git add firmware/cyd/
-git commit -m "feat(cyd): PlatformIO 골격 — 화면 점등 확인"
+git commit -m "feat(cyd): PlatformIO 골격 — 화면 없이 시리얼만"
 ```
+
+> **다음 태스크로 넘기는 것**: 화면 점등(`esp32_smartdisplay` + LVGL + ST7789)은
+> 프로토콜이 시리얼로 확정된 뒤에 붙인다. 그때 실패하면 의심할 곳이 디스플레이
+> 하나뿐이다.
 
 ---
 
@@ -1110,6 +1174,15 @@ bool wifiConnectOrPortal(Config &c) {
 ```
 
 `lib_deps` 에 `tzapu/WiFiManager` 를 더한다.
+
+> **`wifiConnectOrPortal()` 은 블로킹이다** — 포털이 열려 있는 동안 `loop()` 는
+> 돌지 않는다. 여기서는 괜찮다: 이 함수는 부팅 때, **WebSocket 이 붙기 전에**
+> 한 번 돈다. 그것이 Task 8 의 30초 예산을 어겨도 되는 유일한 근거다.
+>
+> Task 12 이후에 **런타임 중** 포털을 다시 여는 길을 만든다면(맥 주소 변경,
+> WiFi 재설정), 포털을 열기 전에 WebSocket 을 명시적으로 끊어라. 끊지 않고 열면
+> 맥은 90초 뒤에 그 연결을 죽은 것으로 처리하고, 포털에서 돌아온 기기는 자기가
+> 왜 끊겼는지 모른 채 재연결을 시작한다.
 
 - [ ] **Step 2: 확인한다**
 

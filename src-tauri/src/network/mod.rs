@@ -17,7 +17,7 @@
 pub mod identity;
 
 
-use crate::ble::pairing::{self, AuthReply, PairingManager};
+use crate::ble::pairing::{self, PairingManager};
 use crate::ble::peripheral::CentralId;
 use crate::ble::wire::MirrorSnapshot;
 use crate::emitter::EmitGate;
@@ -117,18 +117,11 @@ impl NetworkBridge {
         let req = pairing::parse_auth_request(data);
         let reply = pairing.handle(central, req, now);
         let payload = reply.to_json_bytes();
-        // v2 응답도 반드시 함께 본다. 여기서 빠지면 v2 클라이언트는 인증에
-        // 성공하고도 accept 루프가 스냅샷 uni-stream 을 열지 않아 화면이 계속
-        // 비어 있고, 새 토큰도 디스크에 남지 않는다.
-        let now_authorized = matches!(
-            reply,
-            AuthReply::Granted { .. }
-                | AuthReply::Authorized
-                | AuthReply::Granted2 { .. }
-                | AuthReply::Authorized2
-        );
-        let granted = matches!(reply, AuthReply::Granted { .. } | AuthReply::Granted2 { .. });
-        AuthOutcome { payload, now_authorized, granted }
+        // 판정은 `AuthReply` 를 소유한 pairing 모듈이 한다. 예전에는 여기서
+        // `matches!` 로 직접 갈랐는데, 같은 판정이 세 전송에 복사돼 있는 것이
+        // 바로 v2 갈래를 빠뜨리는 사고의 형태였다(`ReplySignals` 의 doc).
+        let s = reply.signals();
+        AuthOutcome { payload, now_authorized: s.authorized, granted: s.granted }
     }
 
     /// `Granted`/`Authorized` 응답 직후, accept 루프가 새로 연 uni-stream 을
