@@ -949,6 +949,11 @@ pub fn run() {
                                 // 이 전송이 서비스하던 세션만 내린다.
                                 pairing_for_lan.lock().await.end_sessions(&ending);
                             }
+                            // 프레임은 인증 이전에 아무나 보낼 수 있으므로, 상태를
+                            // 실제로 바꿨을 때만 프론트에 알린다. 나머지 이벤트는
+                            // 연결·리스너 상태가 바뀐 것이라 언제나 알린다.
+                            let mut notable =
+                                !matches!(ev, lan::server::ServerEvent::Frame { .. });
                             if let lan::server::ServerEvent::Frame { id, text } = &ev {
                                 let now = std::time::SystemTime::now();
                                 let outcome = {
@@ -963,6 +968,7 @@ pub fn run() {
                                 // `None` 은 우리가 서비스하지 않는 연결이라는 뜻이다 —
                                 // 그 경우 브리지가 pairing 을 아예 건드리지 않았다.
                                 if let Some(outcome) = outcome {
+                                    notable = outcome.changed_visible_state();
                                     h.bridge.lock().await.send_auth_reply(id, outcome.payload);
                                     if outcome.granted {
                                         // 새 토큰이 발급됐다. 여기서 디스크에 쓰지 않으면
@@ -975,6 +981,8 @@ pub fn run() {
                                             h.bridge.lock().await.set_last_error(Some(format!(
                                                 "페어링 토큰 저장 실패: {e}"
                                             )));
+                                            // 오류가 바뀌었으면 그것만으로도 알릴 이유다.
+                                            notable = true;
                                         }
                                     }
                                     if outcome.now_authorized {
@@ -986,7 +994,9 @@ pub fn run() {
                                     }
                                 }
                             }
-                            let _ = app_for_lan.emit("lan_status", ());
+                            if notable {
+                                let _ = app_for_lan.emit("lan_status", ());
+                            }
                         }
                     });
                 }

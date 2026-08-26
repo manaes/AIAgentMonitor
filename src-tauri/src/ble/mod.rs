@@ -182,10 +182,8 @@ impl BleBridge {
         let reply = pairing.handle(central, req, now);
         // v2 도 `Granted2` 로 새 토큰을 발급한다 — v1 만 보면 v2 로 페어링한
         // 기기의 토큰이 디스크에 남지 않아 맥을 껐다 켜는 순간 사라진다.
-        let granted = matches!(
-            reply,
-            pairing::AuthReply::Granted { .. } | pairing::AuthReply::Granted2 { .. }
-        );
+        // 그 판정은 이제 `AuthReply` 옆에 한 벌만 있다(`ReplySignals` 의 doc).
+        let granted = reply.signals().granted;
         self.peripheral.notify_auth(central, reply.to_json_bytes());
         granted
     }

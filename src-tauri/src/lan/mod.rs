@@ -8,7 +8,7 @@
 
 pub mod server;
 
-use crate::ble::pairing::{self, AuthReply, PairingManager};
+use crate::ble::pairing::{self, PairingManager};
 use crate::ble::peripheral::CentralId;
 use server::{Outbound, ServerEvent, ServerHandle};
 use std::collections::HashSet;
@@ -33,26 +33,20 @@ pub struct AuthOutcome {
     pub granted: bool,
 }
 
-/// 응답 하나를 `(now_authorized, granted)` 로 가른다.
-///
-/// 연결 코드가 아니라 여기에 있는 이유는 이 판정이 이 전송에서 가장 틀리기
-/// 쉬운 지점이기 때문이다 — 한 갈래를 빠뜨려도 컴파일은 되고 대부분의
-/// 흐름은 멀쩡해 보인다. `matches!` 가 아니라 **모든 변형을 적는 match** 를
-/// 쓴 것도 같은 이유다: 프로토콜에 응답이 하나 늘면 여기서 컴파일이 깨져
-/// 판정을 다시 보게 만든다.
-fn classify(reply: &AuthReply) -> (bool, bool) {
-    match reply {
-        // 인가 + 새 토큰.
-        AuthReply::Granted { .. } | AuthReply::Granted2 { .. } => (true, true),
-        // 인가만 — 재연결은 이미 아는 토큰을 확인했을 뿐이라 저장할 것이 없다.
-        AuthReply::Authorized | AuthReply::Authorized2 => (true, false),
-        // 아직 핸드셰이크 중이거나 거절이다.
-        AuthReply::AwaitingCode
-        | AuthReply::AwaitingCode2 { .. }
-        | AuthReply::Nonce { .. }
-        | AuthReply::Nonce2 { .. }
-        | AuthReply::Denied { .. }
-        | AuthReply::Rejected => (false, false),
+impl AuthOutcome {
+    /// 이 결과가 **프론트가 보는 상태**를 바꿨는가.
+    ///
+    /// 바꾸지 않았으면 상태 이벤트를 내보내지 않는다. 프레임은 인증 이전에
+    /// 아무나 보낼 수 있고 소비자 속도에 맞춰 보내면 큐 상한에도 걸리지
+    /// 않으므로, 프레임마다 내보내면 **인증하지 않은 피어가 시간 제한 없이
+    /// 프론트를 계속 다시 그리게** 만들 수 있다. 형제 전송도 이벤트마다
+    /// 내보내지만 거기서 이벤트를 만들려면 근접(BLE)하거나 상대가 걸어와야
+    /// 한다(iroh) — LAN 리스너만 같은 WiFi 의 아무에게나 열려 있다.
+    ///
+    /// 핸드셰이크 중간 응답(`AwaitingCode2`/`Nonce2`)이나 거절은 패널에 보이는
+    /// 것을 아무것도 바꾸지 않는다. 인가와 발급만 바꾼다.
+    pub fn changed_visible_state(&self) -> bool {
+        self.now_authorized || self.granted
     }
 }
 
@@ -226,8 +220,14 @@ impl LanBridge {
             return None;
         }
         let reply = pairing.handle(central, pairing::parse_auth_request(data), now);
-        let (now_authorized, granted) = classify(&reply);
-        Some(AuthOutcome { payload: reply.to_json_bytes(), now_authorized, granted })
+        // 판정은 `AuthReply` 를 소유한 pairing 모듈에 한 벌만 있다 — 세 전송이
+        // 각자 베끼면 한쪽만 고치고 다른 쪽을 잊는다(`ReplySignals` 의 doc).
+        let s = reply.signals();
+        Some(AuthOutcome {
+            payload: reply.to_json_bytes(),
+            now_authorized: s.authorized,
+            granted: s.granted,
+        })
     }
 
     /// 인증 응답을 이 central 에게 텍스트 프레임으로 돌려보낸다. 인증 프레임은
@@ -294,6 +294,7 @@ impl LanBridge {
 mod tests {
     use super::*;
     use crate::ble::pairing::test_client::{self, hex_encode, V2Client};
+    use crate::ble::pairing::AuthReply;
     use crate::crypto;
     use std::time::{Duration, UNIX_EPOCH};
     use tokio::sync::mpsc::{channel, Receiver};
@@ -659,28 +660,39 @@ mod tests {
         assert!(out.now_authorized && out.granted, "v1 CODE 성공도 인가이자 발급이다");
     }
 
-    /// 응답 하나하나가 어떤 신호인지 한자리에서 못박는다. `classify` 가
-    /// 모든 변형을 적는 `match` 라서, 프로토콜에 응답이 늘면 컴파일이 먼저
-    /// 깨지고 이 표가 그다음을 잡는다.
+    /// 인증하지 않은 피어가 프레임만 보내서 프론트를 계속 다시 그리게 만들 수
+    /// 있으면 안 된다. 상태를 실제로 바꾼 결과만 이벤트가 된다.
+    /// (응답 10종의 판정 자체는 `ble::pairing` 의 `every_reply_has_signals` 가 본다.)
     #[test]
-    fn every_reply_is_classified() {
-        let table: Vec<(AuthReply, bool, bool)> = vec![
-            (AuthReply::Granted { token: "t".into() }, true, true),
-            (AuthReply::Granted2 { sealed: "s".into() }, true, true),
-            (AuthReply::Authorized, true, false),
-            (AuthReply::Authorized2, true, false),
-            (AuthReply::AwaitingCode, false, false),
-            (AuthReply::AwaitingCode2 { epk: "e".into(), nonce: "n".into() }, false, false),
-            (AuthReply::Nonce { nonce: "n".into() }, false, false),
-            (AuthReply::Nonce2 { epk: "e".into(), nonce: "n".into() }, false, false),
-            (AuthReply::Denied { left: 2 }, false, false),
-            (AuthReply::Rejected, false, false),
-        ];
-        for (reply, authorized, granted) in table {
-            assert_eq!(
-                classify(&reply),
-                (authorized, granted),
-                "{reply:?} 의 판정이 다르다"
+    fn only_a_real_change_is_worth_telling_the_frontend() {
+        let out = |now_authorized, granted| AuthOutcome {
+            payload: Vec::new(),
+            now_authorized,
+            granted,
+        };
+        assert!(out(true, true).changed_visible_state(), "새 페어링은 알려야 한다");
+        assert!(out(true, false).changed_visible_state(), "재연결도 알려야 한다");
+        assert!(
+            !out(false, false).changed_visible_state(),
+            "거절·핸드셰이크 중간 응답은 패널에 보이는 것을 바꾸지 않는다"
+        );
+    }
+
+    /// 인증 프레임을 아무리 보내도, 통과하지 못하면 알릴 것이 없다.
+    /// `handle_auth` 를 실제로 태워 확인한다 — 위 표가 손으로 만든 값이라면
+    /// 이쪽은 진짜 응답에서 나온 값이다.
+    #[tokio::test]
+    async fn a_rejected_frame_is_not_worth_telling_the_frontend() {
+        let id = server::central_id(0);
+        let (mut b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+
+        // 창이 닫혀 있으므로 무엇을 보내도 Rejected 다.
+        for frame in [&b"HELLO"[..], b"HELLO2:short", b"PROOF:zz"] {
+            let out = b.handle_auth(&id, frame, t(1000), &mut p).expect("서비스 중이다");
+            assert!(
+                !out.changed_visible_state(),
+                "통과하지 못한 프레임이 프론트 갱신을 유발하면 안 된다"
             );
         }
     }

@@ -17,8 +17,15 @@
 //! BLE 는 물리적으로 가까워야 하고 iroh 는 상대가 걸어와야 한다. **LAN 리스너는
 //! 둘 다 아니다** — 같은 WiFi 의 아무나, 인증 전에, 아무 때나 두드릴 수 있다.
 //! 그래서 인증보다 **앞에** 있는 자원은 전부 상한이 있어야 한다: 프레임 크기,
-//! 동시 연결 수, 이벤트 큐, central 별 송신 큐. 상한을 넘긴 쪽은 기다리게 하지
-//! 않고 **놓는다** — 여기서 기다리면 낯선 기기 하나가 서버 전체를 세울 수 있다.
+//! 동시 연결 수, 이벤트 큐, central 별 송신 큐, 그리고 **시간**. 상한을 넘긴
+//! 쪽은 기다리게 하지 않고 **놓는다** — 여기서 기다리면 낯선 기기 하나가 서버
+//! 전체를 세울 수 있다.
+//!
+//! 시간이 목록에 늦게 들어온 이유는 그것만 메모리로 드러나지 않기 때문이다.
+//! 연결 하나는 여덟 자리 중 하나이고, 자리를 놓지 않는 피어는 아무것도 키우지
+//! 않으면서 자리를 영원히 쓴다. 그래서 인증 여부와 무관하게 **모든 연결에**
+//! 시간 상한이 걸린다: 조용한 피어는 `IDLE_TIMEOUT` 으로, 말은 하지만 읽지
+//! 않는 피어는 하트비트를 보내지 못하는 순간으로.
 
 use crate::ble::peripheral::CentralId;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -511,10 +518,23 @@ async fn handle(
                         tracing::info!(id = %id.0, "LAN 피어가 조용하다 — 사라진 것으로 본다");
                         break;
                     }
-                    // 큐가 밀려 있으면 `push_to_sink` 가 큐를 지우고, 아래 writer
-                    // 분기가 그것을 알아채 연결을 정리한다.
+                    // **보내지 못하면 그것으로 끝이다.** 큐가 지워졌다는 것은
+                    // 상대가 읽지 않아 writer 가 `ws_tx.send().await` 에서 멈춰
+                    // 있다는 뜻이고, 멈춘 writer 는 `sink_rx.recv()` 로 돌아오지
+                    // 않으므로 큐를 지워도 스스로 끝나지 않는다 — 아래 writer
+                    // 분기는 영영 깨어나지 않는다.
+                    //
+                    // 그동안 하트비트도 무력하다: 말은 계속 하는 피어라면
+                    // `last_seen` 이 계속 갱신돼 `Drop` 판정이 나오지 않는다.
+                    // 메모리는 전부 상한이 있어 늘지 않지만, **연결 자리 여덟 중
+                    // 하나를 시간 제한 없이 붙들고 있게 된다.** 여덟이 그러면
+                    // 정작 CYD 가 못 붙는다. 모듈 doc 이 말하는 "인증 앞의 자원에는
+                    // 전부 상한"에서 빠져 있던 것이 시간이었다.
                     Heartbeat::Ping => {
-                        push_to_sink(&state.sinks, &id, Message::Ping(Vec::new()));
+                        if !push_to_sink(&state.sinks, &id, Message::Ping(Vec::new())) {
+                            tracing::info!(id = %id.0, "LAN 피어가 읽지 않는다 — 연결을 놓는다");
+                            break;
+                        }
                     }
                 }
             },
@@ -585,6 +605,36 @@ pub(crate) mod test_socket {
 
     pub(crate) async fn handshake(port: u16) -> TcpStream {
         let (s, head) = try_handshake(port).await;
+        assert!(head.starts_with("HTTP/1.1 101"), "업그레이드가 거절됐다: {head}");
+        s
+    }
+
+    /// 수신 버퍼를 아주 작게 잡은 클라이언트. **읽지 않는 피어를 재현하는 데
+    /// 필요하다** — 루프백의 기본 버퍼는 수 MB라, 상대가 한 바이트도 읽지 않아도
+    /// 커널이 다 받아줘서 서버의 writer 가 멈추지 않는다. 실제 CYD 는 그 반대다
+    /// (ESP32 의 lwIP 기본 수신 윈도는 6 KB 남짓이다). 그러니 이 값이 인위적인
+    /// 것이 아니라, 루프백 쪽이 실제와 동떨어진 조건이다.
+    pub(crate) async fn handshake_with_a_tiny_window(port: u16) -> TcpStream {
+        let sock = tokio::net::TcpSocket::new_v4().unwrap();
+        sock.set_recv_buffer_size(2 * 1024).unwrap();
+        let mut s = sock
+            .connect(([127, 0, 0, 1], port).into())
+            .await
+            .unwrap();
+        s.write_all(
+            b"GET /mirror HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Connection: Upgrade\r\n\
+              Upgrade: websocket\r\n\
+              Sec-WebSocket-Version: 13\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+        )
+        .await
+        .unwrap();
+
+        let mut buf = [0u8; 512];
+        let n = s.read(&mut buf).await.unwrap();
+        let head = String::from_utf8_lossy(&buf[..n]);
         assert!(head.starts_with("HTTP/1.1 101"), "업그레이드가 거절됐다: {head}");
         s
     }
@@ -1145,6 +1195,53 @@ mod tests {
             next_event(&mut rx).await,
             ServerEvent::Disconnected(id),
             "조용히 사라진 기기를 알아채지 못하면 인가가 링크보다 오래 산다"
+        );
+
+        let _ = handle.stop();
+    }
+
+    /// **말은 하지만 읽지 않는 피어**에게도 시간 상한이 있어야 한다.
+    ///
+    /// 이 피어에게는 다른 어떤 상한도 걸리지 않는다: `last_seen` 이 계속
+    /// 갱신되니 무응답 판정이 안 나오고, 프레임을 소비자 속도에 맞추면 이벤트
+    /// 큐도 안 넘치며, writer 는 `ws_tx.send().await` 에 멈춰 있어 큐를 지워도
+    /// 스스로 끝나지 않는다. 메모리는 늘지 않지만 **연결 자리 여덟 중 하나를
+    /// 영원히** 붙든다.
+    ///
+    /// 재현: 수신 윈도가 좁은 클라이언트가 한 바이트도 읽지 않는 동안 서버가
+    /// 큰 프레임을 밀어 넣는다 → writer 가 `ws_tx.send().await` 에서 멈춘다 →
+    /// central 별 큐가 차서 지워진다 → 다음 하트비트가 보내지 못하고, 그때
+    /// 연결을 놓아야 한다. `idle` 은 넉넉히 잡아 **무응답 경로가 아니라 이
+    /// 경로로** 끝난다는 것을 분명히 한다.
+    #[tokio::test]
+    async fn a_peer_that_never_reads_does_not_hold_its_slot_forever() {
+        let port = free_port().await;
+        let (tx, mut rx) = events();
+        let handle = spawn_with(
+            port,
+            tx,
+            1,
+            None,
+            Timing { ping: Duration::from_millis(40), idle: Duration::from_secs(30) },
+        );
+        wait_until_listening(port).await;
+
+        // 붙기만 하고 한 바이트도 읽지 않는다.
+        let _sock = handshake_with_a_tiny_window(port).await;
+        let id = next_connected(&mut rx).await;
+
+        // 좁은 윈도를 넘기고도 남을 만큼 밀어 넣는다. 큐(8)를 채우고 writer 를
+        // 멈추게 하는 것이 목적이지, 전부 나가는 것이 목적이 아니다.
+        for _ in 0..64 {
+            let _ = handle
+                .outbound
+                .send(Outbound::Binary(id.clone(), vec![0u8; MAX_FRAME_BYTES]));
+        }
+
+        assert_eq!(
+            next_event(&mut rx).await,
+            ServerEvent::Disconnected(id),
+            "읽지 않는 피어가 자리를 무한정 붙들면 안 된다"
         );
 
         let _ = handle.stop();
