@@ -155,6 +155,13 @@ pub struct NetworkHandle {
     pub last_error: std::sync::Mutex<Option<String>>,
 }
 
+/// LAN 전송의 앱 쪽 손잡이. `NetworkHandle` 과 달리 엔드포인트도 `last_error` 도
+/// 밖에 두지 않는다 — 리스너는 토글이 켜져 있는 동안만 존재하고(스펙 4장),
+/// 오류는 브리지가 이미 들고 있다(`LanBridge::last_error`).
+pub struct LanHandle {
+    pub bridge: Mutex<lan::LanBridge>,
+}
+
 #[tauri::command]
 async fn network_status(state: tauri::State<'_, Arc<NetworkHandle>>) -> Result<NetworkStatus, String> {
     let bridge = state.bridge.lock().await;
@@ -904,6 +911,82 @@ pub fn run() {
                                 h.bridge.lock().await.forget_central(&central);
                                 let _ = app_for_net.emit("network_status", ());
                             });
+                        }
+                    });
+                }
+
+                // LAN(WebSocket) 전송. iroh 와 달리 여기서 여는 것은 이벤트 통로뿐이다 —
+                // 리스너 자체는 토글이 켜져 있는 동안만 존재한다(스펙 4장). 통로는
+                // 브리지와 수명을 같이해서 수신 루프를 한 번만 걸면 되게 한다.
+                let (lan_tx, mut lan_rx) = mpsc::channel(lan::server::EVENT_QUEUE);
+                let lan_handle = Arc::new(LanHandle {
+                    bridge: Mutex::new(lan::LanBridge::new(lan_tx)),
+                });
+                {
+                    use tauri::Manager;
+                    app.manage(lan_handle.clone());
+                }
+
+                // LAN 이벤트 → 인증 처리 + 프론트로 상태 push. BLE 루프와 같은 모양이다:
+                // 판단은 전부 브리지·PairingManager 에 있고 여기서는 그 결과를 잇는다.
+                {
+                    let h = lan_handle.clone();
+                    let app_for_lan = app.handle().clone();
+                    let pairing_for_lan = shared_pairing.clone();
+                    tauri::async_runtime::spawn(async move {
+                        while let Some(ev) = lan_rx.recv().await {
+                            let ending = {
+                                let mut b = h.bridge.lock().await;
+                                // 무엇이 끝나는지는 `apply_event` 가 목록에서 지우기
+                                // **전에** 물어야 한다(`sessions_to_end` 의 doc).
+                                let ending = b.sessions_to_end(&ev);
+                                b.apply_event(&ev);
+                                ending
+                            };
+                            if !ending.is_empty() {
+                                // 링크가 끊기면 인가도 즉시 사라진다 — BLE 의
+                                // `Disconnected` 와 같은 규칙이다. 공유 매니저이므로
+                                // 이 전송이 서비스하던 세션만 내린다.
+                                pairing_for_lan.lock().await.end_sessions(&ending);
+                            }
+                            if let lan::server::ServerEvent::Frame { id, text } = &ev {
+                                let now = std::time::SystemTime::now();
+                                let outcome = {
+                                    let mut p = pairing_for_lan.lock().await;
+                                    h.bridge.lock().await.handle_auth(
+                                        id,
+                                        text.as_bytes(),
+                                        now,
+                                        &mut p,
+                                    )
+                                };
+                                // `None` 은 우리가 서비스하지 않는 연결이라는 뜻이다 —
+                                // 그 경우 브리지가 pairing 을 아예 건드리지 않았다.
+                                if let Some(outcome) = outcome {
+                                    h.bridge.lock().await.send_auth_reply(id, outcome.payload);
+                                    if outcome.granted {
+                                        // 새 토큰이 발급됐다. 여기서 디스크에 쓰지 않으면
+                                        // 이 세션에서는 멀쩡히 동작하다가 맥을 껐다 켜는
+                                        // 순간 사라져 영영 재연결하지 못한다.
+                                        if let Err(e) = save_paired_peers(&pairing_for_lan).await {
+                                            // 이 경로는 사용자 커맨드가 아니라 이벤트 루프라
+                                            // Result 로 알릴 통로가 없다 — BLE 와 같은 방식으로
+                                            // last_error 에 싣는다(tracing 은 전부 유실된다).
+                                            h.bridge.lock().await.set_last_error(Some(format!(
+                                                "페어링 토큰 저장 실패: {e}"
+                                            )));
+                                        }
+                                    }
+                                    if outcome.now_authorized {
+                                        // network 는 여기서 스냅샷 uni-stream 을 열지만 LAN 은
+                                        // 열 것이 없다 — 스냅샷은 이미 붙어 있는 같은
+                                        // WebSocket 으로 나간다(Task 4 가
+                                        // `snapshot_targets` 로 대상을 고른다).
+                                        tracing::info!(id = %id.0, "LAN 세션 인가됨");
+                                    }
+                                }
+                            }
+                            let _ = app_for_lan.emit("lan_status", ());
                         }
                     });
                 }

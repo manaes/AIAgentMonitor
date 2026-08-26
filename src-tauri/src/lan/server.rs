@@ -371,11 +371,99 @@ async fn handle(
     let _ = state.events.send(ServerEvent::Disconnected(id)).await;
 }
 
+/// 테스트에서 진짜 소켓을 다루는 최소한의 도구. `pairing::test_client` 를
+/// 끌어올린 것과 같은 이유로 형제 모듈(`lan::mod` 의 테스트)에서도 보이게
+/// 둔다 — 핸드셰이크와 프레이밍을 각자 베껴 두면 한 곳만 고치고 나머지를
+/// 잊는다. WebSocket 클라이언트 크레이트를 dev-dep 으로 더하지 않는 이유는,
+/// 여기서 확인하려는 것이 라이브러리의 프레이밍이 아니라 **우리 쪽 수명·상한·
+/// 인증 판단**이기 때문이다.
+#[cfg(test)]
+pub(crate) mod test_socket {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    /// 지금 비어 있는 포트를 하나 골라 온다. 테스트가 4320 을 잡으면 서로,
+    /// 그리고 개발 중인 앱과 충돌한다.
+    pub(crate) async fn free_port() -> u16 {
+        let l = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    pub(crate) async fn wait_until_listening(port: u16) {
+        for _ in 0..200 {
+            if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("서버가 {port} 에서 뜨지 않았다");
+    }
+
+    /// 업그레이드를 시도하고 응답 머리를 그대로 돌려준다 — 거절(503)을 보는
+    /// 테스트가 있으므로 여기서 성공을 단정하지 않는다.
+    pub(crate) async fn try_handshake(port: u16) -> (TcpStream, String) {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        s.write_all(
+            b"GET /mirror HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Connection: Upgrade\r\n\
+              Upgrade: websocket\r\n\
+              Sec-WebSocket-Version: 13\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+        )
+        .await
+        .unwrap();
+
+        let mut buf = [0u8; 512];
+        let n = s.read(&mut buf).await.unwrap();
+        (s, String::from_utf8_lossy(&buf[..n]).to_string())
+    }
+
+    pub(crate) async fn handshake(port: u16) -> TcpStream {
+        let (s, head) = try_handshake(port).await;
+        assert!(head.starts_with("HTTP/1.1 101"), "업그레이드가 거절됐다: {head}");
+        s
+    }
+
+    /// 클라이언트→서버 프레임은 마스킹해야 한다(RFC 6455).
+    pub(crate) fn masked_text_frame(payload: &[u8]) -> Vec<u8> {
+        let mask = [0x37u8, 0xfa, 0x21, 0x3d];
+        let mut out = vec![0x81]; // FIN + text
+        assert!(payload.len() < 126, "테스트는 짧은 프레임만 보낸다");
+        out.push(0x80 | payload.len() as u8);
+        out.extend_from_slice(&mask);
+        out.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        out
+    }
+
+    /// 서버→클라이언트 텍스트 프레임 하나를 읽는다. 서버 프레임은 마스킹하지
+    /// 않는다(RFC 6455). 길이는 7비트와 16비트 두 형태만 다룬다 — 인증 응답은
+    /// 가장 긴 것도 200바이트 남짓이라 그 이상은 나올 수 없다.
+    pub(crate) async fn read_text_frame(s: &mut TcpStream) -> Vec<u8> {
+        let mut head = [0u8; 2];
+        s.read_exact(&mut head).await.expect("프레임 머리를 읽지 못했다");
+        assert_eq!(head[0], 0x81, "텍스트 프레임(FIN+opcode 1)이어야 한다");
+        assert_eq!(head[1] & 0x80, 0, "서버 프레임은 마스킹하지 않는다");
+        let len = match head[1] & 0x7f {
+            126 => {
+                let mut ext = [0u8; 2];
+                s.read_exact(&mut ext).await.unwrap();
+                u16::from_be_bytes(ext) as usize
+            }
+            n => n as usize,
+        };
+        let mut payload = vec![0u8; len];
+        s.read_exact(&mut payload).await.expect("본문을 읽지 못했다");
+        payload
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_socket::*;
     use super::*;
     use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
     use tokio::sync::mpsc::Receiver;
 
     fn events() -> (Sender<ServerEvent>, Receiver<ServerEvent>) {
@@ -527,24 +615,7 @@ mod tests {
         assert!(slots.acquire().is_some(), "자리가 비었으면 다시 받아야 한다");
     }
 
-    // --- 실제 소켓 ---
-
-    /// 지금 비어 있는 포트를 하나 골라 온다. 테스트가 4320 을 잡으면 서로,
-    /// 그리고 개발 중인 앱과 충돌한다.
-    async fn free_port() -> u16 {
-        let l = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        l.local_addr().unwrap().port()
-    }
-
-    async fn wait_until_listening(port: u16) {
-        for _ in 0..200 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("서버가 {port} 에서 뜨지 않았다");
-    }
+    // --- 실제 소켓 (도구는 `test_socket` 에 있다) ---
 
     /// 토글을 끄면 플래그만 내려가는 게 아니라 소켓이 실제로 닫혀야 한다.
     /// "다시 바인딩할 수 있다"가 그것을 증명하는 유일하게 확실한 방법이다.
@@ -605,44 +676,6 @@ mod tests {
             }
             other => panic!("BindFailed 를 기대했다: {other:?}"),
         }
-    }
-
-    /// WebSocket 핸드셰이크를 손으로 친다. 클라이언트 크레이트를 dev-dep 으로
-    /// 더하지 않으려는 것이고, 여기서 확인하려는 것은 라이브러리의 프레이밍이
-    /// 아니라 **우리 쪽 수명·상한 판단**이라 이 정도면 된다.
-    async fn try_handshake(port: u16) -> (tokio::net::TcpStream, String) {
-        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        s.write_all(
-            b"GET /mirror HTTP/1.1\r\n\
-              Host: localhost\r\n\
-              Connection: Upgrade\r\n\
-              Upgrade: websocket\r\n\
-              Sec-WebSocket-Version: 13\r\n\
-              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
-        )
-        .await
-        .unwrap();
-
-        let mut buf = [0u8; 512];
-        let n = s.read(&mut buf).await.unwrap();
-        (s, String::from_utf8_lossy(&buf[..n]).to_string())
-    }
-
-    async fn handshake(port: u16) -> tokio::net::TcpStream {
-        let (s, head) = try_handshake(port).await;
-        assert!(head.starts_with("HTTP/1.1 101"), "업그레이드가 거절됐다: {head}");
-        s
-    }
-
-    /// 클라이언트→서버 프레임은 마스킹해야 한다(RFC 6455).
-    fn masked_text_frame(payload: &[u8]) -> Vec<u8> {
-        let mask = [0x37u8, 0xfa, 0x21, 0x3d];
-        let mut out = vec![0x81]; // FIN + text
-        assert!(payload.len() < 126, "테스트는 짧은 프레임만 보낸다");
-        out.push(0x80 | payload.len() as u8);
-        out.extend_from_slice(&mask);
-        out.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
-        out
     }
 
     /// 헤더에 `declared` 바이트를 적어 놓고 본문은 보내지 않는다. 상한을 헤더
