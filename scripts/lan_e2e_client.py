@@ -40,9 +40,10 @@
 
 ## 스냅샷을 몇 장 기대할 수 있나
 
-`--listen` 의 기본값이 1 인 이유가 있다. 맥은 **내용이 바뀔 때만** 보낸다 —
-스로틀이 아니라 변경 게이트다(`GATE_HINT` 의 근거 참고). 유휴 맥에서 2장 이상을
-요구하면 정상 동작이 `[FAIL]` 로 나온다.
+`--listen` 의 기본값이 1 인 이유가 있다. 맥의 게이트는 **스로틀이자 변경
+게이트**다 — 스로틀이 초당 한 장이라는 상한을 주고, 변경 검사가 조용한 시간을
+만든다(`GATE_HINT` 의 근거 참고). 유휴 맥에서 2장 이상을 요구하면 정상 동작이
+`[FAIL]` 로 나온다.
 """
 
 from __future__ import annotations
@@ -113,7 +114,14 @@ class Denied(ProtocolError):
       `CODE2` 까지 가지도 못한다(`:715` 가 곧바로 `Rejected`). 스펙 5.2 표의
       마지막 줄 「창이 닫혀 있음 → `{"ok":false}`」가 바로 이것이다.
 
-    `left` 가 `None` 이면 후자다. `v` 필드가 없다는 것이 표식이다.
+    `left` 가 `None` 이면 후자다. **표식은 `v` 필드의 부재**이고, 코드도 그것으로
+    가른다 — doc 과 분별자가 같은 것을 가리켜야 한다.
+
+    `await` 부재로 갈라도 정상 맥에서는 결과가 같지만(`Hello2` 팔은
+    `AwaitingCode2`/`Rejected` 둘만 돌려준다 — `pairing.rs:710-736`), `v` 쪽이
+    더 좁다: 오작동하는 맥이 `HELLO2` 에 `Nonce2` 모양
+    (`{"ok":false,"v":2,"epk":…,"nonce":…}`)을 돌려주면 `await` 기준은 그것을
+    「창이 닫혔다」로 잘못 부르고, `v` 기준은 프로토콜 위반으로 남긴다.
     """
 
     def __init__(self, left: int | None, stage: str) -> None:
@@ -397,7 +405,7 @@ class Session:
         # 뒤의 `HELLO2` 가 `[FAIL]` 로 끝나고, 절차는 그것을 「맥의 결함」으로
         # 읽으라고 지시한다 — 이 도구가 막으려고 존재하는 바로 그 역전이다.
         # `Denied` 의 doc 에 두 거절 자리를 적어 두었다.
-        if reply.get("ok") is False and "await" not in reply:
+        if reply.get("ok") is False and "v" not in reply:
             raise Denied(reply.get("left"), "HELLO2")
         if reply.get("v") != 2 or reply.get("ok") is not False or reply.get("await") != "code":
             raise ProtocolError(f"AwaitingCode2 를 기대했다: {reply}")
@@ -474,27 +482,47 @@ class Session:
         """스냅샷 프레임을 받아 연다. `count < 0` 이면 끊길 때까지.
 
         `(받은 장수, 끝난 이유)` 를 돌려준다. 이유는 `"count"`(원하는 만큼
-        받았다) · `"closed"`(맥이 끊었다) · `"timeout"`(조용했다) 셋이다.
+        받았다) · `"closed"`(맥이 끊었다) · `"timeout"`(시한이 지났다) 셋이다.
 
-        **끊김과 침묵을 구분해 돌려주는 것이 요점이다.** 둘을 뭉뚱그리면
+        **끊김과 시한을 구분해 돌려주는 것이 요점이다.** 둘을 뭉뚱그리면
         `watch`(§5, 기기 해제 확인)가 어떤 경우에도 성공으로 끝난다 — 해제
-        버튼을 아예 누르지 않아도 침묵 타임아웃이 끊김과 같은 값이 되어
-        「해제하는 즉시 끊긴다」에 체크가 들어간다. 실패할 수 없는 검사는
-        검사가 아니다.
+        버튼을 아예 누르지 않아도 시한이 끊김과 같은 값이 되어 「해제하는 즉시
+        끊긴다」에 체크가 들어간다. 실패할 수 없는 검사는 검사가 아니다.
+
+        **`timeout` 은 recv 하나당 침묵 시한이 아니라 전체 경과의 총 시한이다.**
+        침묵 시한으로 두면 프레임이 그보다 자주 오는 동안 이 함수가 영원히
+        돌아오지 않는다. 그리고 그것이 바로 §5 가 잡으려는 결함의 모습이다 —
+        **해제했는데 맥이 놓지 않고 계속 보내는 경우.** 침묵 시한이었다면 그때
+        `[FAIL]` 을 내지 못하고 그냥 매달리므로, 사람이 Ctrl-C 로 나가고 판정이
+        다시 사람에게 넘어간다. §1-1 이 「§5 를 도는 동안 에이전트를 켜 두라」고
+        지시하는 이상 프레임이 흐르는 것이 §5 의 **기대 구성**이라, 이 구분이
+        없으면 I-2 의 수정이 그 한 갈래에서 성립하지 않는다.
         """
         from websockets.exceptions import ConnectionClosed
 
         if self.k_s2c is None:
             raise ProtocolError("인증 전에는 들을 것이 없다")
         got = 0
+        # 루프 **밖에서** 한 번 잡는다. 프레임이 오든 안 오든 이 시각은 움직이지
+        # 않는다 — 맥의 `AUTH_DEADLINE` 이 `sleep_until` 에 절대 시각을 주는 것과
+        # 같은 이유다(`lan/server.rs` 의 doc: 「상대가 무엇을 보내든 읽든 이 시각은
+        # 움직이지 않는다」).
+        deadline = time.monotonic() + timeout
         while count < 0 or got < count:
             if self.pending_binary:
                 frame = self.pending_binary.pop(0)
             else:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    print(f"  총 시한 {timeout}초가 지났다 (받은 프레임 {got}장)")
+                    return got, "timeout"
                 try:
-                    msg = self.ws.recv(timeout=timeout)
+                    msg = self.ws.recv(timeout=left)
                 except TimeoutError:
-                    print(f"  {timeout}초 동안 아무것도 오지 않았다 (받은 프레임 {got}장)")
+                    if got:
+                        print(f"  총 시한 {timeout}초가 지났다 (받은 프레임 {got}장)")
+                    else:
+                        print(f"  {timeout}초 동안 아무것도 오지 않았다")
                     return got, "timeout"
                 except ConnectionClosed as e:
                     print(f"  맥이 연결을 끊었다: {e} (받은 프레임 {got}장)")
@@ -533,11 +561,20 @@ def connect(url: str):
 #: 맥이 스냅샷을 **언제** 보내는지. 이 문장이 틀리면 사람이 정상 동작을
 #: 실패로 읽는다.
 #:
-#: LAN 게이트는 스로틀이 아니라 **변경 게이트**다. `EmitGate::should_emit` 은
-#: 내용 해시가 같으면 시간과 무관하게 `false` 고(`emitter.rs:18-19`),
-#: `hash_snapshot` 에는 **타임스탬프가 없다**(`:37-57` — 에이전트 종류·rate·
-#: 토큰 합계·쿼터·프로젝트만 넣는다). `lan/mod.rs:94-97` 이 그대로 적어 뒀다:
-#: 「조용한 시간에는 봉인 카운터도 전진하지 않는다」.
+#: LAN 게이트는 **스로틀이자 변경 게이트**다 — 둘 다이지 둘 중 하나가 아니다.
+#: `EmitGate::should_emit`(`emitter.rs:16-26`)이 검사를 둘 순서대로 한다:
+#:
+#: 1. **변경 검사** — 내용 해시가 같으면 시간과 무관하게 `false`(`:18-19`).
+#:    `hash_snapshot`(`:37-57`)에는 **타임스탬프가 없다**(에이전트 종류·rate·
+#:    토큰 합계·쿼터·프로젝트만 넣는다). **조용한 시간을 만드는 것이 이쪽이다.**
+#: 2. **스로틀** — 내용이 바뀌었어도 직전 송출로부터 `LAN_THROTTLE`(1000ms,
+#:    `lan/mod.rs:26`) 안이면 `false`(`:20-23`). **상한 「최대 1Hz」가 이쪽이다.**
+#:    바뀐 스냅샷도 막는다는 것은 전용 테스트가 못박아 뒀다
+#:    (`emitter.rs:93` `changed_snapshot_within_throttle_is_suppressed`).
+#:
+#: `lan/mod.rs:94-96` 이 둘을 한 문장에 적어 뒀다 — 「앱의 틱은 250ms 인데
+#: 미러는 1Hz 로 묶는다(`LAN_THROTTLE`). 내용이 그대로면 아예 내보내지 않으므로,
+#: 조용한 시간에는 봉인 카운터도 전진하지 않는다」.
 #:
 #: 결과:
 #: - **페어링 직후 첫 한 장은 반드시 나간다.** 게이트가 대상 검사 뒤에 있고
@@ -547,10 +584,12 @@ def connect(url: str):
 #:   에서만 불린다(`lan/mod.rs:190`) — 재연결은 게이트를 되돌리지 않으므로
 #:   내용이 그대로면 0장이다.
 GATE_HINT = (
-    "맥은 **내용이 바뀔 때만** 보낸다 (최대 1Hz). 스로틀이 아니라 변경\n"
-    "  게이트다 — 해시에 타임스탬프가 없어서, 에이전트가 돌지 않는 맥은\n"
-    "  조용하다. 이 절을 도는 동안 Claude·Codex 세션을 하나 돌려 토큰\n"
-    "  사용량이 실제로 변하게 두라. 그래도 0장이면 그때가 맥의 결함이다."
+    "맥은 **내용이 바뀔 때만** 보내고, 바뀌어도 **최대 초당 한 장**이다.\n"
+    "  게이트가 스로틀이자 변경 게이트라서다 — 스로틀이 1Hz 상한을 주고,\n"
+    "  해시에 타임스탬프가 없는 변경 검사가 조용한 시간을 만든다. 그래서\n"
+    "  에이전트가 돌지 않는 맥은 아무것도 보내지 않는다. 이 절을 도는 동안\n"
+    "  Claude·Codex 세션을 하나 돌려 토큰 사용량이 실제로 변하게 두라.\n"
+    "  그렇게 해 두고도 0장이면 그때가 맥의 결함이다."
 )
 
 
@@ -560,6 +599,12 @@ def listen_and_judge(s: "Session", want: int, label: str) -> int:
     수를 못 채웠다고 곧바로 「맥이 틀렸다」로 읽히게 두지 않는다 — 이 전송에서
     가장 흔한 원인은 결함이 아니라 조용한 맥이다(`GATE_HINT`).
     """
+    if want < 1:
+        # 음수는 `got >= want` 를 언제나 참으로 만들어 **실패할 수 없는 검사**가
+        # 된다. 절차에 나오지 않는 값이지만, 조용히 통과하는 갈래를 남겨 둘
+        # 이유가 없다(I-2 와 같은 이야기다).
+        print(f"  [FAIL] --listen 은 0 이상이어야 한다: {want}", file=sys.stderr)
+        return 1
     print(f"\n[스냅샷] {want}장 기다린다")
     got, _why = s.listen(want)
     if got >= want:
