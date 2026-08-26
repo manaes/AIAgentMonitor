@@ -30,8 +30,10 @@ use axum::Router;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender};
+use tokio::task::JoinHandle;
 use tokio::sync::watch;
 
 /// quota 프록시(4319) 바로 옆.
@@ -68,10 +70,84 @@ pub const EVENT_QUEUE: usize = 256;
 /// 흔한 일이고, 그때는 무한정 쌓느니 연결을 놓고 다시 붙게 하는 편이 낫다.
 const SINK_QUEUE: usize = 8;
 
+/// 하트비트 주기와 무응답 판정 시간.
+///
+/// **왜 필요한가.** BLE 는 OS 스택이 링크 끊김을 알려주고 iroh 는 QUIC 이
+/// idle timeout 을 갖는다. TCP 는 둘 다 아니다 — 기기의 전원이 뽑히거나 WiFi 가
+/// 사라지면 소켓은 **살아 있는 것처럼 보인다**(macOS 기본 keepalive 는 2시간).
+/// 그동안 `Disconnected` 가 나가지 않으므로 "끊기면 인가가 즉시 사라진다"는
+/// 불변식이 조용히 깨진다. CYD 는 전원이 뽑히는 게 일상인 기기다.
+///
+/// **왜 이 숫자인가.** 30초마다 Ping 을 보내고, 마지막으로 무언가 받은 지
+/// 90초가 지나면 사라진 것으로 본다 — Ping 세 번을 연속으로 놓친 셈이다.
+/// 한 번으로 끊지 않는 이유는 잠깐 바쁜 기기를 죽은 것으로 오인하지 않기
+/// 위해서다(ESP32 의 느린 화면 갱신, 폰의 WiFi 절전, 순간적인 패킷 손실).
+/// 반대로 늘리지 않는 이유는 이 시간 동안 인가가 실제 링크보다 오래 살기
+/// 때문이다. 늦게 알아채는 비용은 기기 목록의 유령 한 줄이지만, 성급하게
+/// 끊는 비용은 멀쩡히 쓰는 기기가 화면 앞에서 끊기는 것이다.
+///
+/// 살아 있는 기기는 Pong 을 자동으로 되돌려주고(WebSocket 규약), 그 Pong 도
+/// "무언가 받았다"로 친다 — 즉 화면이 멈춰 있어도 스택만 살아 있으면 유지된다.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// 하트비트 타이밍. 상수를 그대로 쓰지 않고 값으로 들고 다니는 이유는
+/// 90초를 실제로 기다리지 않고도 "조용해진 피어를 정말 놓는가"를 테스트가
+/// 확인할 수 있게 하기 위해서다 — `port` 를 인자로 받는 것과 같은 이유다.
+#[derive(Debug, Clone, Copy)]
+pub struct Timing {
+    pub ping: Duration,
+    pub idle: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self { ping: PING_INTERVAL, idle: IDLE_TIMEOUT }
+    }
+}
+
+/// 이번 하트비트 틱에서 할 일. 연결 코드에서 떼어 둔 이유는 이 판단이
+/// "얼마나 조용하면 죽은 것으로 보는가"라는 정책이기 때문이다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Heartbeat {
+    /// 살아 있는지 물어본다.
+    Ping,
+    /// 대답이 너무 오래 없었다 — 사라진 것으로 보고 연결을 놓는다.
+    Drop,
+}
+
+fn heartbeat(silent_for: Duration, timing: &Timing) -> Heartbeat {
+    if silent_for >= timing.idle {
+        Heartbeat::Drop
+    } else {
+        Heartbeat::Ping
+    }
+}
+
 /// 연결 일련번호로 세션 id 를 만든다. 모듈 doc 의 "주소를 넣지 않는다" 규칙이
-/// 사는 곳이라 연결 코드에서 떼어 두었다.
+/// 사는 곳이라 연결 코드에서 떼어 두었다. **순수 함수다** — 같은 번호를 넣으면
+/// 같은 id 가 나온다. 번호를 발급하는 것은 `next_central_id` 다.
 pub fn central_id(serial: u64) -> CentralId {
     CentralId(format!("lan:{serial}"))
+}
+
+/// 세션 id 발급기. **프로세스 전체에서** 단조 증가한다 — 리스너(`AppState`)가
+/// 아니라 모듈이 들고 있는 것이 핵심이다.
+///
+/// 리스너마다 0부터 다시 세면, 토글을 껐다 켠 뒤의 `lan:0` 과 그 전의 `lan:0` 이
+/// 같은 이름이 된다. id 는 이제 공유 `PairingManager` 의 **인가 키**이므로 그
+/// 겹침은 두 방향 모두 실제 사고다: 이전 세대의 늦은 `Disconnected(lan:0)` 이
+/// 지금 붙어 있는 다른 기기의 인가를 지워버리거나(그 기기는 소켓이 살아 있어
+/// 재연결하지 않으므로 화면이 빈 채로 멈춘다), 반대로 남아 있던
+/// `authorized["lan:0"]` 을 **다른 기기가 물려받는다**. 뒤쪽은 인가가 피어를
+/// 건너뛰는 것이다.
+///
+/// 단일 채널의 FIFO 는 발행 순서만 보장하지, 세대가 다른 태스크들의 스케줄
+/// 순서까지 보장하지 않는다. 그래서 순서를 조율하는 대신 **같은 이름이 두 번
+/// 나오지 않게** 만든다.
+pub fn next_central_id() -> CentralId {
+    static NEXT_SERIAL: AtomicU64 = AtomicU64::new(0);
+    central_id(NEXT_SERIAL.fetch_add(1, Ordering::Relaxed))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +157,11 @@ pub enum ServerEvent {
     /// 인증 프레임(텍스트). 해석은 pairing 모듈이 한다.
     Frame { id: CentralId, text: String },
     /// 바인딩 실패. 모듈 doc 참고 — 조용히 warn 만 남기면 안 된다.
-    BindFailed(String),
+    ///
+    /// **어느 리스너의 실패인지 함께 싣는다.** 이벤트는 큐에서 밀릴 수 있고,
+    /// 그 사이 사용자가 토글을 껐다 켜면 이미 정상적으로 뜬 새 리스너가 낡은
+    /// 실패 통지에 의해 내려간다(`LanBridge::apply_event` 참고).
+    BindFailed { generation: u64, message: String },
 }
 
 /// 이 central 에게 보낼 것. 서버 태스크가 소유한 송신 채널로 전달된다.
@@ -165,9 +245,9 @@ impl Sinks {
 
 struct AppState {
     events: Sender<ServerEvent>,
-    next_serial: AtomicU64,
     sinks: Sinks,
     slots: Arc<Slots>,
+    timing: Timing,
     /// 연결 핸들러가 각자 하나씩 들고 있다가, 토글이 꺼지면 스스로 빠져나온다.
     /// `handle` 의 주석 참고.
     shutdown: watch::Receiver<bool>,
@@ -178,30 +258,71 @@ pub struct ServerHandle {
     /// Task 4(스냅샷 푸시)가 쓴다. 여기만 상한이 없는 이유는 낯선 기기가 아니라
     /// 앱의 틱 루프(초당 하나)만 쓰기 때문이다 — 바깥에서 닿지 않는다.
     pub outbound: UnboundedSender<Outbound>,
+    /// 이 리스너의 세대. `BindFailed` 가 누구 것인지 가리는 데 쓴다.
+    pub generation: u64,
+    /// 리스너 태스크. `stop()` 이 돌려주고, **다음 세대가 이것을 기다린 뒤에야
+    /// 바인딩한다** — 자세한 이유는 `stop` 과 `spawn` 의 doc.
+    task: JoinHandle<()>,
 }
 
 impl ServerHandle {
-    pub fn stop(self) {
+    /// 종료를 신호하고, **끝났는지 기다릴 수 있는 손잡이**를 돌려준다.
+    ///
+    /// 신호만 쏘고 반환하는 것은 그대로다(`set_enabled` 는 동기 함수라 여기서
+    /// 기다릴 수 없다). 문제는 그다음이었다: 끄자마자 켜면 옛 리스너가 아직
+    /// LISTEN 중인 소켓 위에 새 리스너가 바인딩을 시도해 `EADDRINUSE` 가 난다.
+    /// 그러면 앱이 스스로 만든 실패를 "포트 4320 을 열지 못했습니다"라고 사용자
+    /// 탓처럼 패널에 띄운다 — 사용자는 아무 포트도 쓰지 않고 있는데.
+    ///
+    /// 그래서 기다리는 쪽을 호출자에서 **새 리스너 태스크**로 옮겼다. 이 손잡이를
+    /// 다음 `spawn` 에 넘기면, 새 태스크가 옛 태스크의 종료를 확인한 뒤에 bind 한다.
+    #[must_use = "다음 spawn 에 넘겨야 즉시 재시작이 EADDRINUSE 를 만들지 않는다"]
+    pub fn stop(self) -> JoinHandle<()> {
         // 수신자가 이미 사라졌어도(태스크가 먼저 끝난 경우) 문제되지 않는다.
         let _ = self.shutdown.send(true);
+        self.task
     }
 }
+
+/// 옛 리스너가 끝나기를 기다리는 최대 시간. 넘기면 그냥 진행한다 — 그 경우
+/// bind 가 실패하고 `BindFailed` 가 뜨는데, 이는 기다리지 않던 예전 동작과
+/// 같으므로 더 나빠지지 않는다. 무한정 기다리면 반대로 "켰는데 아무 일도
+/// 일어나지 않는" 훨씬 나쁜 상태가 된다.
+const PREVIOUS_LISTENER_GRACE: Duration = Duration::from_secs(3);
 
 /// 리스너를 띄운다. 운영에서 `port` 는 언제나 `PORT` 다 — 인자로 받는 이유는
 /// 테스트가 서로의(그리고 개발 중인 앱의) 4320 을 밟지 않게 하기 위해서다.
 /// 바인딩은 이 안에서 기다리지 않는다. 실패는 `ServerEvent::BindFailed` 로 온다.
-pub fn spawn(port: u16, events: Sender<ServerEvent>) -> ServerHandle {
+///
+/// `previous` 는 방금 `stop()` 한 리스너의 태스크다. 있으면 그것이 끝난 뒤에
+/// bind 한다(`ServerHandle::stop` 의 doc).
+pub fn spawn(
+    port: u16,
+    events: Sender<ServerEvent>,
+    generation: u64,
+    previous: Option<JoinHandle<()>>,
+) -> ServerHandle {
+    spawn_with(port, events, generation, previous, Timing::default())
+}
+
+fn spawn_with(
+    port: u16,
+    events: Sender<ServerEvent>,
+    generation: u64,
+    previous: Option<JoinHandle<()>>,
+    timing: Timing,
+) -> ServerHandle {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
     let state = Arc::new(AppState {
         events,
-        next_serial: AtomicU64::new(0),
         sinks: Sinks::default(),
         slots: Arc::new(Slots::default()),
+        timing,
         shutdown: shutdown_rx,
     });
-    tokio::spawn(run(state, port, out_rx));
-    ServerHandle { shutdown: shutdown_tx, outbound: out_tx }
+    let task = tokio::spawn(run(state, port, out_rx, generation, previous));
+    ServerHandle { shutdown: shutdown_tx, outbound: out_tx, generation, task }
 }
 
 /// 종료 신호를 기다린다. `send(true)` 뿐 아니라 **보내는 쪽이 사라진 경우**도
@@ -215,7 +336,21 @@ async fn wait_shutdown(mut rx: watch::Receiver<bool>) {
     }
 }
 
-async fn run(state: Arc<AppState>, port: u16, mut outbound: UnboundedReceiver<Outbound>) {
+async fn run(
+    state: Arc<AppState>,
+    port: u16,
+    mut outbound: UnboundedReceiver<Outbound>,
+    generation: u64,
+    previous: Option<JoinHandle<()>>,
+) {
+    // 옛 리스너가 소켓을 놓기 전에 bind 하면 우리가 만든 EADDRINUSE 를 사용자에게
+    // 보여주게 된다(`ServerHandle::stop` 의 doc).
+    if let Some(prev) = previous {
+        if tokio::time::timeout(PREVIOUS_LISTENER_GRACE, prev).await.is_err() {
+            tracing::warn!(port, "이전 LAN 리스너가 제때 끝나지 않았다 — 그대로 진행한다");
+        }
+    }
+
     let events = state.events.clone();
     let shutdown = state.shutdown.clone();
     let app = Router::new()
@@ -228,9 +363,10 @@ async fn run(state: Arc<AppState>, port: u16, mut outbound: UnboundedReceiver<Ou
         Ok(l) => l,
         Err(e) => {
             let _ = events
-                .send(ServerEvent::BindFailed(format!(
-                    "포트 {port} 을(를) 열지 못했습니다: {e}"
-                )))
+                .send(ServerEvent::BindFailed {
+                    generation,
+                    message: format!("포트 {port} 을(를) 열지 못했습니다: {e}"),
+                })
                 .await;
             return;
         }
@@ -301,11 +437,11 @@ async fn upgrade(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Re
     };
 
     // 일련번호는 자리를 잡은 뒤에 뽑는다 — 거절된 시도가 번호를 먹지 않게.
-    let serial = state.next_serial.fetch_add(1, Ordering::Relaxed);
+    let id = next_central_id();
     let shutdown = state.shutdown.clone();
     ws.max_message_size(MAX_FRAME_BYTES)
         .max_frame_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| handle(socket, state, central_id(serial), shutdown, slot))
+        .on_upgrade(move |socket| handle(socket, state, id, shutdown, slot))
 }
 
 async fn handle(
@@ -340,19 +476,47 @@ async fn handle(
         }
     });
 
+    // 마지막으로 이 기기에게서 **무언가** 받은 시각. Pong 도 포함이다 — 화면이
+    // 멈춰 있어도 스택이 살아 있으면 살아 있는 것으로 본다.
+    let mut last_seen = tokio::time::Instant::now();
+    let mut ping = tokio::time::interval_at(
+        tokio::time::Instant::now() + state.timing.ping,
+        state.timing.ping,
+    );
+
     loop {
         tokio::select! {
             msg = ws_rx.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
+                    last_seen = tokio::time::Instant::now();
                     if !offer_frame(&state.events, &id, text) {
                         tracing::warn!(id = %id.0, "LAN 이벤트 큐가 찼다 — 연결을 놓는다");
                         break;
                     }
                 }
                 // 클라이언트가 보내는 바이너리는 지금 쓰지 않는다 — 미러는 읽기 전용이다.
-                Some(Ok(_)) => {}
+                // Pong·Ping 도 여기로 온다. 내용은 쓸 데가 없지만 **왔다는 사실**이
+                // 하트비트의 전부다(인바운드 Ping 에 대한 Pong 은 라이브러리가 보낸다).
+                Some(Ok(_)) => {
+                    last_seen = tokio::time::Instant::now();
+                }
                 // 오류(상한 초과 포함)든 스트림 끝이든 이 연결은 끝났다.
                 Some(Err(_)) | None => break,
+            },
+            // 조용히 사라진 기기를 알아채는 유일한 수단이다. TCP 는 전원이 뽑힌
+            // 상대와 살아 있는 상대를 구분해 주지 않는다(`PING_INTERVAL` 의 doc).
+            _ = ping.tick() => {
+                match heartbeat(last_seen.elapsed(), &state.timing) {
+                    Heartbeat::Drop => {
+                        tracing::info!(id = %id.0, "LAN 피어가 조용하다 — 사라진 것으로 본다");
+                        break;
+                    }
+                    // 큐가 밀려 있으면 `push_to_sink` 가 큐를 지우고, 아래 writer
+                    // 분기가 그것을 알아채 연결을 정리한다.
+                    Heartbeat::Ping => {
+                        push_to_sink(&state.sinks, &id, Message::Ping(Vec::new()));
+                    }
+                }
             },
             // 쓰기 쪽이 먼저 끝났다 = 상대가 읽지 않아 큐가 밀려 `push_to_sink`
             // 가 큐를 지웠거나, 소켓 쓰기가 실패했다. 읽기만 계속 붙들고 있을
@@ -470,6 +634,22 @@ mod tests {
         tokio::sync::mpsc::channel(EVENT_QUEUE)
     }
 
+    /// 리스너 하나. 세대 1, 앞선 리스너 없음.
+    fn listener(port: u16, tx: Sender<ServerEvent>) -> ServerHandle {
+        spawn(port, tx, 1, None)
+    }
+
+    /// `Connected` 를 받아 **그 id 를 받아 쓴다.** 절대값(`lan:0`)을 가정하지
+    /// 않는 것이 요점이다 — 일련번호는 프로세스 전역이라(I2) 앞선 테스트가 몇
+    /// 개를 썼는지에 따라 달라진다. 절대값을 가정하는 테스트는 그 자체로
+    /// "세대마다 0부터 다시 센다"는 옛 동작에 의존한다.
+    async fn next_connected(rx: &mut Receiver<ServerEvent>) -> CentralId {
+        match next_event(rx).await {
+            ServerEvent::Connected(id) => id,
+            other => panic!("Connected 를 기대했다: {other:?}"),
+        }
+    }
+
     #[test]
     fn port_is_next_to_the_quota_proxy() {
         assert_eq!(PORT, 4320, "quota 프록시 4319 바로 옆이다");
@@ -483,12 +663,26 @@ mod tests {
         assert_eq!(central_id(7).0, "lan:7");
     }
 
-    /// 같은 연결에 같은 id 가, 다른 연결에 다른 id 가 나와야 한다.
+    /// `central_id` 는 순수 함수다 — 같은 번호면 같은 id.
+    ///
+    /// (예전 이름은 `serials_do_not_repeat` 이었는데, `central_id(1) != central_id(2)`
+    /// 는 발급기에 대해 **아무것도 증명하지 않는** 항등식이었다. 실제로 반복하지
+    /// 않는지는 아래 `the_id_allocator_never_repeats` 가 본다.)
     #[test]
-    fn serials_do_not_repeat() {
-        let a = central_id(1);
-        let b = central_id(2);
-        assert_ne!(a, b);
+    fn central_id_is_pure() {
+        assert_eq!(central_id(7), central_id(7));
+        assert_ne!(central_id(1), central_id(2));
+    }
+
+    /// 발급기는 같은 id 를 두 번 내주지 않는다. 리스너를 몇 번 껐다 켜든
+    /// 마찬가지다 — 발급기가 리스너가 아니라 모듈에 붙어 있기 때문이다.
+    /// id 가 겹치면 인가가 피어 사이를 건너뛴다(`next_central_id` 의 doc).
+    #[test]
+    fn the_id_allocator_never_repeats() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            assert!(seen.insert(next_central_id()), "발급기가 같은 id 를 두 번 냈다");
+        }
     }
 
     #[test]
@@ -623,10 +817,10 @@ mod tests {
     async fn stopping_actually_releases_the_socket() {
         let port = free_port().await;
         let (tx, _rx) = events();
-        let handle = spawn(port, tx);
+        let handle = listener(port, tx);
         wait_until_listening(port).await;
 
-        handle.stop();
+        let _ = handle.stop();
 
         for _ in 0..200 {
             if tokio::net::TcpListener::bind(("0.0.0.0", port)).await.is_ok() {
@@ -642,7 +836,7 @@ mod tests {
     async fn dropping_the_handle_also_releases_the_socket() {
         let port = free_port().await;
         let (tx, _rx) = events();
-        let handle = spawn(port, tx);
+        let handle = listener(port, tx);
         wait_until_listening(port).await;
 
         drop(handle);
@@ -664,15 +858,19 @@ mod tests {
         let port = occupier.local_addr().unwrap().port();
 
         let (tx, mut rx) = events();
-        let _handle = spawn(port, tx);
+        let _handle = listener(port, tx);
 
         let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("BindFailed 가 오지 않았다")
             .unwrap();
         match ev {
-            ServerEvent::BindFailed(msg) => {
-                assert!(msg.contains(&port.to_string()), "어느 포트인지 말해야 한다: {msg}");
+            ServerEvent::BindFailed { generation, message } => {
+                assert_eq!(generation, 1, "어느 리스너의 실패인지 말해야 한다");
+                assert!(
+                    message.contains(&port.to_string()),
+                    "어느 포트인지 말해야 한다: {message}"
+                );
             }
             other => panic!("BindFailed 를 기대했다: {other:?}"),
         }
@@ -701,16 +899,16 @@ mod tests {
     async fn one_connection_is_one_session() {
         let port = free_port().await;
         let (tx, mut rx) = events();
-        let handle = spawn(port, tx);
+        let handle = listener(port, tx);
         wait_until_listening(port).await;
 
         let sock = handshake(port).await;
-        assert_eq!(next_event(&mut rx).await, ServerEvent::Connected(central_id(0)));
+        let id = next_connected(&mut rx).await;
 
         drop(sock);
-        assert_eq!(next_event(&mut rx).await, ServerEvent::Disconnected(central_id(0)));
+        assert_eq!(next_event(&mut rx).await, ServerEvent::Disconnected(id));
 
-        handle.stop();
+        let _ = handle.stop();
     }
 
     /// 두 번째 연결은 다른 id 를 받는다. 같은 기기가 다시 붙어도 새 세션이다 —
@@ -719,19 +917,20 @@ mod tests {
     async fn a_second_connection_gets_a_new_session() {
         let port = free_port().await;
         let (tx, mut rx) = events();
-        let handle = spawn(port, tx);
+        let handle = listener(port, tx);
         wait_until_listening(port).await;
 
         let first = handshake(port).await;
-        assert_eq!(next_event(&mut rx).await, ServerEvent::Connected(central_id(0)));
+        let first_id = next_connected(&mut rx).await;
         drop(first);
-        assert_eq!(next_event(&mut rx).await, ServerEvent::Disconnected(central_id(0)));
+        assert_eq!(next_event(&mut rx).await, ServerEvent::Disconnected(first_id.clone()));
 
         let second = handshake(port).await;
-        assert_eq!(next_event(&mut rx).await, ServerEvent::Connected(central_id(1)));
+        let second_id = next_connected(&mut rx).await;
+        assert_ne!(first_id, second_id, "다시 붙으면 새 세션이다");
 
         drop(second);
-        handle.stop();
+        let _ = handle.stop();
     }
 
     /// 토글을 끄면 붙어 있던 기기도 정리돼야 한다 — 리스너만 닫고 연결을
@@ -740,14 +939,14 @@ mod tests {
     async fn stopping_disconnects_live_connections() {
         let port = free_port().await;
         let (tx, mut rx) = events();
-        let handle = spawn(port, tx);
+        let handle = listener(port, tx);
         wait_until_listening(port).await;
 
         let _sock = handshake(port).await;
-        assert_eq!(next_event(&mut rx).await, ServerEvent::Connected(central_id(0)));
+        let id = next_connected(&mut rx).await;
 
-        handle.stop();
-        assert_eq!(next_event(&mut rx).await, ServerEvent::Disconnected(central_id(0)));
+        let _ = handle.stop();
+        assert_eq!(next_event(&mut rx).await, ServerEvent::Disconnected(id));
     }
 
     /// 정상 크기의 텍스트 프레임은 그대로 올라온다 — 상한이 진짜 트래픽까지
@@ -756,20 +955,20 @@ mod tests {
     async fn a_normal_text_frame_arrives_as_an_event() {
         let port = free_port().await;
         let (tx, mut rx) = events();
-        let handle = spawn(port, tx);
+        let handle = listener(port, tx);
         wait_until_listening(port).await;
 
         let mut sock = handshake(port).await;
-        assert_eq!(next_event(&mut rx).await, ServerEvent::Connected(central_id(0)));
+        let id = next_connected(&mut rx).await;
 
         sock.write_all(&masked_text_frame(b"HELLO:1")).await.unwrap();
         assert_eq!(
             next_event(&mut rx).await,
-            ServerEvent::Frame { id: central_id(0), text: "HELLO:1".to_string() }
+            ServerEvent::Frame { id, text: "HELLO:1".to_string() }
         );
 
         drop(sock);
-        handle.stop();
+        let _ = handle.stop();
     }
 
     /// 상한을 넘겨 선언한 프레임은 조립하지 않고 연결을 끊어야 한다. 인증도
@@ -778,22 +977,22 @@ mod tests {
     async fn an_oversized_frame_drops_the_connection_instead_of_buffering_it() {
         let port = free_port().await;
         let (tx, mut rx) = events();
-        let handle = spawn(port, tx);
+        let handle = listener(port, tx);
         wait_until_listening(port).await;
 
         let mut sock = handshake(port).await;
-        assert_eq!(next_event(&mut rx).await, ServerEvent::Connected(central_id(0)));
+        let id = next_connected(&mut rx).await;
 
         // 상한의 두 배를 선언한다. 본문은 한 바이트도 보내지 않는다.
         sock.write_all(&oversized_frame_header(2 * MAX_FRAME_BYTES as u64)).await.unwrap();
 
         assert_eq!(
             next_event(&mut rx).await,
-            ServerEvent::Disconnected(central_id(0)),
+            ServerEvent::Disconnected(id),
             "상한을 넘는 프레임은 본문을 기다리지 않고 끊어야 한다"
         );
 
-        handle.stop();
+        let _ = handle.stop();
     }
 
     /// 동시 연결 상한을 넘는 피어는 업그레이드부터 거절한다.
@@ -801,16 +1000,14 @@ mod tests {
     async fn the_connection_cap_refuses_extra_peers() {
         let port = free_port().await;
         let (tx, mut rx) = events();
-        let handle = spawn(port, tx);
+        let handle = listener(port, tx);
         wait_until_listening(port).await;
 
         let mut live = Vec::new();
-        for i in 0..MAX_CONNECTIONS {
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..MAX_CONNECTIONS {
             live.push(handshake(port).await);
-            assert_eq!(
-                next_event(&mut rx).await,
-                ServerEvent::Connected(central_id(i as u64))
-            );
+            assert!(ids.insert(next_connected(&mut rx).await), "id 가 겹쳤다");
         }
 
         let (_refused, head) = try_handshake(port).await;
@@ -827,12 +1024,160 @@ mod tests {
             let (s, head) = try_handshake(port).await;
             if head.starts_with("HTTP/1.1 101") {
                 drop(s);
-                handle.stop();
+                let _ = handle.stop();
                 return;
             }
             drop(s);
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("자리가 비었는데도 계속 거절한다");
+    }
+
+    // --- 세대 (I2/I3/I4) ---
+
+    /// 리스너를 껐다 켜도 id 는 이어진다. 세대마다 0부터 다시 세면 이전 세대의
+    /// 늦은 `Disconnected(lan:0)` 이 지금 붙어 있는 다른 기기의 인가를 지운다.
+    #[tokio::test]
+    async fn ids_do_not_restart_with_the_listener() {
+        let port = free_port().await;
+        let (tx, mut rx) = events();
+
+        let first = spawn(port, tx.clone(), 1, None);
+        wait_until_listening(port).await;
+        let sock = handshake(port).await;
+        let old_id = next_connected(&mut rx).await;
+        drop(sock);
+        assert_eq!(next_event(&mut rx).await, ServerEvent::Disconnected(old_id.clone()));
+
+        let second = spawn(port, tx, 2, Some(first.stop()));
+        wait_until_listening(port).await;
+        let sock = handshake(port).await;
+        let new_id = next_connected(&mut rx).await;
+
+        assert_ne!(old_id, new_id, "리스너가 새로 떠도 예전 세션 이름을 재사용하면 안 된다");
+
+        drop(sock);
+        let _ = second.stop();
+    }
+
+    /// 끄자마자 켜도 `EADDRINUSE` 가 나면 안 된다. 그건 앱이 스스로 만든
+    /// 실패인데 패널에는 "포트를 열지 못했습니다"로 떠서 사용자 탓처럼 보인다.
+    /// 새 리스너가 옛 태스크의 종료를 기다린 뒤 bind 하므로 나지 않아야 한다.
+    #[tokio::test]
+    async fn an_immediate_restart_does_not_collide_with_itself() {
+        let port = free_port().await;
+        let (tx, mut rx) = events();
+
+        let first = spawn(port, tx.clone(), 1, None);
+        wait_until_listening(port).await;
+
+        // 사이에 await 가 없다 — 동기 `set_enabled(false); set_enabled(true);` 와 같다.
+        let previous = first.stop();
+        let second = spawn(port, tx, 2, Some(previous));
+
+        wait_until_listening(port).await;
+        let sock = handshake(port).await;
+        let _ = next_connected(&mut rx).await;
+        assert!(rx.try_recv().is_err(), "재시작만으로 이벤트가 더 나오면 안 된다");
+
+        drop(sock);
+        let _ = second.stop();
+    }
+
+    /// 낡은 세대의 bind 실패가 지금 리스너를 죽이면 안 된다. 여기서는 서버 쪽
+    /// 절반(실패에 세대가 실려 나가는가)만 본다 — 무시 판단은 `LanBridge` 다.
+    #[tokio::test]
+    async fn a_bind_failure_says_which_listener_it_was() {
+        let occupier = tokio::net::TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
+        let port = occupier.local_addr().unwrap().port();
+
+        let (tx, mut rx) = events();
+        let _handle = spawn(port, tx, 7, None);
+
+        match next_event(&mut rx).await {
+            ServerEvent::BindFailed { generation, .. } => assert_eq!(generation, 7),
+            other => panic!("BindFailed 를 기대했다: {other:?}"),
+        }
+    }
+
+    // --- 하트비트 (I5) ---
+
+    /// 판정 자체는 순수 함수다. 90초를 기다리지 않고 정책만 확인한다.
+    #[test]
+    fn a_peer_is_given_three_missed_pings_before_we_give_up() {
+        let t = Timing::default();
+        assert_eq!(heartbeat(Duration::from_secs(0), &t), Heartbeat::Ping);
+        assert_eq!(heartbeat(t.ping, &t), Heartbeat::Ping, "한 번 놓친 것으로는 끊지 않는다");
+        assert_eq!(heartbeat(t.ping * 2, &t), Heartbeat::Ping);
+        assert_eq!(heartbeat(t.idle, &t), Heartbeat::Drop);
+        assert_eq!(heartbeat(t.idle + t.ping, &t), Heartbeat::Drop);
+    }
+
+    /// 상수 사이의 관계를 못박는다. idle 이 ping 보다 짧으면 살아 있는 기기가
+    /// 대답할 기회조차 없이 끊긴다.
+    #[test]
+    fn the_idle_budget_covers_several_pings() {
+        assert!(
+            IDLE_TIMEOUT >= PING_INTERVAL * 3,
+            "잠깐 바쁜 기기를 죽은 것으로 오인하지 않으려면 여유가 있어야 한다"
+        );
+    }
+
+    /// 전원이 뽑힌 기기는 FIN 도 RST 도 보내지 않는다 — 소켓은 살아 있는
+    /// 것처럼 보인다. 그래도 `Disconnected` 가 나와야 인가가 링크와 함께
+    /// 사라진다. (실제 90초 대신 짧은 타이밍으로 같은 경로를 탄다.)
+    #[tokio::test]
+    async fn a_silent_peer_is_eventually_dropped() {
+        let port = free_port().await;
+        let (tx, mut rx) = events();
+        let timing = Timing {
+            ping: Duration::from_millis(60),
+            idle: Duration::from_millis(200),
+        };
+        let handle = spawn_with(port, tx, 1, None, timing);
+        wait_until_listening(port).await;
+
+        // 붙기만 하고 한 마디도 하지 않는다. 소켓은 계속 열려 있다.
+        let _sock = handshake(port).await;
+        let id = next_connected(&mut rx).await;
+
+        assert_eq!(
+            next_event(&mut rx).await,
+            ServerEvent::Disconnected(id),
+            "조용히 사라진 기기를 알아채지 못하면 인가가 링크보다 오래 산다"
+        );
+
+        let _ = handle.stop();
+    }
+
+    /// 반대쪽도 확인한다 — 말을 계속 하는 기기를 끊으면 안 된다. 잠깐 바쁜
+    /// 기기를 죽은 것으로 오인하는 것이 이 기능의 유일한 오작동 방향이다.
+    #[tokio::test]
+    async fn a_talking_peer_is_kept() {
+        let port = free_port().await;
+        let (tx, mut rx) = events();
+        let timing = Timing {
+            ping: Duration::from_millis(40),
+            idle: Duration::from_millis(150),
+        };
+        let handle = spawn_with(port, tx, 1, None, timing);
+        wait_until_listening(port).await;
+
+        let mut sock = handshake(port).await;
+        let id = next_connected(&mut rx).await;
+
+        // idle 예산의 네 배가 넘는 시간 동안 주기적으로 말한다.
+        for _ in 0..12 {
+            sock.write_all(&masked_text_frame(b"HELLO")).await.unwrap();
+            assert_eq!(
+                next_event(&mut rx).await,
+                ServerEvent::Frame { id: id.clone(), text: "HELLO".to_string() },
+                "말하는 기기가 끊겼다"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        drop(sock);
+        let _ = handle.stop();
     }
 }

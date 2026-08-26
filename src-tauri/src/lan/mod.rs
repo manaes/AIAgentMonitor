@@ -74,6 +74,13 @@ pub struct LanBridge {
     /// 살아 있는 리스너. `Some` 인 동안만 포트가 열려 있다. 토글을 끄면
     /// 플래그만 내리는 게 아니라 이 핸들을 내려서 소켓까지 실제로 닫는다.
     server: Option<ServerHandle>,
+    /// 방금 내린 리스너의 태스크. 다음 리스너가 이것이 끝난 뒤에 bind 하도록
+    /// 넘겨준다 — 끄자마자 켰을 때 우리가 만든 `EADDRINUSE` 를 사용자에게
+    /// 보여주지 않기 위해서다(`ServerHandle::stop` 의 doc).
+    stopping: Option<tokio::task::JoinHandle<()>>,
+    /// 지금까지 띄운 리스너의 수 = 현재 세대 번호. `BindFailed` 가 어느
+    /// 리스너의 것인지 가리는 데 쓴다.
+    generation: u64,
     /// 서버 태스크가 이벤트를 올릴 통로. 리스너는 켰다 껐다 하지만 이 통로는
     /// 브리지와 수명을 같이한다 — 배선(`lib.rs`)이 수신 루프를 한 번만 걸면
     /// 되도록.
@@ -93,6 +100,8 @@ impl LanBridge {
             centrals: HashSet::new(),
             last_error: None,
             server: None,
+            stopping: None,
+            generation: 0,
             events,
             port,
         }
@@ -119,11 +128,22 @@ impl LanBridge {
             // 안 보여주는 것만큼 나쁘다. 이번 시도도 실패하면 `BindFailed` 가
             // 곧바로 다시 채운다.
             self.last_error = None;
-            self.server = Some(server::spawn(self.port, self.events.clone()));
+            self.generation += 1;
+            self.server = Some(server::spawn(
+                self.port,
+                self.events.clone(),
+                self.generation,
+                // 방금 내린 리스너가 있으면 그것이 끝난 뒤에 bind 한다.
+                self.stopping.take(),
+            ));
         } else {
             self.centrals.clear();
+            // 꺼진 전송의 오류를 계속 보여줄 이유가 없다 — BLE·network 도 끌 때
+            // 지운다(`lib.rs`). `last_error` 를 브리지가 소유하기로 한 이상 지우는
+            // 책임도 여기 있다. 배선이 기억해야 하는 정리는 언젠가 잊힌다.
+            self.last_error = None;
             if let Some(h) = self.server.take() {
-                h.stop();
+                self.stopping = Some(h.stop());
             }
         }
     }
@@ -234,6 +254,12 @@ impl LanBridge {
             .collect()
     }
 
+    /// 이 이벤트가 **지금 살아 있는 리스너**의 것인가. 리스너가 없으면(꺼졌거나
+    /// 이미 실패로 내려갔다) 어느 세대의 통지든 반영할 것이 없다.
+    fn is_current_generation(&self, generation: u64) -> bool {
+        self.server.as_ref().map(|h| h.generation) == Some(generation)
+    }
+
     /// 서버 태스크가 올린 이벤트를 상태에 반영한다. 배선(`lib.rs`)에 흩어 두지
     /// 않고 여기에 모은 이유는, "무엇을 기억하고 무엇을 잊을지"가 이 브리지의
     /// 결정이기 때문이다 — 연결 코드 안에 두면 테스트가 닿지 않는다.
@@ -243,8 +269,16 @@ impl LanBridge {
                 self.centrals.insert(id.clone());
             }
             ServerEvent::Disconnected(id) => self.forget_central(id),
-            ServerEvent::BindFailed(msg) => {
-                self.last_error = Some(msg.clone());
+            ServerEvent::BindFailed { generation, message } => {
+                // 낡은 세대의 실패는 지금의 사실이 아니다. 이 문이 없으면
+                // 이벤트가 한 사이클만 밀려도 **정상적으로 뜬 리스너를 죽인다**:
+                // 핸들을 떨어뜨리면 watch 송신자가 사라지고, `wait_shutdown` 은
+                // 그것을 종료로 해석해 멀쩡한 소켓을 닫는다. 남는 상태는
+                // "켜져 있는데 리스너는 없고 화면에는 옛날 오류" 다.
+                if !self.is_current_generation(*generation) {
+                    return;
+                }
+                self.last_error = Some(message.clone());
                 // 바인딩에 실패했으면 리스너는 없다. 핸들을 계속 들고 있으면
                 // 상태가 "켜져 있고 서버도 있다"로 보여 실제와 어긋난다.
                 self.server = None;
@@ -344,11 +378,21 @@ mod tests {
         assert!(b.served_centrals().is_empty());
     }
 
-    #[test]
-    fn a_bind_failure_becomes_the_error_the_panel_shows() {
+    /// 지금 살아 있는 리스너의 바인딩 실패. 세대를 브리지에서 읽어 오므로
+    /// "몇 번째 리스너인가"를 테스트가 세고 있을 필요가 없다.
+    fn bind_failed_now(b: &LanBridge) -> ServerEvent {
+        ServerEvent::BindFailed {
+            generation: b.generation,
+            message: "포트 4320 이 이미 쓰이는 중".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bind_failure_becomes_the_error_the_panel_shows() {
         let (mut b, _rx) = bridge();
+        b.set_enabled(true);
         assert!(b.last_error().is_none());
-        b.apply_event(&ServerEvent::BindFailed("포트 4320 이 이미 쓰이는 중".into()));
+        b.apply_event(&bind_failed_now(&b));
         assert_eq!(b.last_error().as_deref(), Some("포트 4320 이 이미 쓰이는 중"));
     }
 
@@ -358,12 +402,26 @@ mod tests {
     async fn restarting_clears_a_stale_bind_failure() {
         let (mut b, _rx) = bridge();
         b.set_enabled(true);
-        b.apply_event(&ServerEvent::BindFailed("포트 4320 이 이미 쓰이는 중".into()));
+        b.apply_event(&bind_failed_now(&b));
         assert!(b.last_error().is_some());
 
         b.set_enabled(false);
         b.set_enabled(true);
         assert!(b.last_error().is_none(), "다시 켰으면 지난 실패는 사실이 아니다");
+    }
+
+    /// 끄면 오류도 사실이 아니게 된다 — 꺼진 전송의 실패를 계속 보여줄 이유가
+    /// 없다. BLE·network 는 끌 때 지운다(`lib.rs`). `last_error` 를 브리지가
+    /// 소유하기로 한 이상 지우는 책임도 브리지에 있다.
+    #[tokio::test]
+    async fn disabling_clears_the_error_too() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        b.apply_event(&bind_failed_now(&b));
+        assert!(b.last_error().is_some());
+
+        b.set_enabled(false);
+        assert!(b.last_error().is_none(), "꺼진 전송의 실패를 계속 보여주면 안 된다");
     }
 
     /// 켜져 있는 상태에서 다시 `set_enabled(true)` 를 부르는 건 아무 일도
@@ -373,9 +431,53 @@ mod tests {
     async fn a_redundant_enable_does_not_hide_a_live_failure() {
         let (mut b, _rx) = bridge();
         b.set_enabled(true);
-        b.apply_event(&ServerEvent::BindFailed("포트 4320 이 이미 쓰이는 중".into()));
+        b.apply_event(&bind_failed_now(&b));
         b.set_enabled(true);
         assert!(b.last_error().is_some());
+    }
+
+    /// **낡은 세대의 실패는 지금 리스너를 죽이면 안 된다.** 이벤트가 한 사이클만
+    /// 밀려도(Task 3 의 소비자는 이벤트마다 락을 잡는다) 껐다 켠 뒤에 도착할 수
+    /// 있고, 그때 핸들을 떨어뜨리면 watch 송신자가 사라져 **정상 동작 중인
+    /// 소켓이 닫힌다** — 남는 상태는 "켜져 있는데 리스너 없음 + 옛 오류".
+    #[tokio::test]
+    async fn a_stale_bind_failure_does_not_kill_the_live_listener() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        let stale = bind_failed_now(&b); // 세대 1 의 실패
+        b.set_enabled(false);
+        b.set_enabled(true); // 세대 2 가 정상적으로 떴다
+
+        b.apply_event(&stale);
+
+        assert!(b.server.is_some(), "낡은 통지가 살아 있는 리스너를 내렸다");
+        assert!(b.last_error().is_none(), "낡은 실패를 지금 사실처럼 보여주면 안 된다");
+    }
+
+    /// 꺼져 있을 때 도착한 실패도 반영하지 않는다 — 리스너가 없으니 어느
+    /// 세대의 통지든 지금의 사실이 아니다.
+    #[tokio::test]
+    async fn a_bind_failure_after_the_toggle_went_off_is_ignored() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        let ev = bind_failed_now(&b);
+        b.set_enabled(false);
+
+        b.apply_event(&ev);
+        assert!(b.last_error().is_none());
+    }
+
+    /// 세대 판정 자체. `apply_event` 를 거치지 않고 판단만 본다.
+    #[tokio::test]
+    async fn only_the_live_listeners_generation_counts() {
+        let (mut b, _rx) = bridge();
+        assert!(!b.is_current_generation(0), "리스너가 없으면 어느 세대도 아니다");
+
+        b.set_enabled(true);
+        let g = b.generation;
+        assert!(b.is_current_generation(g));
+        assert!(!b.is_current_generation(g - 1));
+        assert!(!b.is_current_generation(g + 1));
     }
 
     /// 진짜 4320 에서 토글이 소켓을 열고 닫는지 본다. 평소 실행에서 빠져 있는
@@ -674,7 +776,9 @@ mod tests {
         assert!(b
             .sessions_to_end(&ServerEvent::Frame { id: id.clone(), text: "HELLO".into() })
             .is_empty());
-        assert!(b.sessions_to_end(&ServerEvent::BindFailed("x".into())).is_empty());
+        assert!(b
+            .sessions_to_end(&ServerEvent::BindFailed { generation: 1, message: "x".into() })
+            .is_empty());
     }
 
     /// 우리가 서비스한 적 없는 id 는 공유 매니저를 건드리는 목록에 넣지 않는다.
@@ -755,7 +859,8 @@ mod tests {
         let mut sock = handshake(port).await;
         let ev = rx.recv().await.expect("Connected 가 와야 한다");
         b.apply_event(&ev);
-        assert_eq!(ev, ServerEvent::Connected(server::central_id(0)));
+        // id 는 프로세스 전역 발급기가 준다 — 절대값을 가정하지 않는다.
+        assert!(matches!(ev, ServerEvent::Connected(_)), "Connected 를 기대했다: {ev:?}");
 
         // 창이 열려 있지 않으므로 응답은 Rejected 다 — 여기서 보려는 것은
         // 페어링 결과가 아니라 "프레임이 오가는 통로"다.
@@ -774,6 +879,23 @@ mod tests {
         assert_eq!(got, AuthReply::Rejected.to_json_bytes());
 
         b.set_enabled(false);
+    }
+
+    /// 맥을 껐다 켜면 일련번호는 다시 0부터 시작한다(`static` 은 프로세스와
+    /// 수명을 같이한다). 그래도 예전 `lan:0` 의 인가를 물려받지 않는 이유는
+    /// **인가가 디스크에 남지 않기 때문**이다 — 저장되는 것은 토큰뿐이고
+    /// (`PairingManager::load_peers`), 세션 인가는 프로세스와 함께 사라진다.
+    /// 이 성질이 깨지는 순간 재시작이 I2 와 똑같은 사고가 된다.
+    #[tokio::test]
+    async fn a_restored_peer_list_authorizes_nobody() {
+        let id = server::central_id(0);
+        let (b, _rx) = live_bridge(&id);
+        let mut p = PairingManager::new();
+        p.load_peers(vec![("aa".repeat(16), 900)]);
+
+        assert_eq!(p.issued_peers().len(), 1, "토큰은 복원된다");
+        assert!(!p.is_authorized(&id), "복원되는 것은 토큰이지 인가가 아니다");
+        assert!(b.snapshot_targets(&p).is_empty(), "다시 증명하기 전에는 아무것도 못 받는다");
     }
 
     /// 리스너가 없을 때 응답을 보내려 해도 조용히 버려진다. 상대가 사라진 것은
