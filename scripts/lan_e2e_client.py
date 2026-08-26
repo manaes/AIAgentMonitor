@@ -32,16 +32,22 @@
 ## 사용
 
     python3 scripts/lan_e2e_client.py selftest
-    python3 scripts/lan_e2e_client.py pair --code 123456 --listen 3
-    python3 scripts/lan_e2e_client.py reconnect --listen 3
+    python3 scripts/lan_e2e_client.py pair          # 6자리를 물어본다
+    python3 scripts/lan_e2e_client.py reconnect
+    python3 scripts/lan_e2e_client.py watch
     python3 scripts/lan_e2e_client.py wrong-code
-    python3 scripts/lan_e2e_client.py observe --seconds 160
+    python3 scripts/lan_e2e_client.py observe --seconds 180
+
+## 스냅샷을 몇 장 기대할 수 있나
+
+`--listen` 의 기본값이 1 인 이유가 있다. 맥은 **내용이 바뀔 때만** 보낸다 —
+스로틀이 아니라 변경 게이트다(`GATE_HINT` 의 근거 참고). 유휴 맥에서 2장 이상을
+요구하면 정상 동작이 `[FAIL]` 로 나온다.
 """
 
 from __future__ import annotations
 
 import argparse
-import binascii
 import json
 import os
 import pathlib
@@ -84,19 +90,39 @@ TAG_LEN = 16
 
 
 class ProtocolError(Exception):
-    """맥이 프로토콜과 다르게 굴었다. 이 도구의 결론은 전부 이 예외로 나온다."""
+    """맥이 프로토콜과 다르게 굴었다.
+
+    **이 도구가 내리는 판정은 전부 이 예외이거나 `[FAIL]` 이다.** 다만 예외
+    자체는 이것만 나오지 않는다 — hex 가 아닌 값(`ValueError`), 없는 필드
+    (`KeyError`), 끊긴 소켓(`ConnectionClosed`)도 맥이 잘못 굴 때 나온다.
+    `main` 이 그것들을 전부 `[FAIL]` 로 옮긴다(트레이스백을 사람에게 보여
+    주면 "이 도구가 고장 났다"로 읽힌다).
+    """
 
 
 class Denied(ProtocolError):
-    """코드가 틀렸다 — 정상적인 거절이다. `wrong-code` 가 기대하는 결과다.
+    """정상적인 거절이다. 프로토콜 위반이 아니다 — `wrong-code` 가 기대하는 결과다.
 
-    `left` 가 `None` 이면 창이 이미 닫혀 `{"ok":false}` 만 왔다는 뜻이다.
+    맥은 **두 자리**에서 거절한다. 둘을 구분하지 않으면 §6 이 정상 동작을
+    맥의 결함으로 판정한다:
+
+    - `CODE2` 에서 `{"ok":false,"left":N}` — 코드가 틀렸다. 예산이 줄어든다.
+    - `HELLO2` 에서 벗은 `{"ok":false}` — **창이 닫혀 있다.** 예산이 소진됐거나
+      TTL 이 지났거나 창을 연 적이 없다. `open_window` 가 `attempts_left > 0`
+      일 때만 창을 주므로(`ble/pairing.rs:551`), 다섯 번을 틀린 **다음** 시도는
+      `CODE2` 까지 가지도 못한다(`:715` 가 곧바로 `Rejected`). 스펙 5.2 표의
+      마지막 줄 「창이 닫혀 있음 → `{"ok":false}`」가 바로 이것이다.
+
+    `left` 가 `None` 이면 후자다. `v` 필드가 없다는 것이 표식이다.
     """
 
-    def __init__(self, left: int | None) -> None:
+    def __init__(self, left: int | None, stage: str) -> None:
         self.left = left
+        self.stage = stage
         super().__init__(
-            f"코드 거절 · 시도 {left}회 남음" if left is not None else "창이 닫혀 있다 (ok:false)"
+            f"{stage}: 코드 거절 · 시도 {left}회 남음"
+            if left is not None
+            else f"{stage}: 창이 닫혀 있다 (벗은 ok:false — 예산 소진이거나 만료)"
         )
 
 
@@ -277,9 +303,16 @@ def gate() -> None:
 
 
 def save_token(token_hex: str) -> None:
-    TOKEN_FILE.write_text(json.dumps({"token": token_hex, "saved_at": int(time.time())}) + "\n")
-    os.chmod(TOKEN_FILE, 0o600)
-    print(f"토큰을 {TOKEN_FILE} 에 저장했다 (CYD 의 NVS 자리).")
+    """토큰을 0600 으로 **처음부터** 만들어 쓴다.
+
+    `write_text` 로 쓴 뒤 `chmod` 하면 그 사이에 0644 인 창이 열린다. 짧지만
+    이 파일의 내용은 재연결 자격 그 자체라 굳이 창을 낼 이유가 없다.
+    """
+    body = json.dumps({"token": token_hex, "saved_at": int(time.time())}) + "\n"
+    fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(body)
+    print(f"토큰 …{token_hex[-4:]} 를 {TOKEN_FILE} 에 저장했다 (CYD 의 NVS 자리).")
 
 
 def load_token() -> str:
@@ -339,10 +372,13 @@ class Session:
 
     def agree(self, epk_hex: str) -> tuple[bytes, bytes]:
         """맥의 임시 공개키와 X25519 한다. `(공유 비밀, spk)` 를 돌려준다.
-        저차 점이면 여기서 죽는다.
 
-        `cryptography` 는 공유 비밀이 전부 0 이면 `exchange()` 가 예외를
-        던진다 — Rust 쪽 `was_contributory()` 검사와 같은 자리다.
+        **저차 점 방어는 여기 한 곳뿐이다.** `cryptography` 는 공유 비밀이
+        전부 0 이 되면 `exchange()` 가 `ValueError: Error computing shared key.`
+        를 던진다(실측 확인). 그래서 호출부에 `ss == bytes(32)` 같은 이중
+        검사를 두지 않는다 — 두면 도달하지 않는 코드가 되고, 페어링 경로에만
+        있고 재연결 경로에는 없어서 「어느 쪽이 실제 방어인가」가 코드에서
+        읽히지 않게 된다. Rust 쪽 `was_contributory()` 와 같은 자리다.
         """
         spk = bytes.fromhex(epk_hex)
         if len(spk) != 32:
@@ -357,18 +393,25 @@ class Session:
         self.send_text("HELLO2:" + self.cpk.hex())
         reply, raw = self.recv_json()
 
+        # **거절을 프로토콜 위반보다 먼저 본다.** 순서가 반대면 예산이 소진된
+        # 뒤의 `HELLO2` 가 `[FAIL]` 로 끝나고, 절차는 그것을 「맥의 결함」으로
+        # 읽으라고 지시한다 — 이 도구가 막으려고 존재하는 바로 그 역전이다.
+        # `Denied` 의 doc 에 두 거절 자리를 적어 두었다.
+        if reply.get("ok") is False and "await" not in reply:
+            raise Denied(reply.get("left"), "HELLO2")
         if reply.get("v") != 2 or reply.get("ok") is not False or reply.get("await") != "code":
             raise ProtocolError(f"AwaitingCode2 를 기대했다: {reply}")
         # ── 확인 항목: 6자리 코드가 링크를 건너지 않는다 ──────────────
         if code in raw:
             raise ProtocolError(f"응답에 6자리 코드가 들어 있다! {raw}")
-        print(f"  [OK] 응답에 코드 {code} 가 없다 (v2 는 HMAC 만 보낸다)")
+        print("  [OK] 응답에 6자리 코드가 없다 (v2 는 HMAC(code, transcript) 만 보낸다)")
         if len(reply["nonce"]) != 32:
             raise ProtocolError(f"논스가 32 hex 가 아니다: {reply['nonce']}")
 
+        # 저차 점은 `agree()` 안에서 걸린다 — 여기에 이중 검사를 두지 않는다
+        # (`agree` 의 doc). 재연결 경로와 방어가 같은 자리에 하나만 있어야
+        # 「어느 쪽이 실제 방어인가」가 코드에서 읽힌다.
         ss, spk = self.agree(reply["epk"])
-        if ss == bytes(32):
-            raise ProtocolError("공유 비밀이 전부 0 이다 (저차 점)")
         tr = transcript(self.cpk, spk)
         nonce = bytes.fromhex(reply["nonce"])
 
@@ -378,7 +421,7 @@ class Session:
 
         if reply.get("ok") is not True:
             # 코드 거절은 프로토콜 위반이 아니다 — 예산이 줄어드는 정상 경로다.
-            raise Denied(reply.get("left"))
+            raise Denied(reply.get("left"), "CODE2")
         if reply.get("v") != 2 or "sealed" not in reply:
             raise ProtocolError(f"Granted2 를 기대했다: {reply}")
 
@@ -392,8 +435,11 @@ class Session:
 
         # ── 확인 항목: 토큰이 평문으로 링크를 건너지 않는다 ────────────
         if token_hex in raw:
-            raise ProtocolError(f"토큰이 응답에 평문으로 들어 있다! {raw}")
-        print(f"  [OK] 토큰 {token_hex} 는 봉인 프레임 안에서만 왔다")
+            raise ProtocolError("토큰이 응답에 평문으로 들어 있다! (값은 찍지 않는다)")
+        # 토큰 전체를 찍지 않는다 — 그 값이 곧 재연결 자격이고, 스크롤백과
+        # `| tee` 대상은 `chmod 600` 도 `.gitignore` 도 걸리지 않는다. 끝 4자리면
+        # 「방금 받은 그 토큰인가」를 확인하는 진단력은 그대로다.
+        print(f"  [OK] 토큰 …{token_hex[-4:]} 는 봉인 프레임 안에서만 왔다")
 
         # 스펙 6.1 — 왕복 없이 그 자리에서 세션 키로 전환한다.
         token_bytes = bytes.fromhex(token_hex)
@@ -424,11 +470,17 @@ class Session:
 
     # -- 데이터 단계 -----------------------------------------------------
 
-    def listen(self, count: int, timeout: float = 40.0) -> int:
+    def listen(self, count: int, timeout: float = 40.0) -> tuple[int, str]:
         """스냅샷 프레임을 받아 연다. `count < 0` 이면 끊길 때까지.
 
-        받은 프레임 수를 돌려준다. 상대가 끊으면 그대로 돌아온다 — 기기 해제
-        확인이 그 경로다.
+        `(받은 장수, 끝난 이유)` 를 돌려준다. 이유는 `"count"`(원하는 만큼
+        받았다) · `"closed"`(맥이 끊었다) · `"timeout"`(조용했다) 셋이다.
+
+        **끊김과 침묵을 구분해 돌려주는 것이 요점이다.** 둘을 뭉뚱그리면
+        `watch`(§5, 기기 해제 확인)가 어떤 경우에도 성공으로 끝난다 — 해제
+        버튼을 아예 누르지 않아도 침묵 타임아웃이 끊김과 같은 값이 되어
+        「해제하는 즉시 끊긴다」에 체크가 들어간다. 실패할 수 없는 검사는
+        검사가 아니다.
         """
         from websockets.exceptions import ConnectionClosed
 
@@ -443,10 +495,10 @@ class Session:
                     msg = self.ws.recv(timeout=timeout)
                 except TimeoutError:
                     print(f"  {timeout}초 동안 아무것도 오지 않았다 (받은 프레임 {got}장)")
-                    return got
+                    return got, "timeout"
                 except ConnectionClosed as e:
                     print(f"  맥이 연결을 끊었다: {e} (받은 프레임 {got}장)")
-                    return got
+                    return got, "closed"
                 if isinstance(msg, str):
                     print(f"  ← (텍스트) {msg}")
                     continue
@@ -459,7 +511,7 @@ class Session:
             self.last_counter = counter
             got += 1
             print(f"  ← [봉인 {len(frame)}B, counter={counter}] {payload.decode('utf-8')}")
-        return got
+        return got, "count"
 
 
 # ---------------------------------------------------------------------------
@@ -478,18 +530,57 @@ def connect(url: str):
     return ws_connect(url, max_size=64 * 1024, open_timeout=10)
 
 
+#: 맥이 스냅샷을 **언제** 보내는지. 이 문장이 틀리면 사람이 정상 동작을
+#: 실패로 읽는다.
+#:
+#: LAN 게이트는 스로틀이 아니라 **변경 게이트**다. `EmitGate::should_emit` 은
+#: 내용 해시가 같으면 시간과 무관하게 `false` 고(`emitter.rs:18-19`),
+#: `hash_snapshot` 에는 **타임스탬프가 없다**(`:37-57` — 에이전트 종류·rate·
+#: 토큰 합계·쿼터·프로젝트만 넣는다). `lan/mod.rs:94-97` 이 그대로 적어 뒀다:
+#: 「조용한 시간에는 봉인 카운터도 전진하지 않는다」.
+#:
+#: 결과:
+#: - **페어링 직후 첫 한 장은 반드시 나간다.** 게이트가 대상 검사 뒤에 있고
+#:   (`lan/mod.rs:481-488`) 아무도 없을 때는 소비되지 않기 때문이다.
+#: - **두 번째부터는 스냅샷 내용이 실제로 바뀌어야 나간다.**
+#: - **재연결은 첫 장도 보장되지 않는다.** `gate.reset()` 은 `set_enabled(true)`
+#:   에서만 불린다(`lan/mod.rs:190`) — 재연결은 게이트를 되돌리지 않으므로
+#:   내용이 그대로면 0장이다.
+GATE_HINT = (
+    "맥은 **내용이 바뀔 때만** 보낸다 (최대 1Hz). 스로틀이 아니라 변경\n"
+    "  게이트다 — 해시에 타임스탬프가 없어서, 에이전트가 돌지 않는 맥은\n"
+    "  조용하다. 이 절을 도는 동안 Claude·Codex 세션을 하나 돌려 토큰\n"
+    "  사용량이 실제로 변하게 두라. 그래도 0장이면 그때가 맥의 결함이다."
+)
+
+
+def listen_and_judge(s: "Session", want: int, label: str) -> int:
+    """`--listen` 공통 처리. 부족하면 **왜 부족할 수 있는지**까지 말한다.
+
+    수를 못 채웠다고 곧바로 「맥이 틀렸다」로 읽히게 두지 않는다 — 이 전송에서
+    가장 흔한 원인은 결함이 아니라 조용한 맥이다(`GATE_HINT`).
+    """
+    print(f"\n[스냅샷] {want}장 기다린다")
+    got, _why = s.listen(want)
+    if got >= want:
+        print("  [OK] 봉인된 스냅샷이 열린다")
+        return 0
+    print(
+        f"  [FAIL] {want}장을 기대했는데 {got}장 받았다 ({label})\n  {GATE_HINT}",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def cmd_pair(args) -> int:
     with connect(args.url) as ws:
         s = Session(ws)
         token = s.pair(args.code)
         save_token(token)
         if args.listen:
-            print(f"\n[스냅샷] {args.listen}장 기다린다 (맥은 1Hz 로 보낸다)")
-            n = s.listen(args.listen)
-            if n < args.listen:
-                print(f"  [FAIL] {args.listen}장을 기대했는데 {n}장 받았다", file=sys.stderr)
-                return 1
-            print("  [OK] 봉인된 스냅샷이 열린다")
+            # 페어링 직후 첫 한 장은 게이트와 무관하게 보장된다(`GATE_HINT`).
+            # 그래서 기본값이 1 이다 — 유휴 맥에서도 통과해야 하는 검사다.
+            return listen_and_judge(s, args.listen, "페어링 직후")
     return 0
 
 
@@ -499,49 +590,72 @@ def cmd_reconnect(args) -> int:
         s = Session(ws)
         s.reconnect(token)
         if args.listen:
-            print(f"\n[스냅샷] {args.listen}장 기다린다")
-            n = s.listen(args.listen)
-            if 0 <= args.listen and n < args.listen:
-                print(f"  [FAIL] {args.listen}장을 기대했는데 {n}장 받았다", file=sys.stderr)
-                return 1
-            print("  [OK] 봉인된 스냅샷이 열린다")
+            # 재연결은 첫 장도 보장되지 않는다 — `gate.reset()` 을 부르지
+            # 않으므로 내용이 그대로면 0장이다(`GATE_HINT`).
+            return listen_and_judge(s, args.listen, "재연결 — 첫 장도 보장되지 않는다")
     return 0
 
 
 def cmd_watch(args) -> int:
-    """재인증하고 끊길 때까지 듣는다. 맥에서 기기를 해제하는 순간을 본다."""
+    """재인증하고 끊길 때까지 듣는다. 맥에서 기기를 해제하는 순간을 본다.
+
+    **끊김으로 끝나야만 통과다.** 조용히 타임아웃한 것은 「해제하면 끊긴다」의
+    증거가 아니라 아무 일도 일어나지 않았다는 뜻이다.
+    """
     token = load_token()
     with connect(args.url) as ws:
         s = Session(ws)
         s.reconnect(token)
-        print("\n[감시] 끊길 때까지 듣는다. 맥 Devices 탭에서 이 기기를 해제해 보라.")
+        print(
+            f"\n[감시] 끊길 때까지 듣는다 (최대 {args.timeout}초).\n"
+            "  맥 Devices 탭에서 이 기기를 해제하라 — 그 즉시 끊겨야 한다."
+        )
         t0 = time.monotonic()
-        n = s.listen(-1, timeout=args.timeout)
-        print(f"끝났다. {n}장을 받고 {time.monotonic() - t0:.1f}초 만에 종료.")
-    return 0
+        got, why = s.listen(-1, timeout=args.timeout)
+        dt = time.monotonic() - t0
+        if why == "closed":
+            print(f"  [OK] 맥이 연결을 놓았다 ({got}장 수신, {dt:.1f}초)")
+            return 0
+        print(
+            f"  [FAIL] {dt:.1f}초 동안 끊기지 않았다 ({got}장 수신).\n"
+            "  해제를 눌렀는데도 이렇다면 그것이 결함이다. 누르지 않았다면\n"
+            "  누르고 다시 돌려라 — 이 검사는 끊김으로 끝나야만 통과다.",
+            file=sys.stderr,
+        )
+        return 1
 
 
 def cmd_wrong_code(args) -> int:
     """틀린 코드를 반복 제출해 창당 5회 예산이 실제로 닫히는지 본다.
 
-    `CODE2` 는 성공·실패와 무관하게 핸드셰이크를 소비하므로, 매 시도마다
-    `HELLO2` 부터 다시 한다 — 연결도 새로 연다(연결 하나 = 세션 하나).
+    `CODE2` 는 성공·실패와 무관하게 핸드셰이크를 소비하므로(`pairing.rs:742`
+    의 `remove` 가 검증보다 앞에 있다), 매 시도마다 `HELLO2` 부터 다시 한다 —
+    연결도 새로 연다(연결 하나 = 세션 하나).
+
+    **그래서 마지막 시도는 `CODE2` 까지 가지 않는다.** 예산이 0 이면
+    `open_window` 가 창을 주지 않고(`pairing.rs:551`) `HELLO2` 가 곧바로
+    벗은 `{"ok":false}` 를 돌려준다(`:715`). 기대하는 `left` 순서
+    `[4,3,2,1,0,None]` 의 마지막 `None` 이 그것이다 — 앞의 다섯은 `CODE2`
+    거절, 마지막 하나는 `HELLO2` 에서 닫힌 창이다.
     """
     seen: list[int | None] = []
+    stages: list[str] = []
     for attempt in range(1, args.tries + 1):
-        print(f"\n[시도 {attempt}] 틀린 코드 {args.code}")
+        print(f"\n[시도 {attempt}] 틀린 코드")
         with connect(args.url) as ws:
             s = Session(ws)
             try:
                 s.pair(args.code)
             except Denied as e:
                 seen.append(e.left)
+                stages.append(e.stage)
                 print(f"  거절: {e}")
                 continue
             print("  [FAIL] 틀린 코드가 통과했다!", file=sys.stderr)
             return 1
 
     print(f"\n관측한 `left`: {seen}")
+    print(f"거절이 나온 단계: {stages}")
     # 창을 방금 연 상태에서 시작했다면 4,3,2,1,0 뒤로는 전부 닫힘이어야 한다.
     want = [4, 3, 2, 1, 0][: args.tries] + [None] * max(0, args.tries - 5)
     if seen == want:
@@ -599,7 +713,8 @@ def cmd_observe(args) -> int:
             total += len(msg)
             print(f"  [FAIL] 받았다: {msg!r}", file=sys.stderr)
     print(f"  받은 애플리케이션 프레임 {frames}장 / {total}바이트")
-    return 1 if (frames or total) else 1  # 끊기지 않은 것 자체가 실패다
+    # 끊기지 않은 것 자체가 실패다 — 인가되지 않은 연결은 시한을 받아야 한다.
+    return 1
 
 
 def main() -> int:
@@ -611,12 +726,17 @@ def main() -> int:
     sp.set_defaults(func=lambda a: 0)
 
     sp = sub.add_parser("pair", help="HELLO2/CODE2 로 페어링하고 토큰을 저장한다")
-    sp.add_argument("--code", required=True, help="맥 화면의 6자리")
-    sp.add_argument("--listen", type=int, default=0, help="이어서 받을 스냅샷 장수")
+    # 생략하면 물어본다. `--code` 는 argv 라 `ps` 로 같은 기계의 다른 사용자에게
+    # 보이고 셸 히스토리에도 남는다 — 코드는 120초 · 1회용이라 영향이 작지만,
+    # 굳이 남길 이유도 없다.
+    sp.add_argument("--code", help="맥 화면의 6자리. 생략하면 물어본다(권장)")
+    # 기본 1장. 페어링 직후 첫 한 장만 게이트와 무관하게 보장된다(`GATE_HINT`).
+    sp.add_argument("--listen", type=int, default=1, help="이어서 받을 스냅샷 장수 (기본 1)")
     sp.set_defaults(func=cmd_pair)
 
     sp = sub.add_parser("reconnect", help="저장된 토큰으로 AUTH2/PROOF2 재인증")
-    sp.add_argument("--listen", type=int, default=0)
+    # 재연결은 첫 장도 보장되지 않는다 — 내용이 바뀌는 동안에만 온다.
+    sp.add_argument("--listen", type=int, default=1, help="이어서 받을 스냅샷 장수 (기본 1)")
     sp.set_defaults(func=cmd_reconnect)
 
     sp = sub.add_parser("watch", help="재인증하고 끊길 때까지 듣는다 (기기 해제 확인)")
@@ -632,6 +752,13 @@ def main() -> int:
     sp.add_argument("--seconds", type=float, default=180.0)
     sp.set_defaults(func=cmd_observe)
 
+    # **파이프로 넘길 때도 순서가 맞아야 한다.** stdout 은 리다이렉트되면
+    # 블록 버퍼가 되는데 stderr 은 아니라서, `| tee` 로 받으면 `[FAIL]` 이
+    # 로그 맨 앞에 찍힌다 — OK 들이 그 아래 늘어서 있으니 「시작하자마자
+    # 실패했다」로 읽힌다. 이 절차는 사람이 로그를 남겨 가며 도는 것이므로
+    # 줄 단위 버퍼로 고정한다.
+    sys.stdout.reconfigure(line_buffering=True)
+
     args = p.parse_args()
 
     # 관문. 어느 명령이든 여기를 먼저 지난다.
@@ -639,13 +766,24 @@ def main() -> int:
     if args.cmd == "selftest":
         return 0
 
+    if getattr(args, "code", None) is None and args.cmd == "pair":
+        args.code = input("맥 화면의 6자리를 입력하라: ").strip()
+
+    from websockets.exceptions import WebSocketException
+
     try:
         return args.func(args)
     except ProtocolError as e:
         print(f"\n[FAIL] {e}", file=sys.stderr)
         return 1
-    except (OSError, binascii.Error) as e:
-        print(f"\n[FAIL] {type(e).__name__}: {e}", file=sys.stderr)
+    # **맥이 잘못 굴 때 사람에게 트레이스백을 보여주지 않는다.** 그러면
+    # 「이 도구가 고장 났다」로 읽혀서, 정작 판정해야 할 맥의 결함이 묻힌다.
+    # 실제로 나오는 것들: hex 가 아닌 `epk`/`nonce`/`sealed`(`ValueError` —
+    # `binascii.Error` 는 그 하위다), 저차 점에서 `cryptography` 가 던지는
+    # `ValueError`, 없는 필드(`KeyError`), 핸드셰이크 중 끊김
+    # (`ConnectionClosed` ⊂ `WebSocketException`), 소켓·파일(`OSError`).
+    except (ValueError, KeyError, OSError, WebSocketException) as e:
+        print(f"\n[FAIL] 맥의 응답을 해석할 수 없다 — {type(e).__name__}: {e}", file=sys.stderr)
         return 1
 
 
