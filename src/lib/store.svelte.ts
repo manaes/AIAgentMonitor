@@ -6,6 +6,9 @@ import {
   networkStatus,
   networkSetEnabled,
   listenNetworkStatus,
+  lanStatus,
+  lanSetEnabled,
+  listenLanStatus,
   pairingStatus,
   beginPairing,
   unpair,
@@ -15,6 +18,7 @@ import {
   type Snapshot,
   type BleStatus,
   type NetworkStatus,
+  type LanStatus,
   type AppSettings,
   type AgentKind,
   type PairingStatus,
@@ -56,6 +60,9 @@ class SnapshotStore {
     this.#networkUnlisten?.();
     this.#networkUnlisten = null;
     this.#networkInitialized = false;
+    this.#lanUnlisten?.();
+    this.#lanUnlisten = null;
+    this.#lanInitialized = false;
   }
 
   ble = $state<BleStatus | null>(null);
@@ -140,8 +147,50 @@ class SnapshotStore {
     }
   }
 
+  // ── LAN(WebSocket) — BLE·네트워크와 같은 패턴 ──────────
+  // 세 토글은 서로 독립이다. 백엔드도 그렇게 배선돼 있어(lan_set_enabled)
+  // 여기서 다른 전송을 건드릴 이유가 없다.
 
-  // ── 페어링 (BLE·네트워크 공유) ────────────────────────
+  lan = $state<LanStatus | null>(null);
+  lanActionError = $state<string | null>(null);
+  #lanInitialized = false;
+  #lanUnlisten: (() => void) | null = null;
+  #lanReqSeq = 0;
+
+  async initLan() {
+    if (this.#lanInitialized) return;
+    this.#lanInitialized = true;
+    const seq = ++this.#lanReqSeq;
+    const status = await lanStatus();
+    if (seq === this.#lanReqSeq) this.lan = status;
+    // 리스너 bind 실패(포트 점유)는 토글을 켠 **뒤에** 도착한다 — 백엔드가
+    // lan_status 이벤트를 쏘고 여기서 다시 읽는 이 경로가 그 오류가 화면에
+    // 닿는 유일한 길이다. 폴링은 없다.
+    this.#lanUnlisten = await listenLanStatus(async () => {
+      const seq = ++this.#lanReqSeq;
+      const status = await lanStatus();
+      if (seq !== this.#lanReqSeq) return;
+      this.lan = status;
+      this.lanActionError = null;
+    });
+  }
+
+  async setLanEnabled(on: boolean) {
+    try {
+      await lanSetEnabled(on);
+      const seq = ++this.#lanReqSeq;
+      const status = await lanStatus();
+      if (seq === this.#lanReqSeq) this.lan = status;
+      this.lanActionError = null;
+      // LAN 만 켠 상태에서도 페어링 영역이 나와야 한다 — 켜고 끄면 무엇을
+      // 보여줄지가 달라지므로 공유 페어링 상태를 다시 읽는다.
+      await this.#refreshPairing();
+    } catch (e) {
+      this.lanActionError = `LAN 설정을 변경하지 못했습니다: ${e}`;
+    }
+  }
+
+  // ── 페어링 (BLE·네트워크·LAN 공유) ────────────────────
   // 창도 코드도 기기 목록도 하나다(2026-08-25 스펙). 전송 토글과 달리
   // 여기엔 이벤트 push 가 없어 동작 직후 직접 다시 읽는다.
   pairing = $state<PairingStatus | null>(null);

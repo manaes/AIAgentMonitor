@@ -46,7 +46,8 @@ export async function listenSnapshot(cb: (s: Snapshot) => void): Promise<Unliste
 export type BlePeer = { id: string; mtu: number };
 export type BleStatus = {
   // 이 빌드에 실제 BLE 구현이 있는지(macOS 만 true). Windows 는 아무 일도 일어나지 않으므로
-  // 이 값이 false 면 Devices 탭 자체를 노출하지 않는다.
+  // 이 값이 false 면 **BLE 토글만** 숨긴다 — 탭 자체는 그대로다. 네트워크와 LAN 은
+  // 어디서나 supported 라 윈도우에서도 그 둘은 보여야 한다.
   supported: boolean;
   enabled: boolean;
   advertising: boolean;
@@ -95,9 +96,41 @@ export async function listenNetworkStatus(cb: () => void): Promise<UnlistenFn> {
   return listen("network_status", () => cb());
 }
 
-// ── 페어링 (BLE·네트워크 공유) ──────────────────────────────
+// ── LAN(WebSocket) 미러 ─────────────────────────────────────
+//
+// 같은 WiFi 의 전용 기기(CYD)용 전송이다. QR 은 없다 — 그 기기에는 카메라가
+// 없어서, 사람이 주소를 손으로 넣고 6자리 코드를 입력한다.
+
+export type LanStatus = {
+  // iroh 와 같은 이유로 언제나 true — 리스너는 그냥 WebSocket 이고 게시·주소
+  // 조회도 표준 라이브러리만 쓴다(백엔드 LAN_SUPPORTED 의 doc).
+  supported: boolean;
+  enabled: boolean;
+  // **포트까지 붙은 완성된 문자열**(`192.168.0.12:4320`). 프론트는 포트를 알지
+  // 못하고 알 필요도 없다 — 4320 은 Rust 의 `lan::server::PORT` 한 곳에만 있다.
+  // 공유가 꺼져 있거나 라우팅 가능한 IPv4 가 없으면 null 이다.
+  address: string | null;
+  // 포트 점유 같은 실패. BLE 의 last_error 와 같은 이유로 존재한다 — 이 앱은
+  // 로그 파일을 남기지 않아 이 필드가 사용자가 알 수 있는 유일한 경로다.
+  last_error: string | null;
+};
+
+export async function lanStatus(): Promise<LanStatus> {
+  return invoke<LanStatus>("lan_status");
+}
+
+export async function lanSetEnabled(enabled: boolean): Promise<void> {
+  return invoke<void>("lan_set_enabled", { enabled });
+}
+
+export async function listenLanStatus(cb: () => void): Promise<UnlistenFn> {
+  return listen("lan_status", () => cb());
+}
+
+// ── 페어링 (BLE·네트워크·LAN 공유) ──────────────────────────
 // 창도 코드도 기기 목록도 하나다(2026-08-25 스펙) — 전송별 status 와 분리해
-// 여기서만 다룬다. 그래야 시도 5회 예산이 두 전송에 걸쳐 하나로 유지된다.
+// 여기서만 다룬다. 그래야 시도 5회 예산이 세 전송(BLE·네트워크·LAN)에 걸쳐
+// 하나로 유지된다.
 
 export type PairingWindow =
   // expires_at 은 절대 epoch 초다 — status 이벤트가 활동이 있을 때만 발행되므로,

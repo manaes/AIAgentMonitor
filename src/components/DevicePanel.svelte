@@ -6,6 +6,7 @@
   onMount(() => {
     store.initBle();
     store.initNetwork();
+    store.initLan();
     store.initPairing();
   });
 
@@ -19,21 +20,46 @@
     return () => clearInterval(tick);
   });
 
-  // BLE 와 네트워크는 이제 **독립 토글**이다(2026-08-25 스펙 7장) — 페어링 창을
+  // BLE·네트워크·LAN 은 **독립 토글**이다(2026-08-25 스펙 7장) — 페어링 창을
   // 공유하므로 예전의 "둘 중 하나만" 제약이 필요 없어졌다. 폰 A 는 BLE 로,
-  // 폰 B 는 네트워크로 동시에 붙을 수 있다.
+  // 폰 B 는 네트워크로, 전용 기기는 LAN 으로 동시에 붙을 수 있다.
+  //
+  // 노출 여부는 전송마다 자기 `supported` 로만 정한다 — 프론트는 OS 를 추측하지
+  // 않는다. BLE 만 macOS 전용이고(CoreBluetooth), 네트워크와 LAN 은 어디서나
+  // true 다. 그래서 이 탭은 윈도우에서도 보인다.
   let bleSupported = $derived(store.ble?.supported ?? false);
   let networkSupported = $derived(store.network?.supported ?? false);
+  let lanSupported = $derived(store.lan?.supported ?? false);
   let bleEnabled = $derived(store.ble?.enabled ?? false);
   let networkEnabled = $derived(store.network?.enabled ?? false);
-  let anyEnabled = $derived(bleEnabled || networkEnabled);
+  let lanEnabled = $derived(store.lan?.enabled ?? false);
+  let anyEnabled = $derived(bleEnabled || networkEnabled || lanEnabled);
+
+  // 백엔드가 포트까지 붙여 준 완성된 문자열이다(`192.168.0.12:4320`). 여기서
+  // 포트를 덧붙이지 않는다 — 4320 은 Rust 의 `lan::server::PORT` 한 곳에만 있고,
+  // 그 값을 프론트가 베껴 적으면 상수가 움직이는 날 이 패널이 거짓말을 한다.
+  let lanAddress = $derived(store.lan?.address ?? null);
+
+  // 6자리 코드를 **손으로 입력하는** 전송들. 네트워크는 QR 로 대신하고, LAN 기기
+  // (CYD)는 카메라가 없어 BLE 와 같은 길을 쓴다. 코드 자체는 창 하나에서 나오므로
+  // 화면에도 한 번만 찍고 문구만 켜져 있는 전송에 맞춘다.
+  let codeTyped = $derived(bleEnabled || lanEnabled);
+  let codeLabel = $derived(
+    bleEnabled && lanEnabled
+      ? "BLE·LAN 으로 붙일 기기에는 아래 6자리를 입력하세요"
+      : bleEnabled
+        ? "BLE 로 붙일 기기에는 아래 6자리를 입력하세요"
+        : "LAN 으로 붙일 기기에는 위 주소를 넣고 아래 6자리를 입력하세요"
+  );
 
   let shownError = $derived(
     store.bleActionError ??
       store.networkActionError ??
+      store.lanActionError ??
       store.pairingActionError ??
       store.ble?.last_error ??
       store.network?.last_error ??
+      store.lan?.last_error ??
       null
   );
 
@@ -98,6 +124,18 @@
     </div>
   {/if}
 
+  {#if lanSupported}
+    <div class="row" style="margin-top: 8px;">
+      <div class="text">
+        <strong>LAN 공유</strong>
+        <span class="subtle">같은 WiFi 의 전용 기기에 전송합니다</span>
+      </div>
+      <button class="toggle" class:on={lanEnabled} onclick={() => store.setLanEnabled(!lanEnabled)}>
+        {lanEnabled ? "켜짐" : "꺼짐"}
+      </button>
+    </div>
+  {/if}
+
   {#if shownError}
     <p class="error">{shownError}</p>
   {/if}
@@ -108,7 +146,31 @@
     </p>
   {/if}
 
-  <!-- 페어링 영역은 하나다 — 창·코드·시도 예산을 두 전송이 공유한다. -->
+  <!--
+    LAN 주소는 **켜져 있는 동안 언제나** 보인다 — 페어링 창이 열려 있든 아니든,
+    자동 검색이 되든 안 되든.
+
+    자동 검색(mDNS)이 막힌 망에서 무슨 일이 벌어지는지가 이 배치의 이유다:
+    방화벽이 5353 을 막았거나 게스트 VLAN 이면 게시는 **실패한 채 아무 신호도
+    남기지 않는다**(`lan/discovery.rs` 모듈 doc 에 크레이트 소스 위치까지 적혀
+    있다). 그러니 "못 찾으면 주소를 넣으세요"를 오류 표시에 매달면 가장 필요한
+    순간에 아무 말도 하지 않게 된다. 문구도 같은 이유로 "찾지 못하면 알려
+    준다"고 말하지 않는다 — 우리는 그것을 알지 못한다.
+  -->
+  {#if lanEnabled}
+    {#if lanAddress}
+      <p class="subtle status">
+        LAN 주소 <span class="mono">{lanAddress}</span> · 기기가 자동으로 찾지 못하면 이 주소를
+        직접 넣으세요
+      </p>
+    {:else}
+      <!-- 주소가 없다는 것은 기본 경로가 없다는 뜻이다(`local_ipv4`) — 랜선이
+           빠졌거나 어느 망에도 붙어 있지 않다. -->
+      <p class="subtle status">LAN 주소를 찾지 못했습니다 — WiFi·유선 연결을 확인하세요</p>
+    {/if}
+  {/if}
+
+  <!-- 페어링 영역은 하나다 — 창·코드·시도 예산을 세 전송이 공유한다. -->
   {#if anyEnabled}
     {#if pairingWindow.kind !== "open"}
       <button class="inline-btn" onclick={() => store.beginPairing()}>페어링 시작</button>
@@ -119,8 +181,10 @@
         <p class="code-label">
           {secondsLeft}초 남음 · 시도 {pairingWindow.attempts_left}회 남음
         </p>
-        {#if bleEnabled}
-          <p class="code-label">BLE 로 붙일 기기에는 아래 6자리를 입력하세요</p>
+        <!-- 코드는 창 하나에서 나오므로 화면에도 한 번만 찍는다 — BLE 와 LAN 이
+             같은 6자리를 쓴다. LAN 기기는 카메라가 없어 QR 대신 이 길이다. -->
+        {#if codeTyped}
+          <p class="code-label">{codeLabel}</p>
           <p class="code">{pairingWindow.code}</p>
         {/if}
         {#if networkEnabled && qrDataUrl}

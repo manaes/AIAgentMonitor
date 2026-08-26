@@ -162,6 +162,70 @@ pub struct LanHandle {
     pub bridge: Mutex<lan::LanBridge>,
 }
 
+/// LAN 전송은 **모든 플랫폼에서 지원된다** — `NETWORK_SUPPORTED` 와 같은 무조건
+/// `true` 이고, `BLE_SUPPORTED` 처럼 `cfg` 로 갈라지지 않는다.
+///
+/// BLE 가 macOS 에서만 `true` 인 이유는 CoreBluetooth 가 그 OS 에만 있고 다른
+/// 곳에서는 `FakePeripheral` 이라 토글이 성공을 보고해도 아무 일도 일어나지 않기
+/// 때문이다. LAN 에는 그런 사정이 없다: 여는 것은 그냥 WebSocket 리스너이고,
+/// 게시(`lan::discovery`)와 주소 조회(`local_ipv4`)도 서브프로세스 없이 표준
+/// 라이브러리만 쓴다 — 윈도우에서 `ipconfig` 출력을 파싱하지 않기로 한 결정이
+/// 바로 이 값을 무조건 `true` 로 둘 수 있게 하려던 것이다. 여기에 `cfg` 를
+/// 붙이면 그 작업이 통째로 버려진다.
+///
+/// 윈도우에서 실제로 돌려 본 사람은 아직 없다 — 그 확인은
+/// `docs/ble-protocol/DEVICE-TEST.md` §8-4 에 있다.
+const LAN_SUPPORTED: bool = true;
+
+#[derive(Clone, serde::Serialize)]
+pub struct LanStatus {
+    pub supported: bool,
+    pub enabled: bool,
+    /// 사용자가 기기에 **손으로 넣을 주소**. `192.168.0.12:4320` 처럼 **포트까지
+    /// 붙은 완성된 문자열**이다.
+    ///
+    /// 포트를 여기서 붙이는 이유는 프론트가 `4320` 을 베껴 적지 않게 하기
+    /// 위해서다 — 그 값은 `lan::server::PORT` 한 곳에서만 나와야 하고, 상수가
+    /// 움직이는 날 패널이 거짓말을 하면 안 된다.
+    ///
+    /// 라우팅 가능한 IPv4 를 못 찾으면 `None` 이다(`local_ipv4` 의 한계 참고).
+    pub address: Option<String>,
+    pub last_error: Option<String>,
+}
+
+/// 패널에 띄울 주소 문자열을 만든다.
+///
+/// **꺼져 있으면 `None`.** 리스너가 없는 동안 주소를 보여주면 사용자는 그 값을
+/// 기기에 넣고 "왜 안 붙지"를 겪는다. 켜져 있는 동안에는 **mDNS 게시가 성공했든
+/// 실패했든 언제나** 값을 준다 — 방화벽이 5353 을 막은 경우는 아무 신호도 남기지
+/// 않으므로(`lan::discovery` 모듈 doc), 손으로 넣는 길을 오류 표시에 매달면 가장
+/// 필요한 순간에 아무 말도 하지 않게 된다(DEVICE-TEST §8-3 의 요구사항).
+///
+/// `port` 를 인자로 받는 것은 테스트가 하드코딩된 리터럴을 잡아내게 하기
+/// 위해서다 — 호출부는 언제나 `lan::server::PORT` 를 넘긴다.
+fn lan_address(enabled: bool, ip: Option<String>, port: u16) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    Some(format!("{}:{}", ip?, port))
+}
+
+#[tauri::command]
+async fn lan_status(state: tauri::State<'_, Arc<LanHandle>>) -> Result<LanStatus, String> {
+    let bridge = state.bridge.lock().await;
+    let enabled = bridge.is_enabled();
+    Ok(LanStatus {
+        supported: LAN_SUPPORTED,
+        enabled,
+        // 보여줄지 말지는 `lan_address` 가 정한다. 꺼져 있을 때도 `local_ipv4()`
+        // 는 불리지만(인자가 먼저 평가된다) 그 비용은 UDP 소켓 하나를 묶고 경로를
+        // 묻는 것뿐이고 패킷은 나가지 않는다 — 판단을 두 곳에 두지 않는 쪽을 택했다.
+        address: lan_address(enabled, lan::discovery::local_ipv4(), lan::server::PORT),
+        // BLE·network 와 달리 오류는 핸들이 아니라 브리지가 들고 있다.
+        last_error: bridge.last_error(),
+    })
+}
+
 #[tauri::command]
 async fn network_status(state: tauri::State<'_, Arc<NetworkHandle>>) -> Result<NetworkStatus, String> {
     let bridge = state.bridge.lock().await;
@@ -343,6 +407,35 @@ async fn network_set_enabled(
     if !enabled {
         pairing.lock().await.end_sessions(&served);
         *network_state.last_error.lock().unwrap() = None;
+    }
+    Ok(())
+}
+
+/// 세 토글은 서로 독립이다 — LAN 을 켜고 끄는 것이 BLE·network 를 건드리지
+/// 않는다. `network_set_enabled` 와 같은 모양을 일부러 유지한다.
+///
+/// **실패는 여기서 나오지 않는다.** `LanBridge::set_enabled(true)` 는 리스너
+/// 태스크를 띄우고 곧바로 돌아오므로, 포트 점유(`EADDRINUSE`) 같은 실패는 잠시 뒤
+/// `ServerEvent::BindFailed` 로 온다. 그 경로는 이미 이어져 있다 — `apply_event`
+/// 가 `last_error` 를 채우고 배선이 `lan_status` 이벤트를 쏘면 패널이 다시 읽는다
+/// (setup 의 LAN 이벤트 루프). 그래서 여기서 성공을 돌려준 뒤에 빨간 오류가 뜨는
+/// 것이 정상이고, 프론트가 폴링할 이유가 없다.
+#[tauri::command]
+async fn lan_set_enabled(
+    enabled: bool,
+    lan_state: tauri::State<'_, Arc<LanHandle>>,
+    pairing: tauri::State<'_, SharedPairing>,
+) -> Result<(), String> {
+    let mut bridge = lan_state.bridge.lock().await;
+    // 끄기 전에 받아둔다 — set_enabled(false) 가 목록을 비운다. 공유 매니저이므로
+    // **이 전송의 세션만** 내려야 BLE·network 세션이 살아남는다(스펙 4장).
+    let served = if enabled { Vec::new() } else { bridge.served_centrals() };
+    bridge.set_enabled(enabled);
+    drop(bridge);
+    if !enabled {
+        pairing.lock().await.end_sessions(&served);
+        // `last_error` 를 지우는 것은 브리지가 스스로 한다(`set_enabled` 의 doc) —
+        // BLE·network 처럼 배선이 기억해야 하는 정리를 여기 두지 않는다.
     }
     Ok(())
 }
@@ -719,6 +812,8 @@ pub fn run() {
             ble_set_enabled,
             network_status,
             network_set_enabled,
+            lan_status,
+            lan_set_enabled,
             // 페어링은 두 전송이 공유한다(2026-08-25 스펙) — 전송별 커맨드가
             // 아니라 앱 레벨 커맨드 하나씩이다.
             pairing_status,
@@ -1247,4 +1342,50 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// LAN 공유가 꺼져 있으면 주소를 보여주지 않는다. 리스너가 없는 동안 주소를
+    /// 내밀면 사용자는 그것을 기기에 넣고, 기기 쪽에는 왜 안 붙는지 알려 줄 화면이
+    /// 없다.
+    #[test]
+    fn lan_address_is_hidden_while_sharing_is_off() {
+        assert_eq!(lan_address(false, Some("192.168.0.12".into()), 4320), None);
+    }
+
+    /// 켜져 있으면 **주소와 포트를 한 문자열로** 준다. 프론트는 이 값을 그대로
+    /// 찍기만 하면 되고 포트를 스스로 알 필요가 없다.
+    ///
+    /// **일부러 4320 이 아닌 포트로 검사한다.** 그래야 함수 안에 리터럴을 박는
+    /// 변경을 잡는다 — 운영 포트로 검사하면 `format!("{ip}:4320")` 이라고 고쳐 놔도
+    /// 통과해 버리고, 그것이 바로 이 함수가 막으려는 형태다(포트 상수는
+    /// `lan::server::PORT` 한 곳에만 있어야 한다).
+    #[test]
+    fn lan_address_carries_the_port_it_is_given() {
+        assert_eq!(
+            lan_address(true, Some("10.0.0.5".into()), 9999),
+            Some("10.0.0.5:9999".to_string())
+        );
+    }
+
+    /// 호출부가 넘기는 포트는 언제나 리스너가 실제로 여는 그 포트다. 둘이 갈라지면
+    /// 패널이 열려 있지 않은 포트를 안내한다.
+    #[test]
+    fn lan_address_uses_the_listener_port_in_production() {
+        assert_eq!(
+            lan_address(true, Some("10.0.0.5".into()), lan::server::PORT),
+            Some(format!("10.0.0.5:{}", lan::server::PORT))
+        );
+    }
+
+    /// 라우팅 가능한 IPv4 가 없으면(랜선이 빠졌다, 기본 경로가 없다) 주소도 없다.
+    /// 여기서 "알 수 없음" 같은 문자열을 만들어 내면 패널이 그것을 주소처럼
+    /// 보여준다 — 없다는 사실은 패널이 자기 문구로 말한다.
+    #[test]
+    fn lan_address_is_none_without_a_routable_ip() {
+        assert_eq!(lan_address(true, None, lan::server::PORT), None);
+    }
 }
