@@ -42,6 +42,11 @@ x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
 chacha20poly1305 = "0.11.0"
 hkdf = "0.13.0"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+mdns-sd = "0.21.0"
+# mDNS 레코드에 넣을 호스트 이름. `scutil --get LocalHostName` 은 맥에만 있고
+# 이 앱은 윈도우 MSI 도 낸다 — 이 크레이트는 유닉스에서 `gethostname(2)`,
+# 윈도우에서 `GetComputerNameExW` 를 부르는 얇은 래퍼라 서브프로세스가 없다.
+gethostname = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

@@ -6,6 +6,7 @@
 //! 잘못됐는지"만 안다(BLE 의 `peripheral` / 네트워크의 accept 루프와 같은
 //! 역할 분리).
 
+pub mod discovery;
 pub mod server;
 
 use crate::ble::pairing::{self, PairingManager};
@@ -94,14 +95,31 @@ pub struct LanBridge {
     /// (`LAN_THROTTLE`). 내용이 그대로면 아예 내보내지 않으므로, 조용한
     /// 시간에는 봉인 카운터도 전진하지 않는다.
     gate: EmitGate,
+    /// mDNS 게시기. 운영에서는 진짜 데몬이고 테스트에서는 기록만 하는 가짜다
+    /// (`discovery::Advertiser` 의 doc).
+    advertiser: Box<dyn discovery::Advertiser>,
+    /// 지금 광고 중인가. `enabled` 도 `server.is_some()` 도 아니다 — 왜 셋이
+    /// 다른지는 `advertise` 의 doc.
+    advertising: bool,
 }
 
 impl LanBridge {
     pub fn new(events: Sender<ServerEvent>) -> Self {
-        Self::with_port(events, server::PORT)
+        Self::with_parts(
+            events,
+            server::PORT,
+            Box::new(discovery::MdnsAdvertiser::default()),
+        )
     }
 
-    fn with_port(events: Sender<ServerEvent>, port: u16) -> Self {
+    /// 포트와 게시기를 갈아 끼울 수 있는 생성자. 테스트만 쓴다 — 임시 포트로
+    /// 띄우고(서로, 그리고 개발 중인 앱의 4320 을 밟지 않게), 진짜 mDNS 데몬 대신
+    /// 가짜를 넣기 위해서다(`discovery::Advertiser` 의 doc).
+    fn with_parts(
+        events: Sender<ServerEvent>,
+        port: u16,
+        advertiser: Box<dyn discovery::Advertiser>,
+    ) -> Self {
         Self {
             enabled: false,
             centrals: HashSet::new(),
@@ -112,6 +130,8 @@ impl LanBridge {
             events,
             port,
             gate: EmitGate::new(LAN_THROTTLE),
+            advertiser,
+            advertising: false,
         }
     }
 
@@ -160,10 +180,48 @@ impl LanBridge {
             // 지운다(`lib.rs`). `last_error` 를 브리지가 소유하기로 한 이상 지우는
             // 책임도 여기 있다. 배선이 기억해야 하는 정리는 언젠가 잊힌다.
             self.last_error = None;
+            // 광고를 **먼저** 거둔다. 소켓이 닫히기를 기다렸다가 거두면, 그
+            // 사이에 조회한 기기가 방금 사라진 포트를 향해 출발한다.
+            self.advertise(false);
             if let Some(h) = self.server.take() {
                 self.stopping = Some(h.stop());
             }
         }
+    }
+
+    /// mDNS 광고를 켜거나 끈다.
+    ///
+    /// **토글이 아니라 리스너를 따른다.** 둘은 갈라진다: `BindFailed` 는
+    /// `server` 를 `None` 으로 만들면서 `enabled` 는 `true` 로 남긴다(Task 4 에서
+    /// 확인된 동작이다). 광고를 `set_enabled(true)` 에 매달면 포트가 열리지 않은
+    /// 맥이 계속 광고되고, CYD 는 죽은 포트를 향해 걸어간다 — 그리고 그쪽에는
+    /// 무엇이 잘못됐는지 알려 줄 화면이 없다. 사람은 맥 패널에서 빨간 오류를
+    /// 보지만, 기기는 "찾았는데 안 붙는다"만 겪는다.
+    ///
+    /// 그래서 켜는 신호는 `ServerEvent::Listening` 하나뿐이다 — `bind` 가 성공한
+    /// 뒤에만 나가는 통지다. 끄는 신호는 둘: 사용자가 토글을 내렸을 때와, 그
+    /// 리스너가 내려갔을 때.
+    ///
+    /// 광고 자체가 실패해도 리스너는 살아 있다. 그때는 자동 검색만 없는 것이므로
+    /// LAN 공유를 꺼 버리지 않는다 — 사용자는 IP 를 손으로 넣어 붙을 수 있고,
+    /// 오류 문구가 그 길을 말해 준다.
+    fn advertise(&mut self, on: bool) {
+        if on == self.advertising {
+            return;
+        }
+        if on {
+            if let Err(e) = self.advertiser.start(self.port) {
+                // "실패"에서 끝나면 사용자가 할 수 있는 일이 없다. 무엇을 하면
+                // 되는지까지 말한다. 여기서 `advertising` 은 false 로 남는다 —
+                // 다음 `Listening` 이 다시 시도한다.
+                self.last_error =
+                    Some(format!("자동 검색 게시에 실패했습니다 — 기기에 IP 를 직접 넣으세요: {e}"));
+                return;
+            }
+        } else {
+            self.advertiser.stop();
+        }
+        self.advertising = on;
     }
 
     /// 이 전송이 지금 서비스 중인 central 목록. BLE·network 의
@@ -251,7 +309,9 @@ impl LanBridge {
     pub fn sessions_to_end(&self, ev: &ServerEvent) -> Vec<CentralId> {
         match ev {
             ServerEvent::Disconnected(id) if self.centrals.contains(id) => vec![id.clone()],
-            // 바인딩 실패는 연결이 없었다는 뜻이고, 프레임은 세션을 끝내지 않는다.
+            // 나머지는 세션을 끝내지 않는다: 리스너가 뜨거나(`Listening`) 뜨지
+            // 못한 것(`BindFailed`)은 연결이 아직 없다는 뜻이고, 프레임은 이미
+            // 붙어 있는 연결의 말이다.
             _ => Vec::new(),
         }
     }
@@ -466,6 +526,15 @@ impl LanBridge {
     /// 결정이기 때문이다 — 연결 코드 안에 두면 테스트가 닿지 않는다.
     pub fn apply_event(&mut self, ev: &ServerEvent) {
         match ev {
+            ServerEvent::Listening { generation } => {
+                // 낡은 세대의 통지는 지금의 사실이 아니다 — `BindFailed` 와 같은
+                // 이유다. 토글이 꺼져 있으면 `server` 가 `None` 이라 이 검사가
+                // 곧바로 걸러 낸다: **꺼진 전송은 광고하지 않는다.**
+                if !self.is_current_generation(*generation) {
+                    return;
+                }
+                self.advertise(true);
+            }
             ServerEvent::Connected(id) => {
                 self.centrals.insert(id.clone());
             }
@@ -483,6 +552,15 @@ impl LanBridge {
                 // 바인딩에 실패했으면 리스너는 없다. 핸들을 계속 들고 있으면
                 // 상태가 "켜져 있고 서버도 있다"로 보여 실제와 어긋난다.
                 self.server = None;
+                // 리스너가 없으면 광고도 없다. **오늘 이 자리에서 실제로 거두는
+                // 일은 일어나지 않는다** — `BindFailed` 와 `Listening` 은 한 세대에
+                // 함께 오지 않으므로(bind 는 성공하거나 실패하거나 하나다) 여기서
+                // `advertising` 은 언제나 false 이고 `advertise` 가 곧바로
+                // 돌아간다. 그래도 적어 두는 이유는 "리스너가 없다"와 "광고를
+                // 거둔다"가 갈라져 있으면, 리스너가 뜬 **뒤에** 죽는 경로가 생기는
+                // 날 광고만 살아남기 때문이다. 규칙을 상태를 바꾸는 자리에 붙여
+                // 둔다.
+                self.advertise(false);
             }
             // 프레임은 세션 목록을 바꾸지 않는다. 해석은 `handle_auth` 가
             // 하고, 그 결과(인가)는 공유 `PairingManager` 에 남는다.
@@ -565,11 +643,87 @@ mod tests {
         UNIX_EPOCH + Duration::from_secs(secs)
     }
 
+    /// 광고 호출을 기록만 하는 가짜 게시기.
+    ///
+    /// 진짜 데몬을 띄우면 `cargo test` 가 **개발자의 망에 이 맥을 실제로
+    /// 광고한다** — 게다가 테스트마다 스레드와 멀티캐스트 소켓이 하나씩 는다.
+    /// 여기서 봐야 하는 것은 데몬이 아니라 "언제 켜고 언제 끄는가"라는 브리지의
+    /// 판단이다(`LanBridge::advertise`).
+    #[derive(Debug, PartialEq, Eq, Clone)]
+    enum Ad {
+        Start(u16),
+        Stop,
+    }
+
+    #[derive(Default)]
+    struct AdLog {
+        calls: Vec<Ad>,
+        /// 데몬을 띄우지 못하는 상황(멀티캐스트가 막힌 망 등)을 흉내 낸다.
+        fail: bool,
+    }
+
+    /// 브리지가 하나를 들고 테스트가 같은 것을 들여다본다.
+    #[derive(Clone, Default)]
+    struct FakeAdvertiser(std::sync::Arc<std::sync::Mutex<AdLog>>);
+
+    impl FakeAdvertiser {
+        fn calls(&self) -> Vec<Ad> {
+            self.0.lock().unwrap().calls.clone()
+        }
+        fn fail_next(&self) {
+            self.0.lock().unwrap().fail = true;
+        }
+    }
+
+    impl discovery::Advertiser for FakeAdvertiser {
+        fn start(&mut self, port: u16) -> anyhow::Result<()> {
+            let mut g = self.0.lock().unwrap();
+            g.calls.push(Ad::Start(port));
+            if g.fail {
+                anyhow::bail!("데몬을 띄우지 못했다");
+            }
+            Ok(())
+        }
+        fn stop(&mut self) {
+            self.0.lock().unwrap().calls.push(Ad::Stop);
+        }
+    }
+
     /// 테스트는 임시 포트(0)로 띄운다 — 서로, 그리고 개발 중인 앱의 4320 을
     /// 밟지 않기 위해서다. 실제 포트가 열리고 닫히는지는 `server` 쪽 테스트가 본다.
     fn bridge() -> (LanBridge, Receiver<ServerEvent>) {
+        let (b, rx, _ads) = bridge_on(0);
+        (b, rx)
+    }
+
+    /// 광고까지 들여다보는 브리지. 포트를 받는 이유는 "광고한 포트가 bind 한
+    /// 포트인가"를 볼 수 있어야 하기 때문이다.
+    fn bridge_on(port: u16) -> (LanBridge, Receiver<ServerEvent>, FakeAdvertiser) {
         let (tx, rx) = channel(server::EVENT_QUEUE);
-        (LanBridge::with_port(tx, 0), rx)
+        let ads = FakeAdvertiser::default();
+        let b = LanBridge::with_parts(tx, port, Box::new(ads.clone()));
+        (b, rx, ads)
+    }
+
+    /// 지금 살아 있는 리스너가 떴다는 통지.
+    fn listening_now(b: &LanBridge) -> ServerEvent {
+        ServerEvent::Listening { generation: b.generation }
+    }
+
+    /// 다음 이벤트를 **브리지에 먹이면서** 가져온다. `Listening` 은 반영한 뒤
+    /// 건너뛴다 — 배선(`lib.rs`)이 모든 이벤트를 `apply_event` 에 넘기는 것과 같은
+    /// 모양이고, 그래야 아래 소켓 테스트들이 리스너가 뜬 뒤의 상태에서 시작한다.
+    async fn next_applied(b: &mut LanBridge, rx: &mut Receiver<ServerEvent>) -> ServerEvent {
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("이벤트가 오지 않았다")
+                .expect("이벤트 통로가 닫혔다");
+            b.apply_event(&ev);
+            if !matches!(ev, ServerEvent::Listening { .. }) {
+                return ev;
+            }
+        }
     }
 
     #[test]
@@ -741,6 +895,142 @@ mod tests {
         assert!(b.is_current_generation(g));
         assert!(!b.is_current_generation(g - 1));
         assert!(!b.is_current_generation(g + 1));
+    }
+
+    // --- mDNS 광고 (Task 5) ---
+
+    /// **광고는 토글이 아니라 리스너를 따른다.** 토글을 켠 것만으로 광고하면, bind
+    /// 가 아직 끝나지도 않은(혹은 실패할) 포트가 이미 광고된 상태가 된다.
+    #[tokio::test]
+    async fn the_toggle_alone_does_not_advertise() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+
+        assert!(!b.advertising, "bind 성공 전에 광고하면 안 된다");
+        assert_eq!(ads.calls(), vec![], "게시기를 건드리지도 않는다");
+    }
+
+    /// 리스너가 실제로 떴다는 통지가 광고를 켠다. 광고에 실리는 포트는 **그
+    /// 리스너가 잡은 포트**여야 한다 — 다른 포트를 광고하면 CYD 는 찾자마자 막힌다.
+    #[tokio::test]
+    async fn a_live_listener_starts_the_advertisement() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+
+        assert!(b.advertising);
+        assert_eq!(ads.calls(), vec![Ad::Start(0)]);
+    }
+
+    /// 운영 브리지가 쓰는 포트. 위 테스트가 "광고한 포트 = 브리지의 포트"를
+    /// 보고(`Ad::Start(0)`), 여기가 "브리지의 포트 = 스펙의 4320"을 본다 — 둘을
+    /// 이으면 광고에 실리는 것이 실제로 열리는 포트다.
+    #[test]
+    fn a_production_bridge_uses_the_spec_port() {
+        let (tx, _rx) = channel(server::EVENT_QUEUE);
+        let b = LanBridge::new(tx);
+        assert_eq!(b.port, server::PORT);
+    }
+
+    /// **bind 실패는 광고를 만들지 않는다.** `BindFailed` 는 `enabled` 를 켠 채로
+    /// 리스너만 없애므로, 광고를 토글에 매달았다면 여기서 죽은 포트가 계속
+    /// 광고된다 — CYD 는 맥을 찾아내고, 걸어가고, 붙지 못한다.
+    #[tokio::test]
+    async fn a_bind_failure_leaves_nothing_advertised() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&bind_failed_now(&b));
+
+        assert!(b.is_enabled(), "토글은 그대로 켜져 있다 — 그것이 이 테스트의 전제다");
+        assert!(b.server.is_none());
+        assert!(!b.advertising, "리스너가 없는데 광고가 남았다");
+        assert_eq!(ads.calls(), vec![], "게시기를 건드리지도 않는다");
+    }
+
+    /// 토글을 내리면 광고도 거둔다. 거두지 않으면 사용자가 껐다고 믿는 맥이
+    /// 계속 같은 망에 자기를 알린다.
+    #[tokio::test]
+    async fn disabling_takes_the_advertisement_down() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+        b.set_enabled(false);
+
+        assert!(!b.advertising);
+        assert_eq!(ads.calls(), vec![Ad::Start(0), Ad::Stop]);
+    }
+
+    /// 껐다 켜면 다시 광고한다 — 한 번 거둔 뒤 되살아나지 않으면 두 번째부터는
+    /// 기기가 맥을 찾지 못한다.
+    #[tokio::test]
+    async fn re_enabling_advertises_again() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+        b.set_enabled(false);
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+
+        assert!(b.advertising);
+        assert_eq!(ads.calls(), vec![Ad::Start(0), Ad::Stop, Ad::Start(0)]);
+    }
+
+    /// 낡은 세대의 `Listening` 은 지금의 사실이 아니다. 이벤트가 한 사이클 밀린
+    /// 사이에 껐다 켜면, 죽은 리스너의 통지가 새 리스너의 광고인 척 도착한다.
+    #[tokio::test]
+    async fn a_stale_listening_notice_does_not_advertise() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        let stale = listening_now(&b); // 세대 1
+        b.set_enabled(false);
+        b.set_enabled(true); // 세대 2 는 아직 뜨지 않았다
+
+        b.apply_event(&stale);
+
+        assert!(!b.advertising, "낡은 통지가 광고를 켰다");
+        assert_eq!(ads.calls(), vec![]);
+    }
+
+    /// 토글이 꺼진 뒤에 도착한 통지도 마찬가지다. **꺼진 전송은 광고하지
+    /// 않는다** — LAN 공유는 기본 꺼짐이고, 광고는 이 맥을 망 전체에 알리는
+    /// 일이라 사용자가 켜기 전에 일어나면 안 된다.
+    #[tokio::test]
+    async fn a_listening_notice_after_the_toggle_went_off_is_ignored() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        b.set_enabled(true);
+        let ev = listening_now(&b);
+        b.set_enabled(false);
+
+        b.apply_event(&ev);
+
+        assert!(!b.advertising);
+        assert_eq!(ads.calls(), vec![], "켠 적 없는 광고를 거두는 일도 없다");
+    }
+
+    /// 갓 만든 브리지는 아무것도 광고하지 않는다. 켜기 전에 광고가 나가면 LAN
+    /// 공유가 기본 꺼짐이라는 약속이 깨진다.
+    #[test]
+    fn a_fresh_bridge_advertises_nothing() {
+        let (b, _rx, ads) = bridge_on(0);
+        assert!(!b.advertising);
+        assert_eq!(ads.calls(), vec![]);
+    }
+
+    /// 광고에 실패해도 리스너는 살아 있다 — LAN 공유 자체는 동작한다. 그래서
+    /// 토글을 되돌리지 않고, 대신 **무엇을 하면 되는지** 를 패널에 적는다. IP 를
+    /// 손으로 넣는 길이 남아 있는데 "실패"만 보여주면 사용자는 포기한다.
+    #[tokio::test]
+    async fn a_failed_advertisement_tells_the_user_the_manual_way() {
+        let (mut b, _rx, ads) = bridge_on(0);
+        ads.fail_next();
+        b.set_enabled(true);
+        b.apply_event(&listening_now(&b));
+
+        assert!(!b.advertising, "실패했으면 광고 중이라고 기억하면 안 된다");
+        assert!(b.is_enabled(), "광고가 실패해도 LAN 공유는 계속된다");
+        assert!(b.server.is_some(), "리스너까지 내리면 안 된다");
+        let msg = b.last_error().expect("사용자가 알 유일한 경로다");
+        assert!(msg.contains("IP"), "손으로 넣는 길을 말해야 한다: {msg}");
     }
 
     /// 진짜 4320 에서 토글이 소켓을 열고 닫는지 본다. 평소 실행에서 빠져 있는
@@ -1128,15 +1418,13 @@ mod tests {
         use tokio::io::AsyncWriteExt;
 
         let port = free_port().await;
-        let (tx, mut rx) = channel(server::EVENT_QUEUE);
-        let mut b = LanBridge::with_port(tx, port);
+        let (mut b, mut rx, _ads) = bridge_on(port);
         let mut p = PairingManager::new();
         b.set_enabled(true);
         wait_until_listening(port).await;
 
         let mut sock = handshake(port).await;
-        let ev = rx.recv().await.expect("Connected 가 와야 한다");
-        b.apply_event(&ev);
+        let ev = next_applied(&mut b, &mut rx).await;
         // id 는 프로세스 전역 발급기가 준다 — 절대값을 가정하지 않는다.
         assert!(matches!(ev, ServerEvent::Connected(_)), "Connected 를 기대했다: {ev:?}");
 
@@ -1601,16 +1889,13 @@ mod tests {
         use tokio::io::AsyncWriteExt;
 
         let port = free_port().await;
-        let (tx, mut rx) = channel(server::EVENT_QUEUE);
-        let mut b = LanBridge::with_port(tx, port);
+        let (mut b, mut rx, _ads) = bridge_on(port);
         let mut p = PairingManager::new();
         b.set_enabled(true);
         wait_until_listening(port).await;
 
         let mut sock = handshake(port).await;
-        let ev = rx.recv().await.expect("Connected 가 와야 한다");
-        b.apply_event(&ev);
-        let ServerEvent::Connected(id) = ev else {
+        let ServerEvent::Connected(id) = next_applied(&mut b, &mut rx).await else {
             panic!("Connected 를 기대했다");
         };
         v2_pair(&mut b, &mut p, &id, t(1000));
@@ -1651,16 +1936,13 @@ mod tests {
         use server::test_socket::*;
 
         let port = server::test_socket::free_port().await;
-        let (tx, mut rx) = channel(server::EVENT_QUEUE);
-        let mut b = LanBridge::with_port(tx, port);
+        let (mut b, mut rx, _ads) = bridge_on(port);
         let mut p = PairingManager::new();
         b.set_enabled(true);
         wait_until_listening(port).await;
 
         let mut sock = handshake(port).await;
-        let ev = rx.recv().await.expect("Connected 가 와야 한다");
-        b.apply_event(&ev);
-        let ServerEvent::Connected(id) = ev else {
+        let ServerEvent::Connected(id) = next_applied(&mut b, &mut rx).await else {
             panic!("Connected 를 기대했다");
         };
 

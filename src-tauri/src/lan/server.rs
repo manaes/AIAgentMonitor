@@ -256,6 +256,15 @@ pub fn next_central_id() -> CentralId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerEvent {
     Connected(CentralId),
+    /// 리스너가 실제로 떴다 — `bind` 가 성공한 **뒤에** 나간다.
+    ///
+    /// 이 통지가 따로 있는 이유는 mDNS 광고 때문이다. 토글(`enabled`)은 bind
+    /// 성공을 뜻하지 않는다 — `BindFailed` 는 `enabled` 를 켠 채로 리스너만
+    /// 없앤다. 광고를 토글에 매달면 포트가 열리지 않은 맥이 계속 광고되고 CYD 는
+    /// 죽은 포트로 걸어간다(`LanBridge::advertise` 의 doc).
+    ///
+    /// **어느 리스너인지 함께 싣는다** — `BindFailed` 와 같은 이유다.
+    Listening { generation: u64 },
     Disconnected(CentralId),
     /// 인증 프레임(텍스트). 해석은 pairing 모듈이 한다.
     Frame { id: CentralId, text: String },
@@ -510,6 +519,9 @@ async fn run(
         }
     };
     tracing::info!(port, "LAN 미러 서버 시작 (GET /mirror)");
+    // **bind 뒤다.** 이 통지 하나가 mDNS 광고를 켠다 — 먼저 보내면 광고가 아직
+    // 열리지 않은(그리고 영영 열리지 않을 수도 있는) 포트를 가리킨다.
+    let _ = events.send(ServerEvent::Listening { generation }).await;
 
     // 송신 펌프 — central 별 큐로 넘긴다. 별도 태스크인 이유는 `axum::serve` 가
     // 이 태스크를 끝까지 점유하기 때문이다.
@@ -1170,11 +1182,22 @@ mod tests {
         out
     }
 
+    /// 다음 이벤트. **`Listening` 은 건너뛴다.**
+    ///
+    /// 리스너가 떴다는 통지는 거의 모든 테스트에서 관심 밖의 서두다. 그것 하나
+    /// 때문에 스무 개의 테스트가 첫 이벤트를 한 번씩 버리게 만들면 정작 각 테스트가
+    /// 무엇을 보고 있는지가 흐려진다. 그 이벤트 자체는
+    /// `a_listening_event_arrives_only_after_the_port_is_open` 이 본다.
     async fn next_event(rx: &mut Receiver<ServerEvent>) -> ServerEvent {
-        tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .expect("이벤트가 오지 않았다")
-            .unwrap()
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("이벤트가 오지 않았다")
+                .unwrap();
+            if !matches!(ev, ServerEvent::Listening { .. }) {
+                return ev;
+            }
+        }
     }
 
     /// 연결 하나가 세션 하나다 — 붙는 순간 `Connected`, 끊기는 순간
@@ -1420,6 +1443,57 @@ mod tests {
 
         drop(sock);
         let _ = second.stop();
+    }
+
+    /// mDNS 광고는 이 통지 하나에 매달려 있다(`LanBridge::advertise`). 그래서 두
+    /// 가지를 본다: **세대가 실려 나가는가**(낡은 통지로 광고가 켜지면 안 된다)와,
+    /// **통지가 bind 보다 뒤인가**. 뒤가 아니면 광고가 아직 열리지 않은 포트를
+    /// 가리키게 되고, CYD 쪽에는 그것을 알려 줄 오류가 없다.
+    #[tokio::test]
+    async fn a_listening_event_arrives_only_after_the_port_is_open() {
+        let port = free_port().await;
+        let (tx, mut rx) = events();
+        let handle = spawn(port, tx, 9, None);
+
+        let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("Listening 이 오지 않았다")
+            .unwrap();
+        match ev {
+            ServerEvent::Listening { generation } => {
+                assert_eq!(generation, 9, "어느 리스너가 떴는지 말해야 한다")
+            }
+            other => panic!("Listening 을 기대했다: {other:?}"),
+        }
+
+        // 통지를 받은 시점에 포트는 이미 열려 있어야 한다. 여기서 기다리지 않는
+        // 것이 요점이다 — `wait_until_listening` 을 쓰면 순서를 보지 못한다.
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok(),
+            "Listening 이 bind 보다 먼저 나갔다 — 광고가 죽은 포트를 가리킨다"
+        );
+
+        let _ = handle.stop();
+    }
+
+    /// 반대쪽. bind 가 실패하면 `Listening` 은 **나가지 않는다** — 나가면 열리지
+    /// 않은 포트가 광고된다. 첫 이벤트가 `BindFailed` 라는 것이 그 증거다.
+    #[tokio::test]
+    async fn a_failed_bind_never_says_it_is_listening() {
+        let occupier = tokio::net::TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
+        let port = occupier.local_addr().unwrap().port();
+
+        let (tx, mut rx) = events();
+        let _handle = spawn(port, tx, 3, None);
+
+        let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("이벤트가 오지 않았다")
+            .unwrap();
+        assert!(
+            matches!(ev, ServerEvent::BindFailed { generation: 3, .. }),
+            "실패한 리스너가 떴다고 말했다: {ev:?}"
+        );
     }
 
     /// 낡은 세대의 bind 실패가 지금 리스너를 죽이면 안 된다. 여기서는 서버 쪽
