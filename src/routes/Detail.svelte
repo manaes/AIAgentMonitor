@@ -9,19 +9,26 @@
   let activeTab = $state<"sessions" | "devices" | "settings">("sessions");
 
   onMount(() => {
-    // Devices 탭 노출 여부가 ble/network 의 supported 에 달려 있으므로 패널을 열기
-    // 전에 상태를 받아둔다. init* 은 멱등하므로 DevicePanel 의 onMount 와 중복
+    // Devices 탭 노출 여부가 **세 전송 모두**의 supported 에 달려 있으므로 패널을
+    // 열기 전에 상태를 받아둔다. 하나라도 빠뜨리면 그 전송만 켤 수 있는 상황에서
+    // 탭이 나타나지 않는다. init* 은 멱등하므로 DevicePanel 의 onMount 와 중복
     // 호출되어도 안전하다.
     store.initBle();
     store.initNetwork();
+    store.initLan();
   });
 
   // macOS 외 빌드에는 실제 BLE 구현이 없다(FakePeripheral). 토글이 성공을 보고하면서
   // 아무 일도 일어나지 않는 상태를 보여주지 않도록 BLE 만 보고 감추면 안 된다 —
-  // 네트워크(iroh)는 크로스플랫폼이라 Windows 에서도 이 탭이 있어야 한다.
+  // 네트워크(iroh)와 LAN 은 크로스플랫폼이라 Windows 에서도 이 탭이 있어야 한다.
+  //
+  // **지원되는 전송을 하나도 빠뜨리지 않는다.** 오늘 `NETWORK_SUPPORTED` 가 무조건
+  // true 라서 이 식은 늘 참이지만, 그것에 얹혀 있으면 네트워크가 `cfg` 로 갈리는 날
+  // 백엔드는 LAN 을 켤 수 있다고 말하는데 사용자에게는 그것을 켤 탭이 없다.
   let bleSupported = $derived(store.ble?.supported ?? false);
   let networkSupported = $derived(store.network?.supported ?? false);
-  let devicesTabSupported = $derived(bleSupported || networkSupported);
+  let lanSupported = $derived(store.lan?.supported ?? false);
+  let devicesTabSupported = $derived(bleSupported || networkSupported || lanSupported);
 </script>
 
 <div class="window-root">

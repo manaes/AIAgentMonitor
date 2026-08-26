@@ -24,9 +24,10 @@
   // 공유하므로 예전의 "둘 중 하나만" 제약이 필요 없어졌다. 폰 A 는 BLE 로,
   // 폰 B 는 네트워크로, 전용 기기는 LAN 으로 동시에 붙을 수 있다.
   //
-  // 노출 여부는 전송마다 자기 `supported` 로만 정한다 — 프론트는 OS 를 추측하지
-  // 않는다. BLE 만 macOS 전용이고(CoreBluetooth), 네트워크와 LAN 은 어디서나
-  // true 다. 그래서 이 탭은 윈도우에서도 보인다.
+  // 탭은 지원되는 전송이 **하나라도** 있으면 보이고(`Detail.svelte`), 그 안에서
+  // 토글은 전송마다 자기 `supported` 로 정한다 — 프론트는 OS 를 추측하지 않는다.
+  // BLE 만 macOS 전용이고(CoreBluetooth), 네트워크와 LAN 은 어디서나 true 다.
+  // 그래서 이 탭은 윈도우에서도 보이고, 거기서는 그 두 토글만 보인다.
   let bleSupported = $derived(store.ble?.supported ?? false);
   let networkSupported = $derived(store.network?.supported ?? false);
   let lanSupported = $derived(store.lan?.supported ?? false);
@@ -43,14 +44,25 @@
   // 6자리 코드를 **손으로 입력하는** 전송들. 네트워크는 QR 로 대신하고, LAN 기기
   // (CYD)는 카메라가 없어 BLE 와 같은 길을 쓴다. 코드 자체는 창 하나에서 나오므로
   // 화면에도 한 번만 찍고 문구만 켜져 있는 전송에 맞춘다.
+  //
+  // LAN 단독 문구가 **주소가 있을 때만** 「위 주소를」이라고 말한다. 주소가 없으면
+  // 위에 있는 것은 주소가 아니라 「찾지 못했습니다」이거나 빨간 오류이고, 그 상태에서
+  // 「위 주소를 넣고」라고 하면 사용자는 존재하지 않는 값을 찾는다.
   let codeTyped = $derived(bleEnabled || lanEnabled);
   let codeLabel = $derived(
     bleEnabled && lanEnabled
       ? "BLE·LAN 으로 붙일 기기에는 아래 6자리를 입력하세요"
       : bleEnabled
         ? "BLE 로 붙일 기기에는 아래 6자리를 입력하세요"
-        : "LAN 으로 붙일 기기에는 위 주소를 넣고 아래 6자리를 입력하세요"
+        : lanAddress
+          ? "LAN 으로 붙일 기기에는 위 주소를 넣고 아래 6자리를 입력하세요"
+          : "LAN 으로 붙일 기기에는 아래 6자리를 입력하세요"
   );
+
+  // 이 전송의 실패만 따로 본다. 화면의 빨간 줄(`shownError`)은 세 전송 중 하나만
+  // 보여주므로, "LAN 주소가 없는 이유를 우리가 이미 알고 있는가"를 그것으로 판단하면
+  // 남의 전송 오류에 끌려간다.
+  let lanError = $derived(store.lanActionError ?? store.lan?.last_error ?? null);
 
   let shownError = $derived(
     store.bleActionError ??
@@ -128,7 +140,9 @@
     <div class="row" style="margin-top: 8px;">
       <div class="text">
         <strong>LAN 공유</strong>
-        <span class="subtle">같은 WiFi 의 전용 기기에 전송합니다</span>
+        <!-- 「WiFi」로만 쓰면 랜선으로 붙은 사용자가 이 기능이 자기에게 해당하지
+             않는다고 읽는다. 리스너는 인터페이스를 가리지 않는다. -->
+        <span class="subtle">같은 망(WiFi·유선)의 전용 기기에 전송합니다</span>
       </div>
       <button class="toggle" class:on={lanEnabled} onclick={() => store.setLanEnabled(!lanEnabled)}>
         {lanEnabled ? "켜짐" : "꺼짐"}
@@ -147,8 +161,8 @@
   {/if}
 
   <!--
-    LAN 주소는 **켜져 있는 동안 언제나** 보인다 — 페어링 창이 열려 있든 아니든,
-    자동 검색이 되든 안 되든.
+    LAN 주소는 **리스너가 서 있는 동안 언제나** 보인다 — 페어링 창이 열려 있든
+    아니든, 자동 검색이 되든 안 되든.
 
     자동 검색(mDNS)이 막힌 망에서 무슨 일이 벌어지는지가 이 배치의 이유다:
     방화벽이 5353 을 막았거나 게스트 VLAN 이면 게시는 **실패한 채 아무 신호도
@@ -156,6 +170,11 @@
     있다). 그러니 "못 찾으면 주소를 넣으세요"를 오류 표시에 매달면 가장 필요한
     순간에 아무 말도 하지 않게 된다. 문구도 같은 이유로 "찾지 못하면 알려
     준다"고 말하지 않는다 — 우리는 그것을 알지 못한다.
+
+    **다만 "켜져 있는 동안"이 아니라 "리스너가 서 있는 동안"이다.** 백엔드가
+    `address` 를 리스너에 매달아 준다(`lib.rs` 의 `lan_address`) — bind 에
+    실패하면 토글은 켜진 채로 주소가 `null` 이 되므로, 이 패널이 열려 있지 않은
+    포트를 손으로 넣으라고 안내하는 일이 없다.
   -->
   {#if lanEnabled}
     {#if lanAddress}
@@ -163,9 +182,14 @@
         LAN 주소 <span class="mono">{lanAddress}</span> · 기기가 자동으로 찾지 못하면 이 주소를
         직접 넣으세요
       </p>
-    {:else}
-      <!-- 주소가 없다는 것은 기본 경로가 없다는 뜻이다(`local_ipv4`) — 랜선이
-           빠졌거나 어느 망에도 붙어 있지 않다. -->
+    {:else if !lanError}
+      <!-- 주소가 없고 할 말도 없다면 기본 경로가 없다는 뜻이다(`local_ipv4`) —
+           랜선이 빠졌거나 어느 망에도 붙어 있지 않다.
+
+           오류가 떠 있을 때는 이 줄을 내보내지 않는다. bind 실패도 주소를
+           없애는데(위 주석), 그때 「WiFi·유선 연결을 확인하세요」라고 말하면
+           멀쩡한 망을 탓하는 **틀린 진단**이 된다. 그 상황에서 무엇이
+           잘못됐는지는 바로 위 빨간 줄이 이미 말하고 있다. -->
       <p class="subtle status">LAN 주소를 찾지 못했습니다 — WiFi·유선 연결을 확인하세요</p>
     {/if}
   {/if}

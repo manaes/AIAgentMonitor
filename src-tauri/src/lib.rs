@@ -188,23 +188,36 @@ pub struct LanStatus {
     /// 위해서다 — 그 값은 `lan::server::PORT` 한 곳에서만 나와야 하고, 상수가
     /// 움직이는 날 패널이 거짓말을 하면 안 된다.
     ///
-    /// 라우팅 가능한 IPv4 를 못 찾으면 `None` 이다(`local_ipv4` 의 한계 참고).
+    /// **리스너가 서 있을 때만** 값이 있다 — `enabled` 와 갈라진다: bind 에
+    /// 실패하면 토글은 켜진 채로 여기가 `None` 이 된다(`lan_address` 의 doc).
+    /// 라우팅 가능한 IPv4 를 못 찾아도 `None` 이다(`local_ipv4` 의 한계 참고).
     pub address: Option<String>,
     pub last_error: Option<String>,
 }
 
 /// 패널에 띄울 주소 문자열을 만든다.
 ///
-/// **꺼져 있으면 `None`.** 리스너가 없는 동안 주소를 보여주면 사용자는 그 값을
-/// 기기에 넣고 "왜 안 붙지"를 겪는다. 켜져 있는 동안에는 **mDNS 게시가 성공했든
-/// 실패했든 언제나** 값을 준다 — 방화벽이 5353 을 막은 경우는 아무 신호도 남기지
-/// 않으므로(`lan::discovery` 모듈 doc), 손으로 넣는 길을 오류 표시에 매달면 가장
-/// 필요한 순간에 아무 말도 하지 않게 된다(DEVICE-TEST §8-3 의 요구사항).
+/// **리스너가 서 있지 않으면 `None`.** 토글이 아니라 리스너를 따른다 — 둘은
+/// 갈라진다: `BindFailed` 는 `enabled` 를 켠 채로 리스너만 없앤다. 그 상태에서
+/// 주소를 계속 보여주면 패널이 같은 화면에서 "포트를 열지 못했습니다"와 "이
+/// 주소를 직접 넣으세요"를 동시에 말하고, 사용자는 **열려 있지 않은 포트**를
+/// 기기에 손으로 넣는다. 기기 쪽에는 왜 안 붙는지 알려 줄 화면이 없다.
+///
+/// 이것은 이 전송이 광고에 대해 이미 정해 둔 규칙과 같다
+/// (`lan::LanBridge::advertise` 의 doc — "광고는 토글이 아니라 리스너를 따른다").
+/// mDNS 와 손으로 넣는 길이 향하는 곳은 같은 포트이므로 규칙도 같아야 한다.
+/// 호출부는 `lan::LanBridge::is_listening` 을 넘긴다.
+///
+/// 리스너가 서 있는 동안에는 **mDNS 게시가 성공했든 실패했든 언제나** 값을 준다 —
+/// 방화벽이 5353 을 막은 경우는 아무 신호도 남기지 않으므로(`lan::discovery`
+/// 모듈 doc), 손으로 넣는 길을 게시 실패 표시에 매달면 가장 필요한 순간에 아무
+/// 말도 하지 않게 된다(DEVICE-TEST §8-3 의 요구사항). 즉 이 함수가 보는 것은
+/// "리스너가 있는가" 하나이지 "광고가 나가는가"가 아니다.
 ///
 /// `port` 를 인자로 받는 것은 테스트가 하드코딩된 리터럴을 잡아내게 하기
 /// 위해서다 — 호출부는 언제나 `lan::server::PORT` 를 넘긴다.
-fn lan_address(enabled: bool, ip: Option<String>, port: u16) -> Option<String> {
-    if !enabled {
+fn lan_address(listening: bool, ip: Option<String>, port: u16) -> Option<String> {
+    if !listening {
         return None;
     }
     Some(format!("{}:{}", ip?, port))
@@ -213,14 +226,20 @@ fn lan_address(enabled: bool, ip: Option<String>, port: u16) -> Option<String> {
 #[tauri::command]
 async fn lan_status(state: tauri::State<'_, Arc<LanHandle>>) -> Result<LanStatus, String> {
     let bridge = state.bridge.lock().await;
-    let enabled = bridge.is_enabled();
     Ok(LanStatus {
         supported: LAN_SUPPORTED,
-        enabled,
-        // 보여줄지 말지는 `lan_address` 가 정한다. 꺼져 있을 때도 `local_ipv4()`
-        // 는 불리지만(인자가 먼저 평가된다) 그 비용은 UDP 소켓 하나를 묶고 경로를
-        // 묻는 것뿐이고 패킷은 나가지 않는다 — 판단을 두 곳에 두지 않는 쪽을 택했다.
-        address: lan_address(enabled, lan::discovery::local_ipv4(), lan::server::PORT),
+        // 토글의 상태 그대로다. `BindFailed` 가 리스너를 내려도 사용자가 켠 것은
+        // 켠 것이고, 패널은 그것을 켜짐으로 보여주면서 빨간 오류를 함께 띄운다.
+        enabled: bridge.is_enabled(),
+        // 주소는 **리스너를 따른다**(`lan_address` 의 doc). 리스너가 없을 때도
+        // `local_ipv4()` 는 불리지만(인자가 먼저 평가된다) 그 비용은 UDP 소켓 하나를
+        // 묶고 경로를 묻는 것뿐이고 패킷은 나가지 않는다 — 판단을 두 곳에 두지 않는
+        // 쪽을 택했다.
+        address: lan_address(
+            bridge.is_listening(),
+            lan::discovery::local_ipv4(),
+            lan::server::PORT,
+        ),
         // BLE·network 와 달리 오류는 핸들이 아니라 브리지가 들고 있다.
         last_error: bridge.last_error(),
     })
@@ -1348,9 +1367,16 @@ pub fn run() {
 mod tests {
     use super::*;
 
-    /// LAN 공유가 꺼져 있으면 주소를 보여주지 않는다. 리스너가 없는 동안 주소를
-    /// 내밀면 사용자는 그것을 기기에 넣고, 기기 쪽에는 왜 안 붙는지 알려 줄 화면이
-    /// 없다.
+    /// 리스너가 없으면 주소를 보여주지 않는다. 주소를 내밀면 사용자는 그것을
+    /// 기기에 넣고, 기기 쪽에는 왜 안 붙는지 알려 줄 화면이 없다.
+    ///
+    /// 토글을 껐을 때가 그 경우의 하나지만 **유일한 경우가 아니다** — `BindFailed`
+    /// 는 토글을 켠 채로 리스너만 없앤다. 그래서 이 함수는 `enabled` 가 아니라
+    /// `listening` 을 받고, 호출부(`lan_status`)가 `is_listening()` 을 넘긴다.
+    /// 그 두 값이 실제로 갈라진다는 사실은 `lan::tests` 의
+    /// `bind_failure_takes_the_listener_down_but_leaves_the_toggle_on` 이 잡는다.
+    /// 여기서 그것을 한 번 더 검사해 봐야 인자가 `false` 로 같아 같은 줄만 다시
+    /// 짚을 뿐이라 넣지 않았다.
     #[test]
     fn lan_address_is_hidden_while_sharing_is_off() {
         assert_eq!(lan_address(false, Some("192.168.0.12".into()), 4320), None);

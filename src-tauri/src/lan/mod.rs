@@ -139,6 +139,28 @@ impl LanBridge {
         self.enabled
     }
 
+    /// 지금 **리스너가 실제로 서 있는가**. `is_enabled` 와 갈라진다 —
+    /// `BindFailed` 는 `enabled` 를 켠 채로 `server` 만 `None` 으로 만든다.
+    ///
+    /// 이 신호가 필요한 이유는 `advertise` 의 doc 이 광고에 대해 적어 둔 것과
+    /// 똑같다: 포트가 열리지 않은 맥을 계속 광고하면 CYD 가 죽은 포트를 향해
+    /// 걸어간다. **사람이 주소를 손으로 넣는 길도 향하는 곳은 같은 죽은 포트다** —
+    /// 그래서 패널의 LAN 주소 줄도 토글이 아니라 이것을 따라야 한다
+    /// (`lib.rs` 의 `lan_address`).
+    ///
+    /// 판단의 근거를 `advertising` 이 아니라 `server` 로 두는 것이 중요하다.
+    /// `advertising` 은 mDNS 게시가 시작됐는지까지 함께 뜻하므로, 게시만
+    /// 실패하고 리스너는 멀쩡한 경우에 false 가 된다 — 그런데 그때가 바로
+    /// 손으로 넣는 주소가 **가장 필요한** 순간이다. 그것으로 주소를 감추면
+    /// 이 브랜치가 세워 둔 대비가 통째로 무너진다.
+    ///
+    /// 토글을 켠 직후부터 `Listening`/`BindFailed` 가 올라오기 전까지의 짧은
+    /// 구간에서는 true 다(핸들은 이미 있다). 그 구간의 주소는 "아직 실패했다고
+    /// 알려진 바 없는" 주소이므로 보여주는 쪽이 맞다.
+    pub fn is_listening(&self) -> bool {
+        self.server.is_some()
+    }
+
     /// BLE·network 브리지와 같은 이유로 상태를 정리한다 — 꺼졌다 켜졌을 때
     /// 예전 연결이 여전히 붙어 있는 것으로 남지 않게. LAN 공유는 기본 꺼짐이고
     /// 리스너는 이 토글이 켜져 있는 동안만 존재한다(스펙 4장).
@@ -887,6 +909,23 @@ mod tests {
         assert!(b.last_error().is_none());
         b.apply_event(&bind_failed_now(&b));
         assert_eq!(b.last_error().as_deref(), Some("포트 4320 이 이미 쓰이는 중"));
+    }
+
+    /// **패널의 주소 줄이 토글을 따르면 안 되는 이유.** `BindFailed` 는 사용자가
+    /// 켠 토글은 그대로 두고 리스너만 없앤다 — 즉 `is_enabled` 와 `is_listening`
+    /// 은 실제로 갈라진다. 토글을 보고 주소를 보여주면 패널이 "포트를 열지
+    /// 못했습니다"와 "이 주소를 직접 넣으세요"를 같은 화면에서 동시에 말하고,
+    /// 그 주소가 가리키는 곳은 **열려 있지 않은 포트**다. 광고가 같은 이유로 이미
+    /// 리스너를 따르고 있다(`advertise` 의 doc). 주소를 쓰는 쪽은
+    /// `lib.rs` 의 `lan_address` 다.
+    #[tokio::test]
+    async fn bind_failure_takes_the_listener_down_but_leaves_the_toggle_on() {
+        let (mut b, _rx) = bridge();
+        b.set_enabled(true);
+        assert!(b.is_listening(), "켠 직후에는 리스너 핸들이 있다");
+        b.apply_event(&bind_failed_now(&b));
+        assert!(b.is_enabled(), "사용자가 켠 토글은 그대로 남는다");
+        assert!(!b.is_listening(), "bind 에 실패했으면 리스너는 없다");
     }
 
     /// 오류를 채우기만 하고 지우지 않으면, 사용자가 원인을 고치고 다시 켜도
