@@ -2,6 +2,7 @@
 
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
+#include <string.h>
 
 #include "transportlogic.h"
 
@@ -113,12 +114,16 @@ void Transport::loop() {
     }
 
     // "아직 한 번도 페어링하지 않았다"는 위와 다른 상태다 — 나중에 토큰이
-    // 채워지면(이 태스크엔 그 경로가 없지만 Task 14 가 만든다) 바로 다음
-    // loop() 에서 다시 시도해야 하므로 여기서는 래치하지 않고 매번 다시
-    // 묻는다. 붙어 봐야 아무것도 보낼 수 없는 연결이라 소켓조차 열지
-    // 않는다 — 열면 맥의 8자리 `AUTH_DEADLINE` 자리 하나를 헛되이 쓴다
-    // (`server.rs` 의 `MAX_CONNECTIONS`/`AUTH_DEADLINE` 문서).
-    if (!configIsPaired(*config_)) {
+    // 채워지면 바로 다음 loop() 에서 다시 시도해야 하므로 여기서는
+    // 래치하지 않고 매번 다시 묻는다. 붙어 봐야 아무것도 보낼 수 없는
+    // 연결이라 소켓조차 열지 않는다 — 열면 맥의 8자리 `AUTH_DEADLINE`
+    // 자리 하나를 헛되이 쓴다(`server.rs` 의 `MAX_CONNECTIONS`/
+    // `AUTH_DEADLINE` 문서).
+    //
+    // **Task 14b 가 더한 예외**: `pendingCode_` 가 있으면(사람이 방금
+    // 키패드에서 확인을 눌렀다) 토큰이 없어도 연결을 시도한다 — HELLO2
+    // 자체가 처음 페어링하는 흐름이라 애초에 토큰을 요구하지 않는다.
+    if (!configIsPaired(*config_) && pendingCode_.length() == 0) {
         setAuthStep(AuthStep::NeedsPairing);
         return;
     }
@@ -248,20 +253,32 @@ void Transport::onWsEvent(WStype_t type, uint8_t *payload, size_t length) {
 void Transport::handleSocketConnected() {
     v2GenerateKeypair(mySecret_, myPublic_);
 
-    // `loop()` 는 `configIsPaired()==false` 면 애초에 연결을 시도하지 않으므로
-    // (위 참고), 여기 hasToken 은 언제나 true 다. `hasCode` 는 이 태스크에서
-    // 언제나 false 다 — 페어링 키패드가 없다(Task 14). 그래도 판단 자체는
-    // `authInitialStep` 하나로만 한다 — 이 파일이 그 규칙을 다시 베끼지 않는다.
-    const AuthStep step = authInitialStep(/*hasToken=*/true, /*hasCode=*/false);
+    // Task 14b 이전에는 `loop()` 가 `configIsPaired()==false` 면 애초에
+    // 연결을 시도하지 않아서 hasToken 이 언제나 true, hasCode 는 언제나
+    // false 였다. 이제 `pendingCode_`(submitCode()) 가 있으면 토큰 없이도
+    // 여기 도달한다 — 그래서 두 값 다 실제 상태를 그대로 묻는다. 판단
+    // 자체는 여전히 `authInitialStep` 하나로만 한다.
+    const bool hasToken = configIsPaired(*config_);
+    const bool hasCode = pendingCode_.length() > 0;
+    const AuthStep step = authInitialStep(hasToken, hasCode);
     setAuthStep(step);
 
-    if (step == AuthStep::SendAuth2) {
-        sendVerb("AUTH2:", myPublic_, sizeof myPublic_);
+    switch (step) {
+        case AuthStep::SendHello2:
+            sendVerb("HELLO2:", myPublic_, sizeof myPublic_);
+            break;
+        case AuthStep::SendAuth2:
+            sendVerb("AUTH2:", myPublic_, sizeof myPublic_);
+            break;
+        default:
+            // NeedsPairing — hasToken=false, hasCode=false 조합인데,
+            // `loop()` 의 위 가드가 이 조합으로는 애초에 소켓을 열지
+            // 않는다(둘 다 없으면 시도할 게 없다). 그래도 여기서 강제로
+            // 무엇을 보내지는 않는다: 모르는 값으로 소켓에 아무거나 쓰는
+            // 것보다, 아무것도 안 보내고 응답 없이 idle 로 남는 편이
+            // 안전하다.
+            break;
     }
-    // step 이 다른 값일 수는 없다(hasToken=true, hasCode=false 는
-    // authInitialStep 에서 SendAuth2 하나로만 간다, authfsm.cpp:3-8) — 그래도
-    // 여기서 강제로 무엇을 보내지는 않는다: 모르는 값으로 소켓에 아무거나
-    // 쓰는 것보다, 아무것도 안 보내고 다음 응답 없이 idle 로 남는 편이 안전하다.
 }
 
 void Transport::handleSocketDisconnected() {
@@ -289,10 +306,22 @@ void Transport::handleReply(const String &text) {
         return;
     }
 
-    const AuthStep step = authOnReply(reply, /*hasToken=*/true, /*hasCode=*/false);
+    // Denied 응답에만 실제로 실린다(ReplyView 문서) — 그 외 응답은 이
+    // 필드가 없으므로 마지막으로 본 값을 그대로 유지한다. `attemptsLeft()`
+    // 문서 참고.
+    if (reply.hasLeft) {
+        attemptsLeft_ = reply.left;
+    }
+
+    const bool hasToken = configIsPaired(*config_);
+    const bool hasCode = pendingCode_.length() > 0;
+    const AuthStep step = authOnReply(reply, hasToken, hasCode);
     setAuthStep(step);
 
     switch (step) {
+        case AuthStep::SendCode2:
+            sendCode2(reply);
+            break;
         case AuthStep::SendProof2:
             sendProof2(reply);
             break;
@@ -301,15 +330,20 @@ void Transport::handleReply(const String &text) {
             break;
         case AuthStep::NeedsPairing:
         case AuthStep::Failed:
-            // 브리프 규칙 — 재시도하지 않는다. 사람이 (Task 14 화면에서) 새
-            // 코드를 넣어야 풀린다.
+            // 브리프 규칙 — 재시도하지 않는다. 사람이 (Task 14b 키패드
+            // 화면에서) 새 코드를 넣어야 풀린다. 이번 시도에 쓴 코드는
+            // 더 이상 유효하지 않다(맥의 CODE2 는 성공·실패와 무관하게
+            // handshake 를 소비한다, `pairing.rs` 주석) — 다음
+            // submitCode() 호출까지 지운다.
             holding_ = true;
+            pendingCode_ = "";
             webSocket_.disconnect();
             break;
         default:
-            // SendHello2/SendCode2 — hasCode 가 이 태스크에서 언제나 false 라
-            // authOnReply 는 이 값을 돌려주지 않는다(authfsm.cpp 의 판정 표:
-            // AwaitingCode2 는 hasCode 없이 오면 Failed 로 떨어진다).
+            // SendHello2 — authOnReply 는 "응답을 보고 다음 동사를 정하는"
+            // 함수라 이 값을 돌려주지 않는다(그건 연결 시작 시점의
+            // authInitialStep 의 몫이다, authfsm.cpp 판정 표에 SendHello2
+            // 행이 없다).
             break;
     }
 }
@@ -363,18 +397,153 @@ void Transport::sendProof2(const ReplyView &reply) {
     v2Wipe(proof, sizeof proof);
 }
 
-void Transport::finishHandshake(const ReplyView &reply) {
-    // AUTH2/PROOF2 흐름은 언제나 `Authorized2`(필드 없음)만 돌려준다 —
-    // sealed 토큰 회전은 CODE2(페어링) 전용이고, 이 태스크는 hasCode 가
-    // 언제나 false 라 CODE2 를 보내지 않는다. 실측:
-    // `src-tauri/src/ble/pairing.rs` 의 `v2_proof2_replay_after_success_is_rejected`
-    // 테스트가 Proof2 성공을 `Authorized2` 하나로만 단정한다.
-    if (reply.sealed.length() > 0) {
-        Serial.println(
-            "transport: PROOF2 응답에 sealed 필드가 실려 왔다 — 이 태스크가 다루지 않는 "
-            "모양이다(무시)");
+void Transport::sendCode2(const ReplyView &reply) {
+    uint8_t spk[32];
+    uint8_t nonce[16];  // 32 hex 문자 — pairing.rs 의 `random_hex128()` 실측.
+    if (!hexDecode(reply.epk, spk, sizeof spk) || !hexDecode(reply.nonce, nonce, sizeof nonce)) {
+        Serial.println("transport: AwaitingCode2 의 epk/nonce 길이가 이상하다 — Failed");
+        setAuthStep(AuthStep::Failed);
+        holding_ = true;
+        pendingCode_ = "";
+        webSocket_.disconnect();
+        return;
     }
 
+    if (!v2X25519(mySecret_, spk, pendingSs_)) {
+        Serial.println("transport: 맥의 임시 공개키가 저차 점이다 — Failed");
+        setAuthStep(AuthStep::Failed);
+        holding_ = true;
+        pendingCode_ = "";
+        webSocket_.disconnect();
+        v2Wipe(pendingSs_, sizeof pendingSs_);
+        return;
+    }
+    memcpy(pendingNonceBytes_, nonce, sizeof nonce);
+
+    uint8_t tr[64];
+    v2Transcript(myPublic_, spk, tr);
+
+    uint8_t cbind[32];
+    v2CodeBinding(pendingCode_.c_str(), tr, cbind);
+
+    sendVerb("CODE2:", cbind, sizeof cbind);
+    v2Wipe(cbind, sizeof cbind);
+
+    // pendingCode_/pendingSs_/pendingNonceBytes_ 는 여기서 지우지 않는다 —
+    // 응답(Granted2 성공, Denied/Rejected 실패)이 올 때까지 필요하다.
+    // 성공하면 finishHandshake() 가, 실패하면 handleReply() 의
+    // NeedsPairing/Failed 분기가 정리한다.
+}
+
+void Transport::finishHandshake(const ReplyView &reply) {
+    if (reply.sealed.length() > 0) {
+        // Granted2 — HELLO2/CODE2 로 새로 페어링에 성공했다. AUTH2/PROOF2
+        // 흐름(아래)과 달리 세션 키를 미리 만들어 둘 수 없었다 — 토큰
+        // 자체가 이 응답에서야 처음 생기기 때문이다(맥 쪽 `Code2` 핸들러,
+        // `pairing.rs`: `derive_pair_key(&hs.ss, &nonce_bytes)` 로 새 토큰
+        // 하나만 봉인해 보내고, 그 새 토큰으로 다시
+        // `derive_session_keys(&hs.ss, &token_bytes, &nonce_bytes)` 를
+        // 부른다 — 이 함수가 지금부터 그대로 재현한다).
+        uint8_t pairKey[32];
+        v2DerivePairKey(pendingSs_, pendingNonceBytes_, sizeof pendingNonceBytes_, pairKey);
+
+        if (reply.sealed.length() % 2 != 0) {
+            Serial.println("transport: Granted2 의 sealed 필드 길이가 홀수다 — Failed");
+            setAuthStep(AuthStep::Failed);
+            holding_ = true;
+            pendingCode_ = "";
+            webSocket_.disconnect();
+            v2Wipe(pairKey, sizeof pairKey);
+            v2Wipe(pendingSs_, sizeof pendingSs_);
+            return;
+        }
+
+        const size_t sealedLen = reply.sealed.length() / 2;
+        uint8_t sealedBuf[128];
+        uint8_t tokenJson[128];
+        if (sealedLen < 24 || sealedLen > sizeof sealedBuf ||
+            !hexDecode(reply.sealed, sealedBuf, sealedLen)) {
+            Serial.println("transport: Granted2 의 sealed 필드가 hex 로 디코드되지 않는다 — Failed");
+            setAuthStep(AuthStep::Failed);
+            holding_ = true;
+            pendingCode_ = "";
+            webSocket_.disconnect();
+            v2Wipe(pairKey, sizeof pairKey);
+            v2Wipe(pendingSs_, sizeof pendingSs_);
+            return;
+        }
+
+        // 이 sealed 프레임 한 건만 열 일회용 채널 — 카운터는 항상 0부터라
+        // 새 인스턴스로 여는 것이 맞다(맥 쪽도 `SealedChannel::new` 를
+        // 새로 만들어 딱 한 번 `seal()` 한다).
+        SealedChannel pairChannel(pairKey, pairKey);
+        size_t tokenJsonLen = 0;
+        if (!pairChannel.open(sealedBuf, sealedLen, tokenJson, &tokenJsonLen)) {
+            Serial.println("transport: Granted2 의 sealed 토큰을 열 수 없다(위조/변조?) — Failed");
+            setAuthStep(AuthStep::Failed);
+            holding_ = true;
+            pendingCode_ = "";
+            webSocket_.disconnect();
+            v2Wipe(pairKey, sizeof pairKey);
+            v2Wipe(pendingSs_, sizeof pendingSs_);
+            v2Wipe(sealedBuf, sizeof sealedBuf);
+            return;
+        }
+
+        JsonDocument doc;
+        if (deserializeJson(doc, tokenJson, tokenJsonLen) != DeserializationError::Ok) {
+            Serial.println("transport: 열린 페어링 페이로드가 JSON 이 아니다 — Failed");
+            setAuthStep(AuthStep::Failed);
+            holding_ = true;
+            pendingCode_ = "";
+            webSocket_.disconnect();
+            v2Wipe(pairKey, sizeof pairKey);
+            v2Wipe(pendingSs_, sizeof pendingSs_);
+            v2Wipe(tokenJson, sizeof tokenJson);
+            return;
+        }
+        const String newToken = String((const char *)(doc["token"] | ""));
+
+        if (!configSaveToken(*config_, newToken)) {
+            Serial.println("transport: 새 토큰이 맥의 발급 형식에 맞지 않는다 — Failed");
+            setAuthStep(AuthStep::Failed);
+            holding_ = true;
+            pendingCode_ = "";
+            webSocket_.disconnect();
+            v2Wipe(pairKey, sizeof pairKey);
+            v2Wipe(pendingSs_, sizeof pendingSs_);
+            v2Wipe(tokenJson, sizeof tokenJson);
+            return;
+        }
+
+        uint8_t tokenBytes[16];
+        hexDecode(config_->token, tokenBytes, sizeof tokenBytes);  // configSaveToken 이 이미 검증했다.
+
+        uint8_t newS2c[32];
+        uint8_t newC2s[32];
+        v2DeriveSessionKeys(pendingSs_, tokenBytes, sizeof tokenBytes, pendingNonceBytes_,
+                             sizeof pendingNonceBytes_, newS2c, newC2s);
+
+        delete channel_;
+        channel_ = new SealedChannel(newC2s, newS2c);
+
+        v2Wipe(pairKey, sizeof pairKey);
+        v2Wipe(pendingSs_, sizeof pendingSs_);
+        v2Wipe(tokenBytes, sizeof tokenBytes);
+        v2Wipe(newS2c, sizeof newS2c);
+        v2Wipe(newC2s, sizeof newC2s);
+        v2Wipe(tokenJson, sizeof tokenJson);
+
+        pendingCode_ = "";
+        backoffAttempt_ = 0;
+        Serial.println("transport: 새로 페어링됨 — 토큰 저장, 세션 키 준비됨");
+        return;
+    }
+
+    // sealed 가 없다 — AUTH2/PROOF2 흐름(기존 토큰 재연결)은 언제나
+    // `Authorized2`(필드 없음)만 돌려준다. 실측: `src-tauri/src/ble/
+    // pairing.rs` 의 `v2_proof2_replay_after_success_is_rejected` 테스트가
+    // Proof2 성공을 `Authorized2` 하나로만 단정한다.
     delete channel_;
     channel_ = new SealedChannel(pendingC2s_, pendingS2c_);
     v2Wipe(pendingS2c_, sizeof pendingS2c_);
@@ -382,6 +551,21 @@ void Transport::finishHandshake(const ReplyView &reply) {
 
     backoffAttempt_ = 0;  // 성공했다 — 다음 끊김은 처음부터 다시 센다.
     Serial.println("transport: 인가됨 — 세션 키 준비됨");
+}
+
+void Transport::submitCode(const String &code) {
+    pendingCode_ = code;
+    holding_ = false;  // 사람이 새 코드를 넣었다 — 재시도를 막던 래치를 푼다.
+
+    // 지금 붙어 있는 연결(이전 실패의 잔재일 수 있다)이 있다면 정리하고
+    // 다음 loop() 에서 HELLO2 부터 새로 시작한다 — CODE2 는 handshake 를
+    // 소비하므로(`pairing.rs` 주석, sendCode2() 위 참고) 기존 소켓을 그대로
+    // 재사용해 봐야 통하지 않는다.
+    if (webSocket_.isConnected()) {
+        webSocket_.disconnect();
+    }
+    targetHost_ = "";
+    nextAttemptAtMs_ = 0;  // 백오프를 기다리지 않고 바로 다음 loop() 에서 시도한다.
 }
 
 void Transport::sendVerb(const char *prefix, const uint8_t *data, size_t len) {

@@ -70,6 +70,18 @@
 // Task 13~14 이전에는 존재하지 않는다 — 이 파일은 그 항목을 "된다"고
 // 주장하지 않는다. 시리얼로 확인 가능한 나머지 셋(mDNS 발견·저장된 IP
 // 대체·백오프 재연결)만 이 태스크의 검증 대상이다.
+//
+// ── Task 14b 가 더한 것: submitCode() 진입점과 HELLO2/CODE2 흐름 ─────────
+// Task 12 은 `hasCode` 를 항상 false 로 두고 AUTH2/PROOF2(재연결) 흐름만
+// 배선했다 — 그때는 키패드 UI 가 없어서 "사람이 방금 6자리를 입력했다"를
+// 전달할 방법 자체가 없었다. `submitCode()` 가 그 진입점이다: 페어링
+// 키패드(Task 14b, `ui_pairing.cpp`)가 확인 버튼을 누르면 이 함수를 부르고,
+// 그 뒤로는 이 파일이 `authInitialStep`/`authOnReply`(둘 다 `lib/authfsm`
+// 의 순수 함수, 이 파일을 수정할 필요가 없었다 — 두 함수 모두 애초에
+// hasCode 를 매개변수로 받게 설계돼 있었다)의 결정을 그대로 따라 HELLO2 →
+// CODE2 를 보낸다. "코드가 입력됐을 때 다음에 무엇을 보낼지" 를 결정하는
+// 로직은 여전히 `lib/authfsm` 안에만 있다 — 이 파일은 그 결정(SendHello2/
+// SendCode2)을 받아 실제로 소켓에 무엇을 쓸지만 안다.
 
 #pragma once
 
@@ -104,6 +116,30 @@ class Transport {
     /// 아무것도 보내지 않았다는 뜻이지 이미 보냈다는 뜻이 아니다. 소켓이 붙어
     /// 실제로 그 동사를 보내고 나면 응답에 따라 다음 값으로 넘어간다.
     AuthStep authStep() const { return authStep_; }
+
+    /// 페어링 키패드(Task 14b, `ui_pairing.cpp`)의 확인 버튼이 부른다 —
+    /// "사람이 방금 6자리를 입력했다" 를 전달하는 유일한 통로다. Task 12
+    /// 는 이 진입점을 몰랐다: 그때는 키패드 UI 가 없어서 `hasCode` 가
+    /// 코드 전체에서 항상 false 였다.
+    ///
+    /// 코드를 들고 있다가 다음(또는 지금 붙어 있는 연결을 끊고 새로)
+    /// `loop()` 에서 HELLO2 부터 새로 시작한다 — 저장된 토큰이 있어도
+    /// 코드가 우선한다(`authfsm.h` 의 `authInitialStep` 문서와 같은 규칙,
+    /// 이 함수는 그 규칙을 다시 적지 않고 그대로 위임한다). 코드 자체는
+    /// `Denied`/`Rejected`(→ `NeedsPairing`) 또는 성공(→ `Subscribed`) 으로
+    /// 결론이 날 때까지 들고 있는다 — 그 전에 연결이 그냥 끊기기만 했다면
+    /// (예: WiFi 순단) 같은 코드로 다음 재시도 때 자동으로 다시 HELLO2 를
+    /// 보낸다. 사람이 다시 타이핑하게 만들 이유가 없다.
+    void submitCode(const String &code);
+
+    /// 마지막으로 실제 와이어에서 받은 `Denied.left` 값. 첫 시도 전에는
+    /// 맥의 실제 상수(`MAX_ATTEMPTS`, `src-tauri/src/ble/pairing.rs:47`,
+    /// 2026-08-27 그 커밋 기준 확인)와 같은 값 5 로 초기화해 둔다 —
+    /// 와이어에 없는 값을 추측하는 게 아니라, 첫 시도 전에는 실제로 5회가
+    /// 맞기 때문이다(브리프의 "remaining time and remaining attempts"
+    /// 요구를 놓고 T14b-A 가 내린 판단 — `AwaitingCode2` 는 이 값을 전혀
+    /// 싣지 않으므로 첫 화면에서는 이 초기값 말고 얻을 방법이 없다).
+    uint8_t attemptsLeft() const { return attemptsLeft_; }
 
   private:
     Config *config_ = nullptr;
@@ -141,12 +177,32 @@ class Transport {
     uint8_t pendingS2c_[32] = {0};
     uint8_t pendingC2s_[32] = {0};
 
+    /// 사람이 `submitCode()` 로 넣은 6자리. 비어 있으면 "쓸 코드가 없다".
+    /// `Denied`/`Rejected`/`Failed`(= `NeedsPairing`/`Failed` 로 확정)
+    /// 또는 성공(`Subscribed`)이 오면 지운다 — 그 전까지는(단순 연결
+    /// 끊김) 다음 재시도가 같은 코드로 다시 HELLO2 를 보낼 수 있게 남겨
+    /// 둔다.
+    String pendingCode_;
+
+    /// `sendCode2()` 에서 유도해 `finishHandshake()` 까지 들고 가는
+    /// 공유 비밀·논스. AUTH2/PROOF2 흐름(`pendingS2c_`/`pendingC2s_`)과
+    /// 달리 여기서는 세션 키를 미리 만들 수 없다 — 새 토큰 자체가
+    /// `Granted2` 응답에서야(sealed 프레임 안에) 처음 생기기 때문에,
+    /// 그 응답이 올 때까지 `ss`/논스를 원본 그대로 들고 있어야 한다.
+    uint8_t pendingSs_[32] = {0};
+    uint8_t pendingNonceBytes_[16] = {0};
+
+    /// `handleReply()` 가 실제 `Denied.left` 를 받을 때만 갱신한다 —
+    /// `attemptsLeft()` 문서 참고.
+    uint8_t attemptsLeft_ = 5;
+
     SealedChannel *channel_ = nullptr;
 
     void onWsEvent(WStype_t type, uint8_t *payload, size_t length);
     void handleSocketConnected();
     void handleSocketDisconnected();
     void handleReply(const String &text);
+    void sendCode2(const ReplyView &reply);
     void sendProof2(const ReplyView &reply);
     void finishHandshake(const ReplyView &reply);
     void sendVerb(const char *prefix, const uint8_t *data, size_t len);

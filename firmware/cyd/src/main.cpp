@@ -1,18 +1,21 @@
-// AI Agent Monitor — CYD 프로토콜 펌웨어 (Task 14a: 디스플레이·터치 브링업)
+// AI Agent Monitor — CYD 프로토콜 펌웨어 (Task 14b: 페어링 키패드 화면)
 //
 // Task 8 이 확인한 것: 툴체인 · 보드 id · 업로드 경로. Task 9 가 더한 것: 설정
 // 저장과 WiFi 포털. Task 10~11 이 만든 것: E2EE v2 암호 계층과 인증 상태
 // 기계 — 둘 다 순수 모듈이라 여기 연결되지 않은 채였다. Task 12 가 그 둘을
 // 실제 소켓(`Transport`)에 이어붙였다 — 이 프로젝트가 처음으로 `loop()` 안에서
-// 블로킹 호출을 실행하는 지점. 화면은 여전히 없었다(Task 13 은 폰트만 구웠다).
+// 블로킹 호출을 실행하는 지점. Task 14a 가 디스플레이·터치를 처음 켰다(LVGL,
+// 정적인 "연결 중" 한 줄, 터치 좌표 디버그 콜백) — 위젯도 페어링 로직도 없는
+// 순수 브링업이었다.
 //
-// **Task 14a 가 처음으로 화면을 켠다.** 계획서에 없던 태스크다 — 원래 Task 14
-// 브리프("페어링 키패드")가 LVGL·디스플레이·터치가 이미 초기화돼 있다고
-// 가정하고 곧바로 위젯 코드로 들어가는데, 그 브링업이 어디에도 없었다.
-// 그래서 브링업만 떼어 여기서 먼저 한다 — Task 8 이 세운 "화면 이상이 생겼을
-// 때 핀/드라이버와 UI 로직을 동시에 의심하지 않는다" 원칙과 같은 이유다.
-// **범위는 좁다: 화면에 정적인 글자 한 줄, 터치 좌표 콜백 하나.** 키패드도
-// 페어링 로직도 없다 — 그건 Task 14b 몫이다.
+// **Task 14b 가 그 위에 처음으로 진짜 UI 로직을 얹는다.** `ui_pairing.h/.cpp`
+// (신규, 브리프의 Files 목록)가 6자리 코드 키패드 화면을 만들고,
+// `transport.begin(config)` 을 부르기도 전에 `main.cpp` 가 그 화면을 켠다 —
+// `Transport::authStep_` 의 멤버 초기값이 이미 `NeedsPairing` 이라 안전하다
+// (`ui_pairing.cpp`, `transport.h` 참고). 이 파일 자체가 브리프의 Files
+// 목록에는 없었지만, Task 14a 의 정적 화면을 실제 키패드로 바꿔 끼우려면
+// (그리고 `uiPairingUpdate()` 를 매 loop() 마다 불러야) 반드시 필요했다 —
+// Task 14a 가 `font_ko.h` 를 브리프 밖에서 만들어야 했던 것과 같은 처지다.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp32_smartdisplay.h>
@@ -20,6 +23,7 @@
 #include "config.h"
 #include "transport.h"
 #include "font_ko.h"
+#include "ui_pairing.h"
 
 // **위 `#include "font_ko.h"` 자체가 실질적인 코드다, 장식이 아니다.**
 // PlatformIO 의 chain LDF 는 소스의 `#include` 문을 보고 어떤 `lib/<name>/`
@@ -114,21 +118,16 @@ static void onTouchEvent(lv_event_t *e) {
     Serial.printf("touch: x=%d y=%d\n", point.x, point.y);
 }
 
-// T14a — 정적 화면 하나. 키패드도 상태 분기도 없다: font_ko 가 실제로
-// 화면에 그려지는지(한글 렌더링)와 lv_timer_handler() 의 최초 전체 리프레시
-// 시간을 재는 것이 유일한 목적이다. "연결 중" 은 ko-words.txt 의 "연결중"
-// 항목에서 나온 글자들이라 font_ko 서브셋 안에 있다(tools/ko-words.txt).
-static void createStaticScreen() {
-    lv_obj_t *label = lv_label_create(lv_screen_active());
-    lv_obj_set_style_text_font(label, &font_ko, 0);
-    lv_label_set_text(label, "연결 중");
-    lv_obj_center(label);
-
+// T14a 가 만든 디버그 로거를 그대로 남긴다 — 좌표를 시리얼에 찍는 것은
+// 페어링 키패드(Task 14b, `ui_pairing.cpp`)가 실제로 위젯을 눌렀을 때도
+// 여전히 유용하다(특히 오른쪽 열 버튼의 가장자리를 눌렀을 때 XPT2046
+// 소프트웨어 미러 X 좌표 off-by-one 이 재현되는지 확인할 때 —
+// `task-14b-brief.md` 상단 캐비어트, `ui_pairing.cpp` 의 대응 옵션 주석
+// 참고). LV_EVENT_PRESSED 는 눌리는 "순간"에 한 번만 온다(누르고 있는
+// 동안 계속 오는 LV_EVENT_PRESSING 이 아니다).
+static void registerTouchDebugLogger() {
     // 등록된 포인터형(터치) 입력장치를 전부 찾아 콜백을 건다 — 이 보드는
-    // XPT2046 저항막 터치 하나뿐이라 보통 한 번만 걸린다. LV_EVENT_PRESSED
-    // 는 눌리는 "순간"에 한 번만 온다(누르고 있는 동안 계속 오는
-    // LV_EVENT_PRESSING 이 아니다) — 좌표가 찍히는지만 확인하면 되므로 이걸
-    // 쓴다.
+    // XPT2046 저항막 터치 하나뿐이라 보통 한 번만 걸린다.
     lv_indev_t *indev = nullptr;
     while ((indev = lv_indev_get_next(indev)) != nullptr) {
         if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
@@ -145,21 +144,31 @@ void setup() {
                   ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores());
     Serial.printf("flash=%u bytes  free heap=%u\n",
                   ESP.getFlashChipSize(), ESP.getFreeHeap());
-    Serial.println("AI Agent Monitor — CYD 프로토콜 펌웨어 (Task 14a: 화면 브링업)");
+    Serial.println("AI Agent Monitor — CYD 프로토콜 펌웨어 (Task 14b: 페어링 키패드 화면)");
 
     // ─────────────────────────────────────────────────────────────────────
     // T14a — 디스플레이·터치 브링업. WiFi 연결/포털보다 먼저 켠다: 포털이
     // 열리는 동안(사람이 휴대폰으로 공유기를 골라야 하는 몇 분)에도 화면에
     // 뭔가 떠 있는 편이, "화면이 꺼진 채 멈춘 것처럼 보이는 기기" 보다 낫다.
-    // 이 화면은 WiFi/설정 상태를 전혀 모른다 — 정적인 한 줄만 띄운다는 이
-    // 태스크의 범위를 지키기 위해 일부러 상태를 참조하지 않는다.
+    //
+    // Task 14b 부터는 그 "뭔가"가 정적인 한 줄이 아니라 페어링 키패드
+    // 자체다(`uiPairingCreate`) — `transport.begin(config)` 가 아직 안
+    // 불렸어도 안전하다: `Transport::authStep_` 의 멤버 초기값이 이미
+    // `NeedsPairing`(transport.h)이라, 이 시점의 `authStep()` 은 "아직 뭘
+    // 모른다" 가 아니라 "코드가 필요하다" 는 이 화면이 그대로 그릴 수 있는
+    // 값이다. WiFi 포털이 열려 있는 동안은(그 함수가 블로킹이라) 이 화면도
+    // 같이 멈춰 있다 — Task 14a 때부터 있던 한계이고 이 태스크가 고치는
+    // 범위가 아니다.
     smartdisplay_init();
     lastLvglTickMs = millis();
-    createStaticScreen();
+    registerTouchDebugLogger();
+    uiPairingCreate(transport);
 
     // T14a-A — "부팅 직후 최초 전체 리프레시" 시간. 위젯을 막 만든 직후라
     // 화면 전체가 dirty 상태이므로, 이 첫 lv_timer_handler() 호출이 곧 첫
     // 전체 리프레시다. loop() 의 계측(아래)과 같은 micros() 방식을 쓴다.
+    // Task 14b 가 위젯 수를 늘렸으므로(라벨 4개 + 버튼매트릭스 12버튼)
+    // 이 값도 다시 재야 한다 — 보고서의 재측정 절 참고.
     const uint32_t firstRefreshStartUs = micros();
     lv_timer_handler();
     const uint32_t firstRefreshUs = micros() - firstRefreshStartUs;
@@ -242,6 +251,11 @@ void loop() {
     // 문서화 기준 8초)과 이 값을 단순 합산하면 30초 예산 안에 들지만,
     // 둘이 **같은 순간에** 최악을 찍는 조합은 아직 실측된 적이 없다 —
     // Task 14b/15 가 위젯을 늘릴 때 다시 재야 한다.
+    // Task 14b — 화면 내용을 이번 프레임에 그리기 전에 최신 상태로 맞춘다.
+    // 위젯을 다시 만들지 않고 텍스트/버튼 상태만 갱신하므로(T12-D, 깜빡임
+    // 방지) 매 loop() 마다 불러도 싸다.
+    uiPairingUpdate(transport);
+
     lv_tick_inc(now - lastLvglTickMs);
     lastLvglTickMs = now;
 
