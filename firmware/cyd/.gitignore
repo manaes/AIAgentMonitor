@@ -1,2 +1,8 @@
 # PlatformIO 빌드 산출물 · 툴체인 캐시. 커밋하지 않는다.
 .pio/
+
+# tools/build-font.sh 가 받아 쓰는 캐시. Noto Sans KR 원본 TTF(6MB, OFL)와
+# 그걸 뽑는 데 쓰는 python venv — 둘 다 재현 가능한 다운로드/설치 산출물이라
+# 커밋하지 않는다. 커밋되는 건 결과물인 src/font_ko.c 뿐이다.
+tools/.font-cache/
+tools/.venv/
