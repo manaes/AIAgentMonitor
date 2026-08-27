@@ -87,6 +87,15 @@ static uint32_t lvglMaxHandlerUs = 0;
 
 // T14a-B — 터치 확인용 최소 콜백. 키패드/위젯 없이 좌표만 시리얼에 찍는다.
 //
+// **다음 화면(Task 14b 키패드)을 만들기 전에 볼 것 — X 좌표 off-by-one.**
+// `esp32_smartdisplay@2.1.1` 의 `src/esp_lcd_touch.c:92`(설치된 패키지
+// 소스로 확인)가 소프트웨어 미러-X 좌표를 `x_max - x[i]` 로 계산한다
+// (`-1` 없음) — 이 보드가 `TOUCH_MIRROR_X=true` 라서 화면의 물리적 왼쪽
+// 가장자리를 누르면 `x=240`(유효 범위 `[0,239]` 밖)이 나온다(실기 재현
+// 확인됨). 오른쪽 가장자리에 버튼을 배치하기 전에
+// `.superpowers/sdd/2026-08-25-cyd-client/task-14a-report.md` "발견한
+// 버그 2" 절과 `task-14b-brief.md` 상단 캐비어트를 먼저 읽어라.
+//
 // `esp32_smartdisplay` 는 등록한 `lv_indev_t*` 를 공개 헤더(`esp32_smartdisplay.h`)
 // 로 노출하지 않는다(소스 확인: `esp32_smartdisplay.c` 의 `lv_indev_t *indev;`
 // 는 파일 스코프 전역이지 extern 선언이 아니다) — 그래서 이 파일에서 직접
@@ -217,9 +226,22 @@ void loop() {
 
     // T14a-A — LVGL 티커 갱신과 화면 그리기. esp32_smartdisplay README(Step 7)
     // 가 보인 그대로: 경과 ms 를 lv_tick_inc() 에 넘기고 매 루프 lv_timer_handler()
-    // 를 부른다. 이 파일에는 아직 `transport.loop()`(WebSocket) 와 같은
-    // `loop()` 안에서 경쟁하는 것 말고는 없다 — 이 둘을 실제로 한 `loop()` 에서
-    // 같이 재는 것은 Task 14b/15 몫이고, 그때 아래 최댓값이 다시 확인돼야 한다.
+    // 를 부른다.
+    //
+    // **정정(fix round 1) — "transport.loop() 와 아직 안 엮여 있다"는 이전
+    // 버전의 이 주석은 틀렸다.** `transport.loop()`(아래, Task 12 부터 있던
+    // 코드)는 **이미 이 같은 `loop()` 함수 안에서 순차 실행 중**이다 — 배선이
+    // 안 된 게 아니다. 아직 안 된 것은 **양쪽이 동시에 무거운 순간의 최악
+    // 케이스를 실측하는 일**이다(예: WebSocket 재연결 백오프가 걸린 순간에
+    // 화면도 무거운 리드로우를 하는 조합). 지금까지의 계측(아래 최댓값)은
+    // 화면 그리기 하나만 격리해서 잰 값이다. `setup()` 의 최초 전체
+    // 리프레시(~52ms)는 `transport.loop()` 가 한 번도 불리기 전(부팅 중)에
+    // 끝나므로 애초에 경쟁하지 않는다 — 매 `loop()` 반복에서 실제로
+    // `transport.loop()` 와 나란히 도는 건 이 정상 상태 값(400~600us 대,
+    // 태스크 보고서 T14a-A)이다. `transport.loop()` 의 최악 시간(Task 12
+    // 문서화 기준 8초)과 이 값을 단순 합산하면 30초 예산 안에 들지만,
+    // 둘이 **같은 순간에** 최악을 찍는 조합은 아직 실측된 적이 없다 —
+    // Task 14b/15 가 위젯을 늘릴 때 다시 재야 한다.
     lv_tick_inc(now - lastLvglTickMs);
     lastLvglTickMs = now;
 
