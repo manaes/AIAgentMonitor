@@ -1,9 +1,14 @@
-// AI Agent Monitor — CYD 프로토콜 펌웨어 (Task 8: 화면 없음)
+// AI Agent Monitor — CYD 프로토콜 펌웨어 (Task 9: 여전히 화면 없음)
 //
-// 여기서 확인하는 것은 딱 하나다: 툴체인 · 보드 id · 업로드 경로가 맞아서
-// 보드가 우리가 올린 코드를 실제로 돌리고 있는가. 화면도 WiFi 도 아직 없다.
+// Task 8 이 확인한 것: 툴체인 · 보드 id · 업로드 경로가 맞아서 보드가 우리가
+// 올린 코드를 실제로 돌린다. Task 9 가 더하는 것: 설정이 재부팅을 견디는가와
+// WiFi 설정 포털이 실제로 뜨는가. 화면 · mDNS · WebSocket · 암호 · 페어링은
+// 여전히 다음 태스크들이고, 판정은 전부 시리얼로만 한다.
 
 #include <Arduino.h>
+#include <WiFi.h>
+
+#include "config.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 제약 — `loop()` 한 바퀴는 30초를 넘겨 블로킹하지 않는다. Task 8~15 전부에 걸린다.
@@ -23,6 +28,10 @@
 // 순간 그대로 결함이 되고, "그때 고치기로 한 것" 은 잘 안 고쳐진다. 처음부터
 // `millis()` 비교로 써 두면 나중에 고칠 것이 없다.
 //
+// **이 예산은 `loop()` 에 걸리는 제약이다.** `setup()` 은 WebSocket 이 붙기
+// 전에 한 번 돌므로 여기 해당하지 않는다 — 아래 T9-D 가 그 예외를 어디까지만
+// 쓰는지 적어 뒀고, 그 범위를 넓히지 마라.
+//
 // Task 12 이후 지켜야 할 나머지:
 //   - 블로킹이 불가피한 구간(WiFi 재접속, 전체 화면 갱신, NVS 쓰기)은 조각을 내고
 //     사이사이에 `webSocket.loop()` 를 부른다.
@@ -35,6 +44,9 @@ static const uint32_t HEARTBEAT_INTERVAL_MS = 5000;
 
 static uint32_t lastHeartbeatMs = 0;
 
+// 이 기기의 설정. Task 13(페어링)이 토큰을 채우고 Task 12(전송)가 맥 주소를 쓴다.
+static Config config;
+
 void setup() {
     Serial.begin(115200);
     delay(300);                       // USB 시리얼이 붙을 시간
@@ -44,6 +56,49 @@ void setup() {
     Serial.printf("flash=%u bytes  free heap=%u\n",
                   ESP.getFlashChipSize(), ESP.getFreeHeap());
     Serial.println("AI Agent Monitor — CYD 프로토콜 펌웨어 (화면 없음)");
+
+    // `stored` 와 `paired` 를 따로 찍는다. 둘은 다른 질문이고(config.h 참고),
+    // Task 14 는 이 조합으로 초기 설정 안내와 페어링 키패드를 갈라 띄운다.
+    // **토큰 값 자체는 찍지 않는다** — config.cpp 의 금지 목록.
+    const bool stored = configLoad(config);
+    Serial.printf("config: stored=%s paired=%s machost=\"%s\"\n",
+                  stored ? "yes" : "no",
+                  configIsPaired(config) ? "yes" : "no",
+                  config.macHost.c_str());
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // T9-D — `wifiConnectOrPortal()` 이 false 를 돌려주면 무엇을 하는가:
+    // **부팅 중 이 자리에서, 성공할 때까지 다시 부른다.** 근거 셋.
+    //
+    // 1. 연결 없이 할 수 있는 일이 없다. 이 펌웨어의 존재 이유가 맥에 붙는
+    //    것이고, 화면이 붙는 Task 14 이전에는 "WiFi 없음" 을 보여 줄 곳조차 없다.
+    //    그러니 여기서 포기하고 `loop()` 로 내려가 봐야 아무 일도 하지 않는
+    //    루프만 돈다.
+    //
+    // 2. `ESP.restart()` 로 되돌리지 않는다. 재부팅해도 결국 같은 코드가 같은
+    //    자리에서 다시 돌 뿐인데, 대가로 시리얼 로그가 날아간다 — 화면 없는 이
+    //    기기에서 무슨 일이 있었는지 알 수 있는 유일한 통로다. 실패 횟수를 세어
+    //    찍는 편이 재부팅보다 남는 정보가 많다.
+    //
+    // 3. **여기서 블로킹해도 되는 이유는 아직 WebSocket 이 없다는 것 하나뿐이다.**
+    //    위 30초 예산은 `loop()` 에 걸리는 제약이고 `setup()` 은 소켓이 붙기 전에
+    //    한 번 돈다. Task 12 이후 런타임에 포털을 다시 열게 된다면 이 루프를 그대로
+    //    옮겨 쓰면 안 된다 — 소켓을 명시적으로 끊고 열었다가, 돌아온 뒤 다시 붙여야
+    //    한다. 끊지 않고 열면 맥은 90초 뒤 그 연결을 죽은 것으로 처리한다.
+    //
+    // 한 바퀴는 무한정이 아니다: 연결 시도와 포털에 각각 시간 제한이 걸려 있어서
+    // (config.cpp 의 T9-C) 실패해도 반드시 돌아오고, 돌아오면 다시 시도한다.
+    // ─────────────────────────────────────────────────────────────────────────
+    uint32_t attempts = 0;
+    while (!wifiConnectOrPortal(config)) {
+        ++attempts;
+        Serial.printf("wifi: 연결도 설정도 못 했다 (%u번째 실패) — 다시 시도한다\n",
+                      attempts);
+    }
+
+    Serial.printf("wifi: 연결됨 ssid=\"%s\" ip=%s rssi=%d\n",
+                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
+                  WiFi.RSSI());
 }
 
 void loop() {
@@ -52,7 +107,21 @@ void loop() {
     // 부호 없는 뺄셈이라 millis() 가 약 49.7일에 한 번 넘어가도 그대로 맞다.
     if (now - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
         lastHeartbeatMs = now;
-        Serial.printf("alive  heap=%u\n", ESP.getFreeHeap());
+
+        // WiFi 상태를 같이 찍는다. 화면이 없는 동안 이 줄이 유일한 진단 통로다.
+        //
+        // **여기에 재접속 로직은 없다.** 링크가 끊기면 arduino-esp32 의 WiFi
+        // 라이브러리가 스스로 다시 붙으려 한다(`_autoReconnect` 기본값이 true 이고
+        // `_isReconnectableReason(reason)` 인 끊김에 한해 재시도한다,
+        // `WiFiGeneric.cpp:1084`). 그 재시도로 돌아오지 못하는 경우 — 공유기가
+        // 아예 사라졌거나 비밀번호가 바뀐 경우 — 를 다루는 것은 Task 12 다.
+        // 지금은 그 상황이 시리얼에 `wifi=down` 으로 보이기만 하면 된다.
+        if (WiFi.isConnected()) {
+            Serial.printf("alive  heap=%u wifi=up rssi=%d\n",
+                          ESP.getFreeHeap(), WiFi.RSSI());
+        } else {
+            Serial.printf("alive  heap=%u wifi=down\n", ESP.getFreeHeap());
+        }
     }
 
     // 루프를 완전히 비워 두면 같은 코어의 IDLE 태스크가 굶는다. 1ms 는 위
