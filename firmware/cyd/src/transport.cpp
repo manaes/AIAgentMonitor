@@ -335,8 +335,18 @@ void Transport::handleReply(const String &text) {
             // 더 이상 유효하지 않다(맥의 CODE2 는 성공·실패와 무관하게
             // handshake 를 소비한다, `pairing.rs` 주석) — 다음
             // submitCode() 호출까지 지운다.
+            //
+            // fix round 1 (I-1) — 코드 오답(가장 흔한 경로)이 여기로 오면
+            // sendCode2() 가 유도해 둔 pendingSs_/pendingNonceBytes_ 가
+            // 지워지지 않은 채 남았었다. finishHandshake() 의 모든 실패
+            // 분기는 v2Wipe 를 빠짐없이 부르는데, 이 자리만 그 습관에서
+            // 빠져 있었다 — 다 쓴 ECDH 공유 비밀·논스를 그 자리에서
+            // 지운다는 이 파일 전체(Task 10 이래)의 원칙을 여기서도
+            // 지킨다.
             holding_ = true;
             pendingCode_ = "";
+            v2Wipe(pendingSs_, sizeof pendingSs_);
+            v2Wipe(pendingNonceBytes_, sizeof pendingNonceBytes_);
             webSocket_.disconnect();
             break;
         default:
@@ -487,6 +497,12 @@ void Transport::finishHandshake(const ReplyView &reply) {
             v2Wipe(pairKey, sizeof pairKey);
             v2Wipe(pendingSs_, sizeof pendingSs_);
             v2Wipe(sealedBuf, sizeof sealedBuf);
+            // fix round 1 (M-2) — 다른 실패 분기가 관련 버퍼를 전부 지우는
+            // 스타일에서 이 자리만 tokenJson 을 빠뜨렸다. open() 이 인증
+            // 실패 시 out 을 쓰지 않는다는 것을 확인했지만(SealedChannel::
+            // open, 태그 검증 실패 시 복호화 전에 반환), 그 보장에 기대지
+            // 않고 다른 분기와 같은 방식으로 지운다.
+            v2Wipe(tokenJson, sizeof tokenJson);
             return;
         }
 
@@ -502,7 +518,10 @@ void Transport::finishHandshake(const ReplyView &reply) {
             v2Wipe(tokenJson, sizeof tokenJson);
             return;
         }
-        const String newToken = String((const char *)(doc["token"] | ""));
+        // fix round 1 (M-3) — 아래 실패 분기에서 비워야 하므로 const 를
+        // 빼 뒀다. 형식 불량 토큰이라 위험은 작지만, 스코프를 벗어나기
+        // 전에 비운다는 것을 다른 버퍼들과 같은 자리에서 지킨다.
+        String newToken = String((const char *)(doc["token"] | ""));
 
         if (!configSaveToken(*config_, newToken)) {
             Serial.println("transport: 새 토큰이 맥의 발급 형식에 맞지 않는다 — Failed");
@@ -513,6 +532,7 @@ void Transport::finishHandshake(const ReplyView &reply) {
             v2Wipe(pairKey, sizeof pairKey);
             v2Wipe(pendingSs_, sizeof pendingSs_);
             v2Wipe(tokenJson, sizeof tokenJson);
+            newToken = "";
             return;
         }
 

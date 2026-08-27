@@ -46,6 +46,12 @@ String g_typedDigits;
 bool g_codeWindowStarted = false;
 uint32_t g_codeWindowStartedAtMs = 0;
 
+/// fix round 1 (I-2) — `NeedsPairing`/`Failed` 로 돌아온 적이 있는지
+/// 추적해 카운트다운을 다시 잰다. 센티널로 `Subscribed` 를 쓴다 — 부팅
+/// 직후 첫 `uiPairingUpdate()` 호출에서 아래 리셋이 공짜로 한 번 더
+/// 일어나도(`g_codeWindowStarted` 가 이미 `false` 라) 무해하다.
+AuthStep g_prevStep = AuthStep::Subscribed;
+
 /// **엣지 트리거 캐시 — 실기 실측으로 필요성이 드러났다.** `lv_buttonmatrix_
 /// set/clear_button_ctrl(_all)` 은 실제 소스 확인 결과(`lv_buttonmatrix.c`)
 /// 값이 바뀌었는지 보지 않고 매번 무조건 `invalidate_button_area()` 를
@@ -208,18 +214,35 @@ void uiPairingCreate(Transport &transport) {
 void uiPairingUpdate(Transport &transport) {
     const AuthStep step = transport.authStep();
 
-    // T14b-A — 로컬 추정 카운트다운. 이 화면이 처음 SendCode2(=
-    // AwaitingCode2 를 받아 CODE2 를 보낼 차례) 에 들어오는 그 순간 딱
-    // 한 번만 시작하고, 이후로는(재입력으로 다시 SendCode2 를 거쳐도)
-    // 다시 시작하지 않는다 — 맥의 `open_window()` 는 `begin_pairing` 이
-    // 호출된 시점에 한 번만 창을 열고, 그 뒤의 HELLO2/CODE2 왕복은 같은
-    // 창을 두고 반복될 뿐이라(`pairing.rs`) 우리도 같은 창 하나를
-    // 계속 추정해야 한다. 맥이 실제로 창을 연 시각과 이 시작 시각의
-    // 오차는 사람이 맥 화면의 6자리를 보고 이 기기로 옮겨 오는 데 걸린
-    // 시간과, HELLO2 왕복 지연뿐이다 — 대체로 짧지만 **보장되지는
-    // 않는다.** 맥이 앱 재시작·수동 취소 등으로 창을 일찍 닫으면 이
-    // 값은 그냥 틀린다. 그래서 절대 시각이 아니라 "남은 초" 만 보여주고,
-    // 어디에도 "정확하다"는 주장을 남기지 않는다.
+    // fix round 1 (I-2) — `NeedsPairing`/`Failed` 로 "막" 돌아왔다면(직전
+    // 프레임은 그 상태가 아니었다면) 카운트다운을 다시 처음부터 잰다.
+    // 원래 "부팅 후 1회만 시작"이었는데, 그 근거("맥의 open_window() 는
+    // begin_pairing 시점에 한 번만 창을 연다")는 **같은 창 안의 재시도**
+    // 에만 성립했다 — 리뷰가 실제로 확인한 `pairing.rs:356-364` 의
+    // `begin_pairing()` 은 사용자가 맥에서 페어링을 다시 시작할 때마다
+    // `attempts_left`/TTL 을 처음부터 다시 잰다. CYD 는 "같은 창의 재시도"
+    // 와 "완전히 새 창"을 와이어로 구별할 방법이 없으므로(둘 다 그냥
+    // HELLO2→AwaitingCode2 왕복 하나로만 보인다), 리셋하지 않으면 만료된
+    // 창 이후 화면이 "남은 시간 0초"에 영구히 멈춰 실제로는 120초 남은
+    // 새 창을 만료된 것처럼 보여준다 — 매번 다시 재는 쪽이 그보다 덜
+    // 틀린다.
+    const bool wasNeedsPairingOrFailed =
+        (g_prevStep == AuthStep::NeedsPairing || g_prevStep == AuthStep::Failed);
+    const bool isNeedsPairingOrFailed =
+        (step == AuthStep::NeedsPairing || step == AuthStep::Failed);
+    if (isNeedsPairingOrFailed && !wasNeedsPairingOrFailed) {
+        g_codeWindowStarted = false;
+    }
+    g_prevStep = step;
+
+    // T14b-A — 로컬 추정 카운트다운. 이 화면이 (다시) SendCode2(=
+    // AwaitingCode2 를 받아 CODE2 를 보낼 차례) 에 들어오는 순간 시작한다
+    // — 위 리셋 덕분에 새 페어링 시도마다 다시 잰다. 맥이 실제로 창을
+    // 연 시각과 이 시작 시각의 오차는 사람이 맥 화면의 6자리를 보고 이
+    // 기기로 옮겨 오는 데 걸린 시간과, HELLO2 왕복 지연뿐이다 — 대체로
+    // 짧지만 **보장되지는 않는다.** 맥이 앱 재시작·수동 취소 등으로
+    // 창을 일찍 닫으면 이 값은 그냥 틀린다. 그래서 절대 시각이 아니라
+    // "남은 초" 만 보여주고, 어디에도 "정확하다"는 주장을 남기지 않는다.
     if (!g_codeWindowStarted && step == AuthStep::SendCode2) {
         g_codeWindowStarted = true;
         g_codeWindowStartedAtMs = millis();
