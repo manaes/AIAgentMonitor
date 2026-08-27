@@ -149,16 +149,32 @@ void Transport::loop() {
 
     // **실기로 잡은 버그**: raw TCP `connect()` 는 성공했지만 HTTP 업그레이드
     // 응답이 없는 경우, 라이브러리 자신의 헤더 응답 타임아웃(`WebSocketsClient.
-    // cpp:646`, `WSC_HEADER`/`WSC_BODY` 상태에서만 적용, 5000ms)이 위
-    // `webSocket_.loop()` 안에서 **이미** `clientDisconnect()` 를 불러
-    // `WStype_DISCONNECTED` 를 동기적으로 낸다 — `handleSocketDisconnected()`
-    // 가 그 자리에서 먼저 돌아 `targetHost_` 를 비우고 백오프를 예약해 버린다.
-    // 그 뒤에 아래 조건을 `targetHost_` 를 보지 않고 그대로 쓰면 같은 실패
-    // 하나에 백오프가 두 번(예: 2000ms 뒤가 아니라 곧장 4000ms 뒤로) 걸린다 —
-    // 처음 이 코드를 그대로 실기에 올렸을 때 시리얼에서 그렇게 찍히는 것을
-    // 봤다. `targetHost_.length() > 0` 가드가 "이 판이 아직 마무리되지
-    // 않았다"는 것을 보장한다 — 이미 비었다면 handleSocketDisconnected() 가
-    // 방금 이 판을 끝낸 것이므로 여기서 또 끝낼 필요가 없다.
+    // cpp:646`, `WSC_HEADER`/`WSC_BODY` 상태에서만 적용, 5000ms)이 바로 위
+    // `webSocket_.loop()` 호출 **안에서** 이미 `clientDisconnect()` 를 불러
+    // `WStype_DISCONNECTED` 를 낸다 — 그 콜백은 같은 스레드에서 `webSocket_.
+    // loop()` 가 반환하기 전에 동기적으로 실행되므로, **동시성 경쟁이 아니라
+    // 이 한 번의 `Transport::loop()` 호출 안에서 일어나는 결정론적 이중
+    // 처리**다: `handleSocketDisconnected()` 가 그 안에서 먼저 돌아
+    // `targetHost_` 를 비우고 백오프를 예약해 버린 뒤, 아래 조건이
+    // `targetHost_` 를 보지 않고 그대로 쓰면 같은 실패 하나에 백오프가 두 번
+    // (예: 2000ms 뒤가 아니라 곧장 4000ms 뒤로) 걸린다 — 처음 이 코드를 그대로
+    // 실기에 올렸을 때 시리얼에서 그렇게 찍히는 것을 봤다. `targetHost_.
+    // length() > 0` 가드가 "이 판이 아직 마무리되지 않았다"는 것을 보장한다 —
+    // 이미 비었다면 handleSocketDisconnected() 가 방금 이 판을 끝낸 것이므로
+    // 여기서 또 끝낼 필요가 없다.
+    //
+    // **이 가드가 죽은 코드가 아닌 이유** — 두 실패 모드가 서로 다른 회수
+    // 수단으로 걸린다. raw TCP `connect()` 자체가 실패하는 경로(호스트가
+    // 아예 응답하지 않거나 RST 를 준 경우)는 `connectFailedCb()`
+    // (`WebSocketsClient.cpp:992-994`)로 가는데, 이 함수는 로그만 찍고
+    // `WStype_DISCONNECTED` 를 **내지 않는다** — 그러면
+    // `handleSocketDisconnected()` 도 안 불리고 `targetHost_` 도 안 비워진다.
+    // 이 경로에서는 위 헤더 타임아웃이 아예 적용되지 않으므로(연결 자체가
+    // 안 됐으니 `WSC_HEADER` 에도 못 들어간다), **`CONNECT_GIVEUP_MS` 가
+    // 이 판을 회수하는 유일한 수단**이다. 즉 아래 조건은 "연결은 됐는데 응답이
+    // 없다"(라이브러리의 헤더 타임아웃이 먼저 처리, 이 가드는 중복 방지용)와
+    // "연결 자체가 안 된다"(라이브러리가 회수하지 않음, 이 가드가 유일한
+    // 회수 수단) 두 실패 모드를 하나의 판정으로 같이 받는다.
     if (targetHost_.length() > 0 && !webSocket_.isConnected() &&
         (now - connectStartedAtMs_) > CONNECT_GIVEUP_MS) {
         // 이 판은 안 됐다 — 다음 판에서 대상을 다시 고른다(mDNS 결과가
