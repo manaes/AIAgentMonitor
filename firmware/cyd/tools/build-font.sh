@@ -25,6 +25,34 @@
 # 빌드에서 완전히 빠진다 — authfsm/cryptov2/transportlogic 과 같은 배치다.
 # Task 14 가 `extern const lv_font_t font_ko;` 로 참조하기 시작하면 자연히
 # 빌드에 들어온다.
+#
+# ============================================================================
+# Task 14 가 지켜야 할 것: LV_USE_FONT_PLACEHOLDER 를 끄지 마라
+# ============================================================================
+# 이 폰트(font_ko)는 ASCII + 한글 음절 40자만 담고 있다. 그 밖의 코드포인트
+# (한자·키릴·이모지·이 서브셋에 없는 한글 등 — 프로젝트 이름은 임의의 UTF-8
+# 이라 뭐든 올 수 있다)를 만나면 LVGL v9(lv_font.c의 lv_font_get_glyph_dsc,
+# fallback 이 없으므로 곧장 이 폰트의 catch-all 로 떨어짐)가 다음 두 가지 중
+# 하나로 행동한다 — 어느 쪽인지는 이 폰트가 아니라 Task 14 가 쓸 lv_conf.h 의
+# LV_USE_FONT_PLACEHOLDER 값에 달려 있다:
+#
+#   - 1(LVGL 기본값, lv_conf_template.h:708)이면: box_w = line_height/2,
+#     adv_w = box_w+2 로 채워지고, 화면엔 테두리만 있는 사각형(1px border,
+#     src/draw/sw/lv_draw_sw_letter.c 의 LV_FONT_GLYPH_FORMAT_NONE 분기,
+#     lv_draw_sw_border 호출)이 그려진다 — 이게 이 태스크 브리프가 요구한
+#     "읽을 수 없다"가 보이는 상태다.
+#   - 0(꺼짐)이면: box_w = 0, adv_w = 0 이 되고, src/draw/lv_draw_label.c:619
+#     의 "글자가 비어 있으면 안 그린다" 분기(`if (g.box_w == 0) goto exit;`)
+#     를 타서 그 글자가 폭 0으로 완전히 사라진다 — 크래시는 안 나지만 아무
+#     신호도 없다. 이 태스크가 막으려던 정확히 그 실패 모드다.
+#
+# **결론: Task 14 가 lv_conf.h 를 쓸 때 LV_USE_FONT_PLACEHOLDER 를 1로 유지
+# 하거나(기본값이라 손대지 않으면 자동으로 유지된다), 최소한 명시적으로
+# #define LV_USE_FONT_PLACEHOLDER 1 을 넣어라.** 빌드 크기를 줄이려고 끄면
+# 이 값이 조용히 뒤집힌다 — 이 폰트는 자체 대체 글리프를 갖지 않으므로
+# (lv_font_conv 출력에 `--lv-fallback` 을 안 줬다, `.fallback = NULL`)
+# 전적으로 이 전역 설정에 의존한다.
+# ============================================================================
 set -euo pipefail
 
 CYD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
