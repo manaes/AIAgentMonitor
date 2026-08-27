@@ -45,6 +45,19 @@ bool openForWrite(Preferences &prefs, const char *what) {
     return false;
 }
 
+/// `aim` 네임스페이스가 이미 있는가 — 즉 우리가 무언가를 저장한 적이 있는가.
+///
+/// `configLoad` 의 판정과 같은 기구(읽기 전용 `begin` 의 반환값)를 쓴다. 값은
+/// 필요 없고 존재 여부만 묻는다. 쓰기가 아니므로 플래시를 건드리지 않는다.
+bool namespaceExists() {
+    Preferences prefs;
+    if (!prefs.begin(NVS_NAMESPACE, /*readOnly=*/true)) {
+        return false;
+    }
+    prefs.end();
+    return true;
+}
+
 }  // namespace
 
 bool configTokenIsValid(const String &token) {
@@ -137,19 +150,42 @@ bool configSaveToken(Config &c, const String &token) {
     return true;
 }
 
-void configClearToken(Config &c) {
+bool configClearToken(Config &c) {
     // 메모리 쪽을 먼저 비운다. NVS 쓰기가 실패하더라도 이번 부팅 동안은
     // 미페어링으로 동작하는 편이, 지웠다고 생각한 토큰으로 계속 붙는 것보다 낫다.
+    //
+    // **다만 그건 이번 부팅뿐이다.** 플래시에 남은 토큰은 다음 부팅에
+    // `configLoad` 가 그대로 되살린다. 그래서 실패를 삼키지 않고 돌려준다 —
+    // 아래 반환값 규약 참고.
     c.token = "";
 
     Preferences prefs;
     if (!openForWrite(prefs, "토큰 삭제")) {
-        return;
+        Serial.println("config: 토큰이 NVS 에 남아 있다 — 다음 부팅에 되살아난다");
+        return false;
     }
-    // 반환값을 보지 않는다: 키가 원래 없었을 때도 `remove` 는 false 를
-    // 돌려주는데, "없는 것을 지워 달라" 는 요청은 이미 이루어진 상태다.
-    prefs.remove(KEY_TOKEN);
+
+    // `remove` 는 키가 원래 없어도 false 를 돌려준다(`nvs_erase_key` 가
+    // `ESP_ERR_NVS_NOT_FOUND`). **그런데 진짜 실패 — NVS 가득 참, `nvs_commit`
+    // 실패, 파티션 손상 — 도 똑같이 false 다.** 반환값만 봐서는 둘을 가를 수
+    // 없으므로 지우기 전에 키가 있었는지 먼저 묻는다.
+    //
+    // 이 구분이 중요한 이유: 언페어링은 토큰을 폐기하는 경로다. "지운 줄 알았는데
+    // 안 지워졌다" 는 그냥 버그가 아니라 보안 상태가 조용히 되돌아가는 것이고,
+    // 화면 없는 이 기기에서는 사람도 알 수 없다. Task 13 의 언페어링 호출부는
+    // 이 값이 false 면 **토큰이 아직 살아 있다고 봐야 한다.**
+    const bool had = prefs.isKey(KEY_TOKEN);
+    const bool removed = prefs.remove(KEY_TOKEN);
     prefs.end();
+
+    if (!had) {
+        return true;  // 원래 없었다. 요청한 상태가 이미 이루어져 있다.
+    }
+    if (!removed) {
+        Serial.println("config: 토큰을 NVS 에서 지우지 못했다 — 다음 부팅에 되살아난다");
+        return false;
+    }
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -223,10 +259,41 @@ bool wifiConnectOrPortal(Config &c) {
     // 그때 자연스럽게 거짓이 되고 플래시를 건드리지 않는다.
     String entered = host.getValue();
     entered.trim();  // 폰에서 붙여넣다 딸려 온 공백이 mDNS 조회를 조용히 깨뜨린다
+
     if (entered != c.macHost) {
         c.macHost = entered;
         configSaveHost(c);
         Serial.printf("config: 맥 주소 저장 — \"%s\"\n", c.macHost.c_str());
+        return true;
+    }
+
+    // ── 값이 같아도 네임스페이스가 없으면 한 번은 쓴다 ──
+    //
+    // 값 비교만 하던 판이 실물에서 이렇게 깨졌다: 첫 부팅이면 `c.macHost` 가
+    // `""` 이고 포털 칸의 기본값도 `""` 다. 사람이 SSID·비번만 넣고 **맥 주소
+    // 칸을 비워 두면** — 그게 우리가 권하는 기본값이다, 비우면 mDNS 자동
+    // 탐색이다 — `"" != ""` 가 거짓이라 저장이 통째로 건너뛰어진다. WiFi
+    // 자격증명은 esp-idf 자기 네임스페이스에 들어가므로 **연결은 멀쩡히 되는데
+    // `aim` 네임스페이스만 영영 안 생긴다.** 그러면 `configLoad` 가 매 부팅
+    // `stored=no` 를 돌려주고, 설정이 끝난 기기가 "한 번도 설정된 적 없음" 으로
+    // 보인다 — T9-A 가 갈라 놓으려던 바로 그 상태가 틀리는 것이다.
+    //
+    // 그래서 `autoConnect` 가 성공한 부팅에서는 값이 같더라도 네임스페이스가
+    // 없으면 한 번 쓴다. `stored=yes` 의 뜻이 이걸로 분명해진다:
+    // **"WiFi 설정을 한 번은 끝냈다."** 값 자체는 여전히 비어 있을 수 있고,
+    // 비어 있는 것이 정상이다(mDNS 자동 탐색).
+    //
+    // 플래시 절약 의도는 그대로다 — 이 쓰기는 네임스페이스가 없을 때 한 번뿐이고,
+    // 그 다음 부팅부터는 위의 값 비교가 다시 전부 막는다.
+    //
+    // 호출자에게 `configLoad` 의 결과를 받아 오지 않고 여기서 직접 묻는 이유:
+    // 이 불변식이 `wifiConnectOrPortal` 안에서 닫힌다. 인자로 넘기면 안 넘기는
+    // 호출자가 생기는 날 같은 버그가 조용히 돌아온다. 대가는 성공한 부팅마다
+    // 읽기 전용 NVS 열기 한 번이고, 플래시 쓰기는 없다.
+    if (!namespaceExists()) {
+        configSaveHost(c);
+        Serial.printf("config: 설정을 처음 저장했다 — machost=\"%s\"\n",
+                      c.macHost.c_str());
     }
     return true;
 }

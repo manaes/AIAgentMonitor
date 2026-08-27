@@ -26,6 +26,12 @@
 struct Config {
     /// 맥 호스트명 또는 IP. **비어 있으면 mDNS 자동 탐색**이라는 뜻이고 그게
     /// 기본 동작이다(포털에서 칸을 비워 두면 된다). 설정 포털이 채운다.
+    ///
+    /// **비워 둔 채로 포털을 통과해도 NVS 에는 기록이 남는다** — 빈 문자열이
+    /// `machost` 키로 저장되고, 그 덕분에 `configLoad` 가 `stored=yes` 를
+    /// 돌려준다(`config.cpp` 의 `wifiConnectOrPortal` 끝부분 참고). 즉
+    /// `stored=yes` 와 `macHost == ""` 는 모순이 아니라 **가장 흔한 정상
+    /// 조합**이다: 설정은 끝났고 맥은 mDNS 로 찾는다는 뜻이다.
     String macHost;
 
     /// 페어링 토큰. 비어 있으면 미페어링. 비어 있지 **않다면** 반드시
@@ -47,6 +53,10 @@ struct Config {
 /// 네임스페이스가 아직 없으면 `nvs_open` 이 `ESP_ERR_NVS_NOT_FOUND` 를 내고
 /// `begin` 이 false 를 돌려준다(nvs.h: "id namespace doesn't exist yet and mode
 /// is NVS_READONLY").
+///
+/// true 가 뜻하는 것을 구체적으로 적으면: **WiFi 설정을 한 번은 끝냈거나,
+/// 페어링을 한 번은 끝냈다.** 앞은 `wifiConnectOrPortal` 이, 뒤는
+/// `configSaveToken` 이 네임스페이스를 만들면서 남긴다.
 ///
 /// 엄밀히 말하면 false 는 "NVS 를 읽을 수 없다" 이지 "한 번도 쓴 적 없다" 가
 /// 아니다 — 파티션이 없거나 드라이버가 초기화되지 않아도 false 다. **호출자에게
@@ -92,12 +102,18 @@ void configSaveHost(const Config &c);
 /// 지점이 바로 여기다.
 bool configSaveToken(Config &c, const String &token);
 
-/// 토큰을 NVS 와 `c` 양쪽에서 지운다.
+/// 토큰을 NVS 와 `c` 양쪽에서 지운다. **NVS 에서 정말 사라졌으면 true.**
 ///
 /// `Config&` 를 받는 이유: 브리프의 인자 없는 `configClearToken()` 은 NVS 만
 /// 비우고 메모리의 `c.token` 은 그대로 두므로, 지운 직후에도
 /// `configIsPaired(c)` 가 계속 "페어링됨" 이라고 답한다. 둘을 갈라 놓지 않는다.
-void configClearToken(Config &c);
+///
+/// **`bool` 인 이유:** `c.token` 은 무슨 일이 있어도 비워지므로 이번 부팅은
+/// 언제나 미페어링으로 동작한다. 하지만 NVS 쓰기가 실패하면 플래시에 토큰이
+/// 남아 **다음 부팅에 되살아난다.** 언페어링은 토큰을 폐기하는 경로이므로 그
+/// 차이를 호출자가 알아야 한다 — false 는 "이번 부팅만 지워졌다, 토큰은 아직
+/// 살아 있다" 는 뜻이다. "원래 토큰이 없었다" 는 실패가 아니라 true 다.
+bool configClearToken(Config &c);
 
 /// 저장된 자격증명으로 WiFi 에 붙어 보고, 실패하면 설정 포털(`AIM-Setup` AP)을
 /// 연다. 연결되면 true.
@@ -105,6 +121,11 @@ void configClearToken(Config &c);
 /// 포털에서 맥 주소를 받으면 `c.macHost` 를 갱신하고 NVS 에 쓴다. **값이
 /// 달라졌을 때만 쓴다** — 상시 전원 기기는 자주 재부팅될 수 있고, 매 부팅마다
 /// 같은 값을 다시 쓸 이유가 없다(플래시 쓰기 횟수는 유한하다).
+///
+/// **예외 하나**: 연결에 성공했는데 `aim` 네임스페이스가 아직 없으면, 값이
+/// 같더라도(둘 다 빈 문자열이라도) 한 번 쓴다. 그래야 맥 주소를 비워 둔 사람의
+/// 기기도 `configLoad` 에서 `stored=yes` 가 된다. 근거는 `config.cpp` 의 해당
+/// 자리에 적어 뒀다 — 값 비교만 하던 판이 실물에서 깨진 자리다.
 ///
 /// **이 함수는 블로킹이다** — 포털이 열려 있는 동안 `loop()` 는 돌지 않는다.
 /// 여기서만 괜찮은 이유는 하나다: 이 함수는 부팅 때, **WebSocket 이 붙기

@@ -89,11 +89,17 @@ void setup() {
     // 한 바퀴는 무한정이 아니다: 연결 시도와 포털에 각각 시간 제한이 걸려 있어서
     // (config.cpp 의 T9-C) 실패해도 반드시 돌아오고, 돌아오면 다시 시도한다.
     // ─────────────────────────────────────────────────────────────────────────
+    //
+    // 힙을 같이 찍는 이유: 이 루프는 한 바퀴마다 `WiFiManager`(+DNS 서버 +
+    // 웹서버)를 새로 만들고 부수는데 상한이 없다. 그리고 하트비트의 `heap=` 은
+    // `setup()` 이 끝나야 시작되므로 **이 루프 안에서는 힙이 전혀 안 보인다** —
+    // 화면 없는 기기가 유일하게 오래 머무를 수 있는 자리인데 계측이 0 이 된다.
+    // 누수가 입증된 것은 아니다. 누수가 생기면 보이게 해 두는 것뿐이다.
     uint32_t attempts = 0;
     while (!wifiConnectOrPortal(config)) {
         ++attempts;
-        Serial.printf("wifi: 연결도 설정도 못 했다 (%u번째 실패) — 다시 시도한다\n",
-                      attempts);
+        Serial.printf("wifi: 연결도 설정도 못 했다 (%u번째 실패, heap=%u) — 다시 시도한다\n",
+                      attempts, ESP.getFreeHeap());
     }
 
     Serial.printf("wifi: 연결됨 ssid=\"%s\" ip=%s rssi=%d\n",
