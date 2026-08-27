@@ -1,14 +1,16 @@
-// AI Agent Monitor — CYD 프로토콜 펌웨어 (Task 9: 여전히 화면 없음)
+// AI Agent Monitor — CYD 프로토콜 펌웨어 (Task 12: WebSocket 연결과 mDNS 발견)
 //
-// Task 8 이 확인한 것: 툴체인 · 보드 id · 업로드 경로가 맞아서 보드가 우리가
-// 올린 코드를 실제로 돌린다. Task 9 가 더하는 것: 설정이 재부팅을 견디는가와
-// WiFi 설정 포털이 실제로 뜨는가. 화면 · mDNS · WebSocket · 암호 · 페어링은
-// 여전히 다음 태스크들이고, 판정은 전부 시리얼로만 한다.
+// Task 8 이 확인한 것: 툴체인 · 보드 id · 업로드 경로. Task 9 가 더한 것: 설정
+// 저장과 WiFi 포털. Task 10~11 이 만든 것: E2EE v2 암호 계층과 인증 상태
+// 기계 — 둘 다 순수 모듈이라 여기 연결되지 않은 채였다. Task 12 가 그 둘을
+// 실제 소켓(`Transport`)에 이어붙인다 — 이 프로젝트가 처음으로 `loop()` 안에서
+// 블로킹 호출을 실행하는 지점이다. 화면은 여전히 없다(Task 13~14).
 
 #include <Arduino.h>
 #include <WiFi.h>
 
 #include "config.h"
+#include "transport.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 제약 — `loop()` 한 바퀴는 30초를 넘겨 블로킹하지 않는다. Task 8~15 전부에 걸린다.
@@ -44,8 +46,11 @@ static const uint32_t HEARTBEAT_INTERVAL_MS = 5000;
 
 static uint32_t lastHeartbeatMs = 0;
 
-// 이 기기의 설정. Task 13(페어링)이 토큰을 채우고 Task 12(전송)가 맥 주소를 쓴다.
+// 이 기기의 설정. Task 13(페어링)이 토큰을 채우고 Task 9(포털)가 맥 주소를 쓴다.
 static Config config;
+
+// 맥과의 WebSocket 연결 — mDNS 발견, 재연결 백오프, v2 인증 핸드셰이크.
+static Transport transport;
 
 void setup() {
     Serial.begin(115200);
@@ -105,6 +110,10 @@ void setup() {
     Serial.printf("wifi: 연결됨 ssid=\"%s\" ip=%s rssi=%d\n",
                   WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
                   WiFi.RSSI());
+
+    // WebSocket 이 붙기 전, 부팅 중 한 번만. `MDNS.begin()` 도 여기서 딱 한
+    // 번만 불린다(T12-B, `transport.h` 상단 주석).
+    transport.begin(config);
 }
 
 void loop() {
@@ -119,19 +128,31 @@ void loop() {
         // **여기에 재접속 로직은 없다.** 링크가 끊기면 arduino-esp32 의 WiFi
         // 라이브러리가 스스로 다시 붙으려 한다(`_autoReconnect` 기본값이 true 이고
         // `_isReconnectableReason(reason)` 인 끊김에 한해 재시도한다,
-        // `WiFiGeneric.cpp:1084`). 그 재시도로 돌아오지 못하는 경우 — 공유기가
-        // 아예 사라졌거나 비밀번호가 바뀐 경우 — 를 다루는 것은 Task 12 다.
-        // 지금은 그 상황이 시리얼에 `wifi=down` 으로 보이기만 하면 된다.
+        // `WiFiGeneric.cpp:1084`). **Task 12(이 태스크)도 그 재시도로 돌아오지
+        // 못하는 경우(공유기가 아예 사라졌거나 비밀번호가 바뀐 경우)를 다루지
+        // 않는다** — Task 9 의 이전 버전은 이 자리에서 그것을 Task 12 의 몫으로
+        // 적어 뒀지만, 여기서 여는 것은 WebSocket 소켓이지 WiFi 포털이 아니다.
+        // 포털을 런타임에 다시 여는 길은 `config.h` 의 `wifiConnectOrPortal`
+        // 문서가 이미 "만든다면"으로 조건부로 남겨 둔 미착수 작업이고, 그 상태는
+        // 그대로다 — WiFi 가 영영 끊긴 기기는 `Transport` 가 맥에 붙으려 계속
+        // 재시도하는 동안(백오프가 캡인 30초로 수렴한다) 시리얼에 `wifi=down` 으로
+        // 보이는 것이 오늘의 전부다.
         if (WiFi.isConnected()) {
-            Serial.printf("alive  heap=%u wifi=up rssi=%d\n",
-                          ESP.getFreeHeap(), WiFi.RSSI());
+            Serial.printf("alive  heap=%u wifi=up rssi=%d authStep=%d authorized=%s\n",
+                          ESP.getFreeHeap(), WiFi.RSSI(), (int)transport.authStep(),
+                          transport.authorized() ? "yes" : "no");
         } else {
             Serial.printf("alive  heap=%u wifi=down\n", ESP.getFreeHeap());
         }
     }
 
+    // Task 12 부터 이 자리가 실제로 블로킹할 수 있다 — 최악의 경우와 그것이
+    // 왜 30초 예산 안에 드는지는 `transport.h` 상단 주석. `main.cpp` 는 그
+    // 예산에 하트비트(위)와 아래 `delay(1)` 만 더 얹으므로, 이 파일이 그
+    // 예산 전체를 진 유일한 곳이다.
+    transport.loop();
+
     // 루프를 완전히 비워 두면 같은 코어의 IDLE 태스크가 굶는다. 1ms 는 위
-    // 30초 예산에 아무 영향이 없고, 이 자리는 나중에 `webSocket.loop()` 등이
-    // 들어올 자리다.
+    // 30초 예산에 아무 영향이 없다.
     delay(1);
 }

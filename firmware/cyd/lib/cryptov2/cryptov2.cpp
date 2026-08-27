@@ -1,6 +1,7 @@
 #include "cryptov2.h"
 
 #include <string.h>
+#include <esp_system.h>  // esp_fill_random — v2GenerateKeypair 의 엔트로피 원천.
 
 // monocypher.h 는 `extern "C"` 가드가 없다(davylandman/Monocypher@2.0.6 확인).
 // monocypher.c 는 C 컴파일러가 컴파일해 C 링키지 기호를 내놓는데, 이 파일은
@@ -284,6 +285,15 @@ bool SealedChannel::open(const uint8_t *frame, size_t len, uint8_t *out, size_t 
     haveLastRecv_ = true;
     *outLen = ctLen;
     return true;
+}
+
+void v2GenerateKeypair(uint8_t secret[32], uint8_t pub[32]) {
+    esp_fill_random(secret, 32);
+    crypto_x25519_public_key(pub, secret);
+}
+
+void v2Wipe(uint8_t *buf, size_t len) {
+    crypto_wipe(buf, len);
 }
 
 String toHex(const uint8_t *data, size_t len) {

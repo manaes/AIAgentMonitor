@@ -1,0 +1,156 @@
+// AI Agent Monitor — CYD 펌웨어: WebSocket 연결과 mDNS 발견 (Task 12).
+//
+// 이 파일이 여는 것: 이 프로젝트에서 처음으로 실제 소켓을 잡고, 처음으로
+// `loop()` 한 바퀴 안에서 블로킹 호출을 실행하는 코드다. `main.cpp` 상단의
+// 30초 예산(WebSocket Ping/Pong, `src-tauri/src/lan/server.rs` 의
+// `PING_INTERVAL`·`IDLE_TIMEOUT`)이 실제로 깨질 수 있는 첫 자리이기도 하다.
+//
+// ── 예산 안에서 실제로 블로킹하는 자리들(실측) ──────────────────────────────
+//
+// 1. `MDNS.queryService("aim", "tcp")` — 최대 3000ms.
+//    `.pio/libdeps/cyd/../framework-arduinoespressif32/libraries/ESPmDNS/
+//    src/ESPmDNS.cpp:216` 이 `mdns_query_ptr(srv, prt, 3000, 20, &results)`
+//    를 하드코딩한다. `queryService()` 시그니처 자체에 타임아웃 인자가 없다
+//    (`ESPmDNS.h:101`) — 이 3000ms 는 우리가 조절할 수 없는, 라이브러리가
+//    정한 상수다.
+//
+// 2. `WebSocketsClient::loop()` 의 최초 `tcp->connect()` — 최대 5000ms.
+//    `.pio/libdeps/cyd/WebSockets/src/WebSocketsClient.cpp:331` 이
+//    `_client.tcp->connect(host, port, WEBSOCKETS_TCP_TIMEOUT)` 를 부르고,
+//    `WEBSOCKETS_TCP_TIMEOUT` 은 `WebSockets.h:125` 에서 `5000` 으로
+//    고정된다(ESP32 매크로 분기, 다른 값으로 정의된 곳이 코드베이스에 없다
+//    — `grep -rn WEBSOCKETS_TCP_TIMEOUT` 로 확인).
+//
+// 3. 연결된 뒤 프레임을 읽는 `readCb()`(`WebSockets.cpp:596-661`) — **한
+//    번에 열려 있는 상한이 아니라 무응답(idle) 상한**이다: 바이트가 조금이라도
+//    들어올 때마다 `t = millis()` 로 시계를 다시 감는다(`:644-645`). 즉 상대가
+//    5000ms 안에 한 바이트라도 계속 보내는 한 이 호출은 끝나지 않는다 — 이
+//    자체가 "블로킹 호출에 상한이 없는" 경우다. **다만 이 태스크가 실제로
+//    주고받는 프레임(HELLO2/AUTH2/CODE2/PROOF2 요청, `AwaitingCode2`/
+//    `Nonce2`/`Authorized2`/`Denied`/`Rejected` 응답)은 전부 1KB 를 크게
+//    밑도는 JSON/hex 한 줄이다(`docs`/`pairing.rs:147-170` 의 실제 포맷).**
+//    그 크기의 프레임은 한 TCP 세그먼트로 통째로 오거나 전혀 안 오므로,
+//    실질적인 단일 호출 상한은 다시 idle 상한인 5000ms 로 접힌다. 이 여유는
+//    **인증 단계에만** 해당한다 — 나중 태스크가 봉인된 스냅샷(최대 64KiB,
+//    `server.rs` 의 `MAX_FRAME_BYTES`)을 받기 시작하면 이 문서의 결론을
+//    다시 확인해야 한다. `handleClientData()`(`WebSocketsClient.cpp:653`)가
+//    `tcp->available() > 0` 일 때만 위 경로에 들어가므로, 아무것도 안 왔을
+//    때는 즉시 반환한다 — 대기 없이 통과한다.
+//
+// `Transport::loop()` 한 바퀴가 실제로 겹칠 수 있는 조합은 (1)+(2) 뿐이다
+// (mDNS 조회는 대상을 새로 고를 때만, connect 는 그 직후 같은 판에서) —
+// 최악 3000+5000 = 8000ms, 30000ms 예산 안에 22000ms 여유가 남는다. (3)은
+// 이미 연결된 이후에만 일어나고 (1)/(2) 와 같은 판에 겹치지 않는다.
+//
+// `main.cpp` 는 이 위에 하트비트(5000ms 주기 출력)와 `delay(1)` 만 얹으므로
+// 이 예산 계산이 그대로 `loop()` 전체의 예산이다.
+//
+// ── mDNS 는 한 번만 시작한다(T12-B) ──────────────────────────────────────
+// `MDNS.begin()` 은 `mdns_init()`(`tools/sdk/esp32/include/mdns/include/
+// mdns.h:107`)을 부른다. 이 esp-idf mDNS 컴포넌트는 이 프레임워크 패키지에
+// **미리 컴파일된 정적 라이브러리**(`libmdns.a`)로만 들어 있어 소스가 없다
+// — 두 번 부르는 것이 안전한지(재초기화인지, 리소스가 새는지) 헤더 주석도
+// 밝히지 않고, 바이너리에서 뽑은 문자열로도 확인되지 않는다("확인했다"고
+// 적을 근거가 없다는 뜻이다). 그래서 안전 여부를 추정하는 대신 **아예 두 번
+// 부르지 않는다** — `begin()` 에서 딱 한 번만 호출하고, 재발견이 필요하면
+// `MDNS.queryService()` 만 다시 부른다(이 함수는 몇 번을 불러도 되게
+// 설계돼 있다 — 매번 이전 결과를 free 하고 새로 채운다, `ESPmDNS.cpp:198`).
+//
+// ── AuthStep 을 그대로 드러낸다(T12-C) ────────────────────────────────────
+// 브리프의 `bool authorized()` 만으로는 `NeedsPairing`(정상 거절 — 코드
+// 다시 입력)과 `Failed`(이 v2-only 펌웨어가 이해 못 하는 응답 — 사람이
+// 봐야 한다)를 가릴 수 없다. Task 14(페어링 키패드)는 "연결 중" · "코드
+// 필요" · "실패" · "인가됨" 을 다르게 그려야 하므로 `authStep()` 을 더한다.
+// `authorized()` 는 그 위에 얹은 얇은 편의 함수로 남긴다(브리프 시그니처와
+// 호환).
+//
+// ── T12-D: "깜빡이지 않는다"는 이 태스크에서 확인할 수 없다 ─────────────
+// 브리프 Step 2 의 마지막 항목("맥에서 기기를 해제하면 키패드 화면으로
+// 가고 깜빡이지 않는다")은 화면이 있어야 관찰 가능한 성질이다. 디스플레이는
+// Task 13~14 이전에는 존재하지 않는다 — 이 파일은 그 항목을 "된다"고
+// 주장하지 않는다. 시리얼로 확인 가능한 나머지 셋(mDNS 발견·저장된 IP
+// 대체·백오프 재연결)만 이 태스크의 검증 대상이다.
+
+#pragma once
+
+#include <Arduino.h>
+#include <WebSocketsClient.h>
+
+#include "authfsm.h"
+#include "config.h"
+#include "cryptov2.h"
+
+class Transport {
+  public:
+    Transport();
+    ~Transport();
+
+    /// 한 번만 부른다 — 보통 `setup()` 에서, WiFi 연결 뒤. `MDNS.begin()`
+    /// 도 여기서 딱 한 번 불린다(위 T12-B).
+    void begin(Config &config);
+
+    /// 매 `loop()` 마다 부른다. 한 바퀴가 실제로 블로킹할 수 있는 최댓값과
+    /// 근거는 이 파일 상단의 예산 분석을 보라.
+    void loop();
+
+    /// 세션 키가 서고 스냅샷을 구독할 수 있는 상태인가. `authStep() ==
+    /// AuthStep::Subscribed` 의 얇은 편의 함수 — 브리프가 정한 시그니처를
+    /// 유지하면서, Task 14 가 실제로 필요로 하는 정밀도는 `authStep()` 이
+    /// 준다.
+    bool authorized() const;
+
+    /// 지금 인증 핸드셰이크의 상태. 아직 소켓조차 없을 때는 "다음에 연결되면
+    /// 보낼 동사"를 미리 담아 둔다(`SendAuth2` 또는 `NeedsPairing`) — 아직
+    /// 아무것도 보내지 않았다는 뜻이지 이미 보냈다는 뜻이 아니다. 소켓이 붙어
+    /// 실제로 그 동사를 보내고 나면 응답에 따라 다음 값으로 넘어간다.
+    AuthStep authStep() const { return authStep_; }
+
+  private:
+    Config *config_ = nullptr;
+    WebSocketsClient webSocket_;
+
+    AuthStep authStep_ = AuthStep::NeedsPairing;
+
+    /// `NeedsPairing`/`Failed` 로 확정된 뒤 재연결을 완전히 멈춘 상태
+    /// (`transportlogic.h` 의 `ReconnectDecision::Hold`). "아직 페어링을
+    /// 한 번도 안 한 상태"(토큰이 아예 없음)와는 다르다 — 그건 매 `loop()`
+    /// 마다 다시 확인하지, 여기서 래치하지 않는다(토큰이 나중에 채워지면
+    /// 다음 `loop()` 에서 바로 다시 시도해야 하므로). 자세한 구분은
+    /// `transport.cpp` 의 `loop()` 주석.
+    bool holding_ = false;
+
+    bool mdnsStarted_ = false;
+
+    /// 이번 판에서 시도 중인 호스트. 비어 있으면 "새로 골라야 한다".
+    String targetHost_;
+    uint32_t connectStartedAtMs_ = 0;
+
+    uint32_t backoffAttempt_ = 0;
+    uint32_t nextAttemptAtMs_ = 0;
+
+    /// 이번 연결의 임시 X25519 키쌍. 연결마다 새로 만든다 — transcript(스펙
+    /// §4)가 이 키쌍에 묶이므로 재사용하면 재연결마다 같은 transcript 가
+    /// 나와 재생 저항이 약해진다.
+    uint8_t mySecret_[32] = {0};
+    uint8_t myPublic_[32] = {0};
+
+    /// `SendProof2` 단계에서 미리 유도해 둔 세션 키. `Authorized2` 가
+    /// 오면 이 값으로 `SealedChannel` 을 만든다 — `authOnReply` 는 그
+    /// 시점에 이미 사라진 `ss`/논스를 다시 볼 수 없으므로, 여기서
+    /// 들고 있어야 한다.
+    uint8_t pendingS2c_[32] = {0};
+    uint8_t pendingC2s_[32] = {0};
+
+    SealedChannel *channel_ = nullptr;
+
+    void onWsEvent(WStype_t type, uint8_t *payload, size_t length);
+    void handleSocketConnected();
+    void handleSocketDisconnected();
+    void handleReply(const String &text);
+    void sendProof2(const ReplyView &reply);
+    void finishHandshake(const ReplyView &reply);
+    void sendVerb(const char *prefix, const uint8_t *data, size_t len);
+    void setAuthStep(AuthStep step);
+    void scheduleNextAttempt();
+    String chooseTarget();
+};
