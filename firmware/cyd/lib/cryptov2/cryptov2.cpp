@@ -53,6 +53,11 @@ static void hmacSha256(const uint8_t *key, size_t keyLen,
 /// `ikm` 도 최대 두 조각(`ikm1||ikm2`)으로 받는다 — `derive_session_keys` 의
 /// `ss || token` 을 이어붙일 스택 버퍼가 따로 필요 없다. HMAC 의 incremental
 /// 업데이트가 그 이어붙이기를 대신한다.
+///
+/// **딱 두 조각까지만 지원한다** — 시그니처에 드러나지 않는 제약이다. 지금
+/// 호출부 넷(`v2DeriveSessionKeys` 둘, `v2DerivePairKey`)은 전부 한두 조각이라
+/// 문제없지만, 세 조각짜리 ikm 이 필요해지면 이 함수의 시그니처부터 늘려야
+/// 한다 — 조용히 세 번째 조각을 누락시키는 호출을 만들면 안 된다.
 static void hkdf32(const uint8_t *ikm1, size_t ikm1Len,
                     const uint8_t *ikm2, size_t ikm2Len,
                     const uint8_t *salt, size_t saltLen,

@@ -10,12 +10,17 @@
 // `SealedChannel` 하나로만 구성된다.
 
 // (파일 위치 참고) 브리프는 이 파일을 `firmware/cyd/src/` 에 두라고 했지만
-// `lib/cryptov2/` 로 옮겼다 — `src/` 에 두면 `pio test -e cyd` 가 이 모듈과
-// `src/main.cpp` 를 함께 링크하는데, 이 프로젝트의 PlatformIO(6.1.19) 는 임베디드
-// 테스트 빌드에서 `main.cpp` 를 자동으로 빼 주지 않아 `setup()`/`loop()` 이중
-// 정의로 링크가 실패한다(실측). `lib/` 는 메인 펌웨어·테스트 양쪽에 항상 함께
-// 빌드·링크되면서 `main.cpp` 는 건드리지 않으므로, 이 파일이 원래도 전송·설정과
-// 무관한 순수 모듈이라는 성격과도 맞는다. `main.cpp` 는 Task 11(페어링)이 이
+// `lib/cryptov2/` 로 옮겼다.
+//
+// `src/` 에 두면 `pio test -e cyd` 가 `src/main.cpp` 의 `setup()`/`loop()` 와
+// `test/test_cryptov2.cpp` 의 `setup()`/`loop()` 를 함께 링크해 이중 정의로
+// 실패한다(실측). 이 PlatformIO(6.1.19) 는 테스트 빌드의 모든 컴파일에
+// `-DUNIT_TEST -DPIO_UNIT_TESTING` 를 실제로 정의해 준다(`-vvv` 컴파일
+// 커맨드라인으로 확인) — 그러니 `main.cpp` 를 `#ifndef UNIT_TEST` 로 감싸
+// 브리프대로 `src/` 에 두는 방법도 실제로 가능했다. 그런데도 `lib/` 를 골랐다:
+// 이 모듈은 원래 전송·설정과 무관한 순수 모듈(스펙 §9)이라 `lib/` 라는 위치와
+// 성격이 맞고, `main.cpp` 를 매크로 가드로라도 건드리지 않는 편이 Task 8~9
+// 산출물에 대한 변경을 0으로 유지한다. `main.cpp` 는 Task 11(페어링)이 이
 // 모듈을 실제로 연결할 때 처음 `#include` 하게 된다.
 
 #pragma once
