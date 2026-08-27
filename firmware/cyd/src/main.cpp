@@ -1,16 +1,36 @@
-// AI Agent Monitor — CYD 프로토콜 펌웨어 (Task 12: WebSocket 연결과 mDNS 발견)
+// AI Agent Monitor — CYD 프로토콜 펌웨어 (Task 14a: 디스플레이·터치 브링업)
 //
 // Task 8 이 확인한 것: 툴체인 · 보드 id · 업로드 경로. Task 9 가 더한 것: 설정
 // 저장과 WiFi 포털. Task 10~11 이 만든 것: E2EE v2 암호 계층과 인증 상태
 // 기계 — 둘 다 순수 모듈이라 여기 연결되지 않은 채였다. Task 12 가 그 둘을
-// 실제 소켓(`Transport`)에 이어붙인다 — 이 프로젝트가 처음으로 `loop()` 안에서
-// 블로킹 호출을 실행하는 지점이다. 화면은 여전히 없다(Task 13~14).
-
+// 실제 소켓(`Transport`)에 이어붙였다 — 이 프로젝트가 처음으로 `loop()` 안에서
+// 블로킹 호출을 실행하는 지점. 화면은 여전히 없었다(Task 13 은 폰트만 구웠다).
+//
+// **Task 14a 가 처음으로 화면을 켠다.** 계획서에 없던 태스크다 — 원래 Task 14
+// 브리프("페어링 키패드")가 LVGL·디스플레이·터치가 이미 초기화돼 있다고
+// 가정하고 곧바로 위젯 코드로 들어가는데, 그 브링업이 어디에도 없었다.
+// 그래서 브링업만 떼어 여기서 먼저 한다 — Task 8 이 세운 "화면 이상이 생겼을
+// 때 핀/드라이버와 UI 로직을 동시에 의심하지 않는다" 원칙과 같은 이유다.
+// **범위는 좁다: 화면에 정적인 글자 한 줄, 터치 좌표 콜백 하나.** 키패드도
+// 페어링 로직도 없다 — 그건 Task 14b 몫이다.
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp32_smartdisplay.h>
 
 #include "config.h"
 #include "transport.h"
+#include "font_ko.h"
+
+// **위 `#include "font_ko.h"` 자체가 실질적인 코드다, 장식이 아니다.**
+// PlatformIO 의 chain LDF 는 소스의 `#include` 문을 보고 어떤 `lib/<name>/`
+// 를 빌드에 끌어올지 정한다 — Task 13 은 헤더 없이 `font_ko.c` 만 만들어
+// 뒀는데(그 시점엔 아무도 참조하지 않아 문제가 없었다), 여기서
+// `extern "C" const lv_font_t font_ko;` 선언만 적어 봤더니(헤더 없이)
+// `#include` 가 없으니 LDF 가 `font_ko.c` 를 아예 컴파일 대상에서 빼 버려서
+// `undefined reference to font_ko` 링크 에러가 실제로 났다(T14a 실측). 그래서
+// `lib/font_ko/font_ko.h` 를 새로 만들어 그 선언을 옮기고 여기서 include
+// 한다 — 브리프의 Files 목록엔 없던 파일이지만, `main.cpp` 를 브리프대로
+// 고치려면 반드시 필요했다.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 제약 — `loop()` 한 바퀴는 30초를 넘겨 블로킹하지 않는다. Task 8~15 전부에 걸린다.
@@ -52,6 +72,62 @@ static Config config;
 // 맥과의 WebSocket 연결 — mDNS 발견, 재연결 백오프, v2 인증 핸드셰이크.
 static Transport transport;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// T14a-A — lv_tick_inc/lv_timer_handler 계측.
+//
+// esp32_smartdisplay README(Step 7)의 예시 그대로 `lv_last_tick` 을 들고
+// 있다가 매 loop() 마다 경과 ms 를 넘긴다. `lvglMaxHandlerUs` 는 하트비트
+// 주기(5초)마다 `lv_timer_handler()` 호출 하나하나의 소요 시간 중 최댓값을
+// 들고 있다가 하트비트 줄에 같이 찍고 0 으로 되돌린다 — 매 호출(대략
+// 1ms 주기, delay(1) 때문에 초당 수백 번)을 전부 찍으면 시리얼이 그 자체로
+// 30초 예산을 위협하는 부담이 되므로, Task 12 가 세운 "loop 한 바퀴 최장
+// 시간을 시리얼로 남긴다" 관례를 그대로 따른다.
+static uint32_t lastLvglTickMs = 0;
+static uint32_t lvglMaxHandlerUs = 0;
+
+// T14a-B — 터치 확인용 최소 콜백. 키패드/위젯 없이 좌표만 시리얼에 찍는다.
+//
+// `esp32_smartdisplay` 는 등록한 `lv_indev_t*` 를 공개 헤더(`esp32_smartdisplay.h`)
+// 로 노출하지 않는다(소스 확인: `esp32_smartdisplay.c` 의 `lv_indev_t *indev;`
+// 는 파일 스코프 전역이지 extern 선언이 아니다) — 그래서 이 파일에서 직접
+// 그 포인터를 얻을 수 없고, LVGL 의 표준 API로 등록된 입력장치 목록을 순회해
+// 찾아야 한다(`setup()` 참고). 콜백 안에서는 `lv_indev_active()`(LVGL v9
+// 공개 API, "Can be used in action functions too" — `lvgl/src/indev/lv_indev.h`)
+// 로 지금 이 이벤트를 일으킨 입력장치를 되찾는다.
+static void onTouchEvent(lv_event_t *e) {
+    (void)e;
+    lv_indev_t *indev = lv_indev_active();
+    if (indev == nullptr) {
+        return;
+    }
+    lv_point_t point;
+    lv_indev_get_point(indev, &point);
+    Serial.printf("touch: x=%d y=%d\n", point.x, point.y);
+}
+
+// T14a — 정적 화면 하나. 키패드도 상태 분기도 없다: font_ko 가 실제로
+// 화면에 그려지는지(한글 렌더링)와 lv_timer_handler() 의 최초 전체 리프레시
+// 시간을 재는 것이 유일한 목적이다. "연결 중" 은 ko-words.txt 의 "연결중"
+// 항목에서 나온 글자들이라 font_ko 서브셋 안에 있다(tools/ko-words.txt).
+static void createStaticScreen() {
+    lv_obj_t *label = lv_label_create(lv_screen_active());
+    lv_obj_set_style_text_font(label, &font_ko, 0);
+    lv_label_set_text(label, "연결 중");
+    lv_obj_center(label);
+
+    // 등록된 포인터형(터치) 입력장치를 전부 찾아 콜백을 건다 — 이 보드는
+    // XPT2046 저항막 터치 하나뿐이라 보통 한 번만 걸린다. LV_EVENT_PRESSED
+    // 는 눌리는 "순간"에 한 번만 온다(누르고 있는 동안 계속 오는
+    // LV_EVENT_PRESSING 이 아니다) — 좌표가 찍히는지만 확인하면 되므로 이걸
+    // 쓴다.
+    lv_indev_t *indev = nullptr;
+    while ((indev = lv_indev_get_next(indev)) != nullptr) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+            lv_indev_add_event_cb(indev, onTouchEvent, LV_EVENT_PRESSED, nullptr);
+        }
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     delay(300);                       // USB 시리얼이 붙을 시간
@@ -60,7 +136,27 @@ void setup() {
                   ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores());
     Serial.printf("flash=%u bytes  free heap=%u\n",
                   ESP.getFlashChipSize(), ESP.getFreeHeap());
-    Serial.println("AI Agent Monitor — CYD 프로토콜 펌웨어 (화면 없음)");
+    Serial.println("AI Agent Monitor — CYD 프로토콜 펌웨어 (Task 14a: 화면 브링업)");
+
+    // ─────────────────────────────────────────────────────────────────────
+    // T14a — 디스플레이·터치 브링업. WiFi 연결/포털보다 먼저 켠다: 포털이
+    // 열리는 동안(사람이 휴대폰으로 공유기를 골라야 하는 몇 분)에도 화면에
+    // 뭔가 떠 있는 편이, "화면이 꺼진 채 멈춘 것처럼 보이는 기기" 보다 낫다.
+    // 이 화면은 WiFi/설정 상태를 전혀 모른다 — 정적인 한 줄만 띄운다는 이
+    // 태스크의 범위를 지키기 위해 일부러 상태를 참조하지 않는다.
+    smartdisplay_init();
+    lastLvglTickMs = millis();
+    createStaticScreen();
+
+    // T14a-A — "부팅 직후 최초 전체 리프레시" 시간. 위젯을 막 만든 직후라
+    // 화면 전체가 dirty 상태이므로, 이 첫 lv_timer_handler() 호출이 곧 첫
+    // 전체 리프레시다. loop() 의 계측(아래)과 같은 micros() 방식을 쓴다.
+    const uint32_t firstRefreshStartUs = micros();
+    lv_timer_handler();
+    const uint32_t firstRefreshUs = micros() - firstRefreshStartUs;
+    Serial.printf(
+        "lvgl: 최초 전체 리프레시 %u us (30초 예산 대비 %.4f%%)\n",
+        firstRefreshUs, firstRefreshUs / 300000.0);
 
     // `stored` 와 `paired` 를 따로 찍는다. 둘은 다른 질문이고(config.h 참고),
     // Task 14 는 이 조합으로 초기 설정 안내와 페어링 키패드를 갈라 띄운다.
@@ -119,6 +215,21 @@ void setup() {
 void loop() {
     const uint32_t now = millis();
 
+    // T14a-A — LVGL 티커 갱신과 화면 그리기. esp32_smartdisplay README(Step 7)
+    // 가 보인 그대로: 경과 ms 를 lv_tick_inc() 에 넘기고 매 루프 lv_timer_handler()
+    // 를 부른다. 이 파일에는 아직 `transport.loop()`(WebSocket) 와 같은
+    // `loop()` 안에서 경쟁하는 것 말고는 없다 — 이 둘을 실제로 한 `loop()` 에서
+    // 같이 재는 것은 Task 14b/15 몫이고, 그때 아래 최댓값이 다시 확인돼야 한다.
+    lv_tick_inc(now - lastLvglTickMs);
+    lastLvglTickMs = now;
+
+    const uint32_t lvglHandlerStartUs = micros();
+    lv_timer_handler();
+    const uint32_t lvglHandlerUs = micros() - lvglHandlerStartUs;
+    if (lvglHandlerUs > lvglMaxHandlerUs) {
+        lvglMaxHandlerUs = lvglHandlerUs;
+    }
+
     // 부호 없는 뺄셈이라 millis() 가 약 49.7일에 한 번 넘어가도 그대로 맞다.
     if (now - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
         lastHeartbeatMs = now;
@@ -138,12 +249,16 @@ void loop() {
         // 재시도하는 동안(백오프가 캡인 30초로 수렴한다) 시리얼에 `wifi=down` 으로
         // 보이는 것이 오늘의 전부다.
         if (WiFi.isConnected()) {
-            Serial.printf("alive  heap=%u wifi=up rssi=%d authStep=%d authorized=%s\n",
-                          ESP.getFreeHeap(), WiFi.RSSI(), (int)transport.authStep(),
-                          transport.authorized() ? "yes" : "no");
+            Serial.printf(
+                "alive  heap=%u wifi=up rssi=%d authStep=%d authorized=%s lvglMaxUs=%u\n",
+                ESP.getFreeHeap(), WiFi.RSSI(), (int)transport.authStep(),
+                transport.authorized() ? "yes" : "no", lvglMaxHandlerUs);
         } else {
-            Serial.printf("alive  heap=%u wifi=down\n", ESP.getFreeHeap());
+            Serial.printf("alive  heap=%u wifi=down lvglMaxUs=%u\n",
+                          ESP.getFreeHeap(), lvglMaxHandlerUs);
         }
+        // 다음 5초 구간의 최댓값을 새로 잰다 — 하트비트 간격마다 리셋.
+        lvglMaxHandlerUs = 0;
     }
 
     // Task 12 부터 이 자리가 실제로 블로킹할 수 있다 — 최악의 경우와 그것이
