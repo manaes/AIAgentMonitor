@@ -1098,6 +1098,18 @@ alive  heap=…
 `chip=ESP32` 와 `flash=4194304`(4MB)가 스펙 2장의 값과 맞는지 확인한다.
 **어긋나면 보드 id 나 파티션 설정이 틀린 것이고, 여기서 잡는 편이 나중보다 훨씬 싸다.**
 
+> **실측으로 정정됨(2026-08-27, Task 8 리포트 §5).** `flash=4194304` 는 정확히
+> 일치했다. 그러나 `chip=` 은 **`ESP32` 가 아니라 `ESP32-D0WD-V3` 가 찍힌다** —
+> `ESP.getChipModel()` 이 계열명이 아니라 부품번호를 돌려주기 때문이고, 보드 id
+> 문제도 파티션 문제도 **아니다**(esptool 이 독립적으로 `Detecting chip type...
+> ESP32` 로 확인). 이 줄을 그대로 읽고 보드 정의를 갈아엎으면 없는 버그를 쫓게 된다.
+>
+> 이후 태스크가 `chip=` 을 **판정에 쓴다면**: `"ESP32"` 완전일치도, 단순
+> `startsWith("ESP32")` 도 안 된다 — S3/S2/C3 가 각각 `"ESP32-S3"`/`"ESP32-S2"`/
+> `"ESP32-C3"` 를 돌려주므로 접두사 비교는 엉뚱한 칩을 통과시킨다
+> (`framework-arduinoespressif32/cores/esp32/Esp.cpp:270-312`).
+> **`esp_chip_info().model == CHIP_ESP32` 를 쓴다.**
+
 업로드가 `Resource busy` 로 실패하면 Arduino IDE 의 Serial Monitor 가 포트를
 잡고 있는 것이다 — 그 창만 닫으면 된다(IDE 전체를 끌 필요 없다).
 
