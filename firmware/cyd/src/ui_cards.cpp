@@ -113,8 +113,8 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_bg_opa(cw.card, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(cw.card, 8, 0);
         lv_obj_set_style_border_width(cw.card, 0, 0);
-        lv_obj_set_style_pad_top(cw.card, 16, 0);
-        lv_obj_set_style_pad_bottom(cw.card, 16, 0);
+        lv_obj_set_style_pad_top(cw.card, 8, 0);
+        lv_obj_set_style_pad_bottom(cw.card, 8, 0);
         lv_obj_set_style_pad_left(cw.card, 8, 0);
         lv_obj_set_style_pad_right(cw.card, 8, 0);
         lv_obj_set_flex_flow(cw.card, LV_FLEX_FLOW_COLUMN);
@@ -126,6 +126,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_bg_opa(topRow, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(topRow, 0, 0);
         lv_obj_set_style_pad_all(topRow, 0, 0);
+        lv_obj_set_style_pad_bottom(topRow, 4, 0);
         lv_obj_set_flex_flow(topRow, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(topRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
