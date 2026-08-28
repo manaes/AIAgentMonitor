@@ -47,20 +47,25 @@ const char *getAgentName(SnapshotAgentKind kind) {
     }
 }
 
-// 리셋 카운트다운 포맷팅
+// 리셋 카운트다운 포맷팅 (예: "4h 56m 29s", "2d 4h 12m")
 void formatResetCountdown(uint64_t resetEpochSec, uint64_t currentEpochSec, char *buf, size_t bufSize) {
     if (resetEpochSec <= currentEpochSec) {
-        snprintf(buf, bufSize, "초기화 대기");
+        snprintf(buf, bufSize, "0s");
         return;
     }
     uint64_t diff = resetEpochSec - currentEpochSec;
-    uint32_t hours = (uint32_t)(diff / 3600);
+    uint32_t days = (uint32_t)(diff / 86400);
+    uint32_t hours = (uint32_t)((diff % 86400) / 3600);
     uint32_t mins = (uint32_t)((diff % 3600) / 60);
-    if (hours > 0) {
-        snprintf(buf, bufSize, "%u시간 %u분뒤 초기화", (unsigned)hours, (unsigned)mins);
+    uint32_t secs = (uint32_t)(diff % 60);
+    if (days > 0) {
+        snprintf(buf, bufSize, "%ud %uh %um", (unsigned)days, (unsigned)hours, (unsigned)mins);
+    } else if (hours > 0) {
+        snprintf(buf, bufSize, "%uh %um %us", (unsigned)hours, (unsigned)mins, (unsigned)secs);
+    } else if (mins > 0) {
+        snprintf(buf, bufSize, "%um %us", (unsigned)mins, (unsigned)secs);
     } else {
-        uint32_t secs = (uint32_t)(diff % 60);
-        snprintf(buf, bufSize, "%u분 %u초뒤 초기화", (unsigned)mins, (unsigned)secs);
+        snprintf(buf, bufSize, "%us", (unsigned)secs);
     }
 }
 
@@ -72,8 +77,8 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     }
 
     g_cardsRoot = lv_obj_create(parent);
-    lv_obj_set_size(g_cardsRoot, lv_pct(100), 288);
-    lv_obj_set_pos(g_cardsRoot, 0, 30);
+    lv_obj_set_size(g_cardsRoot, lv_pct(100), lv_pct(100));
+    lv_obj_set_pos(g_cardsRoot, 0, 0);
     lv_obj_set_style_bg_opa(g_cardsRoot, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_cardsRoot, 0, 0);
     lv_obj_set_style_pad_all(g_cardsRoot, 4, 0);
@@ -125,7 +130,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_text_color(cw.rateLabel, lv_color_hex(0x0a84ff), 0);
         lv_label_set_text(cw.rateLabel, "");
 
-        // 5시간 쿼터 통합 라벨 (예: "5h 20%남음 4시간 55분뒤 초기화")
+        // 5시간 쿼터 통합 라벨 (예: "5h 100% (4h 56m 29s)")
         cw.usage5hLabel = lv_label_create(cw.card);
         lv_obj_set_style_text_font(cw.usage5hLabel, &font_ko, 0);
         lv_obj_set_style_text_color(cw.usage5hLabel, lv_color_hex(0x8e8e93), 0);
@@ -138,7 +143,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_radius(cw.bar5h, 3, 0);
         lv_bar_set_range(cw.bar5h, 0, 100);
 
-        // 주간 쿼터 통합 라벨 (예: "주간 80%남음 2일뒤 초기화")
+        // 주간 쿼터 통합 라벨 (예: "wk 80% (2d 4h 12m)")
         cw.usageWkLabel = lv_label_create(cw.card);
         lv_obj_set_style_text_font(cw.usageWkLabel, &font_ko, 0);
         lv_obj_set_style_text_color(cw.usageWkLabel, lv_color_hex(0x8e8e93), 0);
@@ -205,9 +210,9 @@ void uiCardsUpdate(const Transport &transport) {
 
         char uBuf[128];
         if (resetBuf[0] != '\0') {
-            snprintf(uBuf, sizeof(uBuf), "5h %.0f%%남음 %s", rem5h, resetBuf);
+            snprintf(uBuf, sizeof(uBuf), "5h %.0f%% (%s)", rem5h, resetBuf);
         } else {
-            snprintf(uBuf, sizeof(uBuf), "5h %.0f%%남음", rem5h);
+            snprintf(uBuf, sizeof(uBuf), "5h %.0f%%", rem5h);
         }
         lv_label_set_text(cw.usage5hLabel, uBuf);
         lv_obj_set_style_text_color(cw.usage5hLabel, getPctColor(pct5h), 0);
@@ -233,9 +238,9 @@ void uiCardsUpdate(const Transport &transport) {
 
             char wBuf[128];
             if (resetWkBuf[0] != '\0') {
-                snprintf(wBuf, sizeof(wBuf), "주간 %.0f%%남음 %s", remWk, resetWkBuf);
+                snprintf(wBuf, sizeof(wBuf), "wk %.0f%% (%s)", remWk, resetWkBuf);
             } else {
-                snprintf(wBuf, sizeof(wBuf), "주간 %.0f%%남음", remWk);
+                snprintf(wBuf, sizeof(wBuf), "wk %.0f%%", remWk);
             }
             lv_label_set_text(cw.usageWkLabel, wBuf);
             lv_obj_set_style_text_color(cw.usageWkLabel, getPctColor(pctWk), 0);

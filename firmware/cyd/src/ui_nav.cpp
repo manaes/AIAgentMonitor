@@ -1,40 +1,17 @@
-// AI Agent Monitor — CYD 펌웨어: 상단 탭 네비게이션 및 화면 전환 컨트롤러 (Task 15b).
+// AI Agent Monitor — CYD 펌웨어: 좌우 스와이프 제스처 화면 전환 컨트롤러 (Tileview).
 #include "ui_nav.h"
 
-#include "font_ko.h"
 #include "ui_cards.h"
 #include "ui_sessions.h"
 #include "ui_pairing.h"
 
 namespace {
 
-lv_obj_t *g_navBar = nullptr;
-lv_obj_t *g_btnCards = nullptr;
-lv_obj_t *g_btnSessions = nullptr;
-lv_obj_t *g_labelCards = nullptr;
-lv_obj_t *g_labelSessions = nullptr;
+lv_obj_t *g_tileview = nullptr;
+lv_obj_t *g_tileCards = nullptr;
+lv_obj_t *g_tileSessions = nullptr;
 
-UiView g_currentView = UiView::Cards;
 int g_navVisibleCache = -1;  // -1=미적용, 0=숨김, 1=표시
-
-void updateTabStyles() {
-    if (g_currentView == UiView::Cards) {
-        lv_obj_set_style_bg_color(g_btnCards, lv_color_hex(0x0a84ff), 0);
-        lv_obj_set_style_bg_color(g_btnSessions, lv_color_hex(0x2c2c2e), 0);
-    } else {
-        lv_obj_set_style_bg_color(g_btnCards, lv_color_hex(0x2c2c2e), 0);
-        lv_obj_set_style_bg_color(g_btnSessions, lv_color_hex(0x0a84ff), 0);
-    }
-}
-
-void onTabClicked(lv_event_t *e) {
-    lv_obj_t *target = (lv_obj_t *)lv_event_get_target(e);
-    if (target == g_btnCards) {
-        uiNavSetView(UiView::Cards);
-    } else if (target == g_btnSessions) {
-        uiNavSetView(UiView::Sessions);
-    }
-}
 
 }  // namespace
 
@@ -44,59 +21,36 @@ void uiNavCreate(Transport &transport) {
     // 1. 페어링 화면 초기화
     uiPairingCreate(transport);
 
-    // 2. 카드 및 세션 뷰 생성
-    uiCardsCreate(screen);
-    uiSessionsCreate(screen);
+    // 2. 풀스크린 좌우 스와이프 Tileview 생성 (상단 탭 바 제거)
+    g_tileview = lv_tileview_create(screen);
+    lv_obj_set_size(g_tileview, LV_HOR_RES, LV_VER_RES);
+    lv_obj_set_pos(g_tileview, 0, 0);
+    lv_obj_set_style_bg_opa(g_tileview, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(g_tileview, 0, 0);
+    lv_obj_set_style_pad_all(g_tileview, 0, 0);
+    lv_obj_set_scrollbar_mode(g_tileview, LV_SCROLLBAR_MODE_OFF);
 
-    // 3. 상단 탭 네비게이션 바 생성
-    g_navBar = lv_obj_create(screen);
-    lv_obj_set_size(g_navBar, LV_HOR_RES, 32);
-    lv_obj_set_pos(g_navBar, 0, 0);
-    lv_obj_set_style_bg_color(g_navBar, lv_color_hex(0x1c1c1e), 0);
-    lv_obj_set_style_border_width(g_navBar, 0, 0);
-    lv_obj_set_style_pad_all(g_navBar, 2, 0);
-    lv_obj_set_flex_flow(g_navBar, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(g_navBar, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    // 타일 0,0: 카드 뷰 (오른쪽 스와이프 허용)
+    g_tileCards = lv_tileview_add_tile(g_tileview, 0, 0, LV_DIR_RIGHT);
+    lv_obj_set_style_pad_all(g_tileCards, 0, 0);
+    uiCardsCreate(g_tileCards);
 
-    // 카드 탭 버튼
-    g_btnCards = lv_button_create(g_navBar);
-    lv_obj_set_size(g_btnCards, 112, 26);
-    lv_obj_set_style_radius(g_btnCards, 5, 0);
-    lv_obj_set_style_border_width(g_btnCards, 0, 0);
-    lv_obj_add_event_cb(g_btnCards, onTabClicked, LV_EVENT_CLICKED, nullptr);
+    // 타일 1,0: 세션 목록 뷰 (왼쪽 스와이프 허용)
+    g_tileSessions = lv_tileview_add_tile(g_tileview, 1, 0, LV_DIR_LEFT);
+    lv_obj_set_style_pad_all(g_tileSessions, 0, 0);
+    uiSessionsCreate(g_tileSessions);
 
-    g_labelCards = lv_label_create(g_btnCards);
-    lv_obj_set_style_text_font(g_labelCards, &font_ko, 0);
-    lv_label_set_text(g_labelCards, "카드");
-    lv_obj_center(g_labelCards);
-
-    // 세션 탭 버튼
-    g_btnSessions = lv_button_create(g_navBar);
-    lv_obj_set_size(g_btnSessions, 112, 26);
-    lv_obj_set_style_radius(g_btnSessions, 5, 0);
-    lv_obj_set_style_border_width(g_btnSessions, 0, 0);
-    lv_obj_add_event_cb(g_btnSessions, onTabClicked, LV_EVENT_CLICKED, nullptr);
-
-    g_labelSessions = lv_label_create(g_btnSessions);
-    lv_obj_set_style_text_font(g_labelSessions, &font_ko, 0);
-    lv_label_set_text(g_labelSessions, "세션");
-    lv_obj_center(g_labelSessions);
-
-    // 초기 상태: 카드 뷰 선택 및 탭 바 숨김
-    updateTabStyles();
-    uiNavSetView(UiView::Cards);
-    lv_obj_add_flag(g_navBar, LV_OBJ_FLAG_HIDDEN);
+    // 초기 상태: Tileview 숨김 (페어링 완료 시 표시)
+    lv_obj_add_flag(g_tileview, LV_OBJ_FLAG_HIDDEN);
 }
 
 void uiNavSetView(UiView view) {
-    g_currentView = view;
-    updateTabStyles();
-    if (view == UiView::Cards) {
-        uiCardsSetVisible(true);
-        uiSessionsSetVisible(false);
-    } else {
-        uiCardsSetVisible(false);
-        uiSessionsSetVisible(true);
+    if (g_tileview != nullptr) {
+        if (view == UiView::Cards && g_tileCards != nullptr) {
+            lv_obj_set_tile(g_tileview, g_tileCards, LV_ANIM_ON);
+        } else if (view == UiView::Sessions && g_tileSessions != nullptr) {
+            lv_obj_set_tile(g_tileview, g_tileSessions, LV_ANIM_ON);
+        }
     }
 }
 
@@ -104,21 +58,18 @@ void uiNavUpdate(Transport &transport) {
     const bool isSubscribed = (transport.authStep() == AuthStep::Subscribed);
 
     if (isSubscribed) {
-        // 인가 완료된 상태: 탭 바 및 데이터 뷰 표시
+        // 인가 완료된 상태: 좌우 스와이프 Tileview 활성화
         if (g_navVisibleCache != 1) {
             g_navVisibleCache = 1;
-            lv_obj_clear_flag(g_navBar, LV_OBJ_FLAG_HIDDEN);
-            uiNavSetView(g_currentView);
+            lv_obj_clear_flag(g_tileview, LV_OBJ_FLAG_HIDDEN);
         }
         uiCardsUpdate(transport);
         uiSessionsUpdate(transport);
     } else {
-        // 페어링 또는 재인증 중: 탭 바 및 데이터 뷰 숨김, 페어링 UI 표시
+        // 페어링 또는 재인증 중: Tileview 숨김, 페어링 UI 표시
         if (g_navVisibleCache != 0) {
             g_navVisibleCache = 0;
-            lv_obj_add_flag(g_navBar, LV_OBJ_FLAG_HIDDEN);
-            uiCardsSetVisible(false);
-            uiSessionsSetVisible(false);
+            lv_obj_add_flag(g_tileview, LV_OBJ_FLAG_HIDDEN);
         }
     }
 

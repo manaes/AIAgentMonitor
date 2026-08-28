@@ -75,8 +75,8 @@ lv_obj_t *uiSessionsCreate(lv_obj_t *parent) {
     }
 
     g_sessionsRoot = lv_obj_create(parent);
-    lv_obj_set_size(g_sessionsRoot, lv_pct(100), 288);
-    lv_obj_set_pos(g_sessionsRoot, 0, 30);
+    lv_obj_set_size(g_sessionsRoot, lv_pct(100), lv_pct(100));
+    lv_obj_set_pos(g_sessionsRoot, 0, 0);
     lv_obj_set_style_bg_opa(g_sessionsRoot, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_sessionsRoot, 0, 0);
     lv_obj_set_style_pad_all(g_sessionsRoot, 4, 0);
