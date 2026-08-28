@@ -135,12 +135,8 @@ void onKeypadEvent(lv_event_t *e) {
         if (g_typedDigits.length() > 0) {
             g_typedDigits.remove(g_typedDigits.length() - 1);
         }
-    } else if (strcmp(txt, "확인") == 0) {
-        // "확인" 은 refreshConfirmEnabled() 가 6자리 미만일 때 이미
-        // disabled 로 걸어 두지만, 여기서 길이를 한 번 더 본다 — disabled
-        // 버튼이 이벤트를 안 낸다는 것을 이 콜백이 직접 확인하지 않았고,
-        // 잘못된 길이의 코드를 submitCode() 로 흘려보내는 것보다는 방어
-        // 검사 하나가 싸다.
+    } else if (strcmp(txt, "OK") == 0 || strcmp(txt, "확인") == 0) {
+        // "OK" 버튼 클릭 시 6자리가 입력되어 있으면 submitCode 호출
         if (g_typedDigits.length() == CODE_DIGITS) {
             transport->submitCode(g_typedDigits);
             g_typedDigits = "";
