@@ -126,7 +126,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_bg_opa(topRow, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(topRow, 0, 0);
         lv_obj_set_style_pad_all(topRow, 0, 0);
-        lv_obj_set_style_pad_bottom(topRow, 4, 0);
+        lv_obj_set_style_pad_bottom(topRow, 6, 0);
         lv_obj_set_flex_flow(topRow, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(topRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
