@@ -75,8 +75,8 @@ lv_obj_t *uiSessionsCreate(lv_obj_t *parent) {
     }
 
     g_sessionsRoot = lv_obj_create(parent);
-    lv_obj_set_size(g_sessionsRoot, lv_pct(100), 280);
-    lv_obj_set_pos(g_sessionsRoot, 0, 36);
+    lv_obj_set_size(g_sessionsRoot, lv_pct(100), 288);
+    lv_obj_set_pos(g_sessionsRoot, 0, 30);
     lv_obj_set_style_bg_opa(g_sessionsRoot, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_sessionsRoot, 0, 0);
     lv_obj_set_style_pad_all(g_sessionsRoot, 4, 0);
@@ -86,10 +86,10 @@ lv_obj_t *uiSessionsCreate(lv_obj_t *parent) {
     lv_obj_set_flex_flow(g_sessionsContainer, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_bg_color(g_sessionsContainer, lv_color_hex(0x2c2c2e), 0);
     lv_obj_set_style_bg_opa(g_sessionsContainer, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(g_sessionsContainer, 8, 0);
+    lv_obj_set_style_radius(g_sessionsContainer, 6, 0);
     lv_obj_set_style_border_width(g_sessionsContainer, 0, 0);
-    lv_obj_set_style_pad_all(g_sessionsContainer, 8, 0);
-    lv_obj_set_style_pad_row(g_sessionsContainer, 6, 0);
+    lv_obj_set_style_pad_all(g_sessionsContainer, 6, 0);
+    lv_obj_set_style_pad_row(g_sessionsContainer, 4, 0);
 
     g_noSessionsLabel = lv_label_create(g_sessionsContainer);
     lv_obj_set_style_text_font(g_noSessionsLabel, &font_ko, 0);

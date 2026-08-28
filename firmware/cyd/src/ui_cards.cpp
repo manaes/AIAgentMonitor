@@ -74,8 +74,8 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     }
 
     g_cardsRoot = lv_obj_create(parent);
-    lv_obj_set_size(g_cardsRoot, lv_pct(100), 280);
-    lv_obj_set_pos(g_cardsRoot, 0, 36);
+    lv_obj_set_size(g_cardsRoot, lv_pct(100), 288);
+    lv_obj_set_pos(g_cardsRoot, 0, 30);
     lv_obj_set_style_bg_opa(g_cardsRoot, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_cardsRoot, 0, 0);
     lv_obj_set_style_pad_all(g_cardsRoot, 4, 0);
@@ -86,7 +86,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     lv_obj_set_style_bg_opa(g_cardsContainer, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_cardsContainer, 0, 0);
     lv_obj_set_style_pad_all(g_cardsContainer, 0, 0);
-    lv_obj_set_style_pad_row(g_cardsContainer, 8, 0);
+    lv_obj_set_style_pad_row(g_cardsContainer, 6, 0);
 
     g_noDataLabel = lv_label_create(g_cardsRoot);
     lv_obj_set_style_text_font(g_noDataLabel, &font_ko, 0);
@@ -104,9 +104,9 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_bg_opa(cw.card, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(cw.card, 6, 0);
         lv_obj_set_style_border_width(cw.card, 0, 0);
-        lv_obj_set_style_pad_all(cw.card, 8, 0);
+        lv_obj_set_style_pad_all(cw.card, 6, 0);
         lv_obj_set_flex_flow(cw.card, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_style_pad_row(cw.card, 4, 0);
+        lv_obj_set_style_pad_row(cw.card, 2, 0);
 
         // 상단 행 (이름 + tok/s)
         lv_obj_t *topRow = lv_obj_create(cw.card);
@@ -135,9 +135,9 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
 
         // 5시간 쿼터 바
         cw.bar5h = lv_bar_create(cw.card);
-        lv_obj_set_size(cw.bar5h, lv_pct(100), 6);
+        lv_obj_set_size(cw.bar5h, lv_pct(100), 4);
         lv_obj_set_style_bg_color(cw.bar5h, lv_color_hex(0x1c1c1e), 0);
-        lv_obj_set_style_radius(cw.bar5h, 3, 0);
+        lv_obj_set_style_radius(cw.bar5h, 2, 0);
         lv_bar_set_range(cw.bar5h, 0, 100);
 
         // 5시간 리셋 안내 라벨
@@ -154,9 +154,9 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
 
         // 주간 쿼터 바
         cw.barWk = lv_bar_create(cw.card);
-        lv_obj_set_size(cw.barWk, lv_pct(100), 6);
+        lv_obj_set_size(cw.barWk, lv_pct(100), 4);
         lv_obj_set_style_bg_color(cw.barWk, lv_color_hex(0x1c1c1e), 0);
-        lv_obj_set_style_radius(cw.barWk, 3, 0);
+        lv_obj_set_style_radius(cw.barWk, 2, 0);
         lv_bar_set_range(cw.barWk, 0, 100);
 
         // 주간 리셋 안내 라벨
