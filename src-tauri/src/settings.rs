@@ -20,6 +20,15 @@ pub struct AppSettings {
     /// `agy -p /usage` 자동 갱신 간격. 기존 설정 파일에는 없으므로 serde 기본값을 둔다.
     #[serde(default = "default_antigravity_poll_interval_secs")]
     pub antigravity_poll_interval_secs: u64,
+    /// BLE 공유 활성화 상태 기억.
+    #[serde(default)]
+    pub ble_enabled: bool,
+    /// 원격 네트워크(Iroh) 공유 활성화 상태 기억.
+    #[serde(default)]
+    pub network_enabled: bool,
+    /// LAN(CYD 외장 디스플레이 등) 공유 활성화 상태 기억.
+    #[serde(default)]
+    pub lan_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -29,6 +38,9 @@ impl Default for AppSettings {
         Self {
             enabled_agents: HashSet::from([AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity]),
             antigravity_poll_interval_secs: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_SECS,
+            ble_enabled: false,
+            network_enabled: false,
+            lan_enabled: false,
         }
     }
 }
@@ -100,6 +112,9 @@ mod tests {
         let saved = AppSettings {
             enabled_agents: HashSet::from([AgentKind::Codex]),
             antigravity_poll_interval_secs: 15 * 60,
+            ble_enabled: true,
+            network_enabled: false,
+            lan_enabled: true,
         };
         SettingsStore::save_to(&p, &saved).unwrap();
         assert_eq!(SettingsStore::load_from(&p), saved);
@@ -117,6 +132,9 @@ mod tests {
         SettingsStore::save_to(&p, &AppSettings {
             enabled_agents: HashSet::from([AgentKind::Claude]),
             antigravity_poll_interval_secs: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_SECS,
+            ble_enabled: false,
+            network_enabled: true,
+            lan_enabled: false,
         }).unwrap();
         let ino2 = std::fs::metadata(&p).unwrap().ino();
         assert_ne!(ino1, ino2);

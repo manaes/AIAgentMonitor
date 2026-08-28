@@ -109,6 +109,7 @@ async fn ble_set_enabled(
     enabled: bool,
     state: tauri::State<'_, Arc<BleHandle>>,
     pairing: tauri::State<'_, SharedPairing>,
+    settings_state: tauri::State<'_, Arc<Mutex<settings::AppSettings>>>,
 ) -> Result<(), String> {
     // 네트워크와 동시에 켤 수 있다(2026-08-25 스펙) — 예전의 상호 배타 가드는
     // 페어링 창이 전송별로 쪼개지는 걸 막으려던 것인데, 이제 창을 공유하므로
@@ -132,6 +133,10 @@ async fn ble_set_enabled(
         *state.last_error.lock().unwrap() = Some(msg.clone());
         return Err(msg);
     }
+    // 설정 저장
+    let mut guard = settings_state.lock().await;
+    guard.ble_enabled = enabled;
+    let _ = settings::SettingsStore::save_to(&settings::SettingsStore::path(), &guard);
     Ok(())
 }
 
@@ -428,6 +433,7 @@ async fn network_set_enabled(
     enabled: bool,
     network_state: tauri::State<'_, Arc<NetworkHandle>>,
     pairing: tauri::State<'_, SharedPairing>,
+    settings_state: tauri::State<'_, Arc<Mutex<settings::AppSettings>>>,
 ) -> Result<(), String> {
     let mut bridge = network_state.bridge.lock().await;
     // 끄기 전에 받아둔다 — set_enabled(false) 가 snapshot_senders 를 비운다.
@@ -438,6 +444,10 @@ async fn network_set_enabled(
         pairing.lock().await.end_sessions(&served);
         *network_state.last_error.lock().unwrap() = None;
     }
+    // 설정 저장
+    let mut guard = settings_state.lock().await;
+    guard.network_enabled = enabled;
+    let _ = settings::SettingsStore::save_to(&settings::SettingsStore::path(), &guard);
     Ok(())
 }
 
@@ -455,6 +465,7 @@ async fn lan_set_enabled(
     enabled: bool,
     lan_state: tauri::State<'_, Arc<LanHandle>>,
     pairing: tauri::State<'_, SharedPairing>,
+    settings_state: tauri::State<'_, Arc<Mutex<settings::AppSettings>>>,
 ) -> Result<(), String> {
     let mut bridge = lan_state.bridge.lock().await;
     // 끄기 전에 받아둔다 — set_enabled(false) 가 목록을 비운다. 공유 매니저이므로
@@ -467,6 +478,10 @@ async fn lan_set_enabled(
         // `last_error` 를 지우는 것은 브리지가 스스로 한다(`set_enabled` 의 doc) —
         // BLE·network 처럼 배선이 기억해야 하는 정리를 여기 두지 않는다.
     }
+    // 설정 저장
+    let mut guard = settings_state.lock().await;
+    guard.lan_enabled = enabled;
+    let _ = settings::SettingsStore::save_to(&settings::SettingsStore::path(), &guard);
     Ok(())
 }
 
@@ -1269,6 +1284,29 @@ pub fn run() {
                                 _ => {}
                             }
                             let _ = app_for_ble.emit("ble_status", ());
+                        }
+                    });
+                }
+
+                // 앱 시작 시 이전 저장된 공유(BLE, Network, LAN) 활성화 상태 복원
+                {
+                    let ble_h = ble_handle.clone();
+                    let net_h = network_handle.clone();
+                    let lan_h = lan_handle.clone();
+                    let s_state = settings_state.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let s = s_state.lock().await.clone();
+                        if s.ble_enabled {
+                            let mut b = ble_h.bridge.lock().await;
+                            let _ = b.set_enabled(true);
+                        }
+                        if s.network_enabled {
+                            let mut b = net_h.bridge.lock().await;
+                            b.set_enabled(true);
+                        }
+                        if s.lan_enabled {
+                            let mut b = lan_h.bridge.lock().await;
+                            b.set_enabled(true);
                         }
                     });
                 }
