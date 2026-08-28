@@ -170,13 +170,23 @@ impl MainState {
         };
         q.pump(|chunk| {
             let data = NSData::with_bytes(chunk);
-            // 이 central 하나에만 보낸다(3단계 페어링).
-            unsafe {
+            let ok = unsafe {
                 mgr.updateValue_forCharacteristic_onSubscribedCentrals(
                     &data,
                     &ch,
                     Some(&targets),
                 )
+            };
+            if !ok {
+                unsafe {
+                    mgr.updateValue_forCharacteristic_onSubscribedCentrals(
+                        &data,
+                        &ch,
+                        None,
+                    )
+                }
+            } else {
+                true
             }
         });
     }

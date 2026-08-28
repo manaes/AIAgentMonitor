@@ -28,10 +28,10 @@ void uiNavSetView(UiView /*view*/) {
 }
 
 void uiNavUpdate(Transport &transport) {
-    const bool isSubscribed = (transport.authStep() == AuthStep::Subscribed && transport.isConnected() && transport.hasSnapshot());
+    const bool isSubscribed = (transport.authStep() == AuthStep::Subscribed && transport.isConnected());
 
     if (isSubscribed) {
-        // 인가 완료 및 스냅샷 유효 상태: 카드 대시보드 활성화 및 갱신
+        // 인가 완료: 카드 대시보드 활성화 및 갱신
         if (g_cardsVisibleCache != 1) {
             g_cardsVisibleCache = 1;
             uiCardsSetVisible(true);

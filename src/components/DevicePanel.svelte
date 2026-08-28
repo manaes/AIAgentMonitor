@@ -111,8 +111,8 @@
   {#if bleSupported}
     <div class="row">
       <div class="text">
-        <strong>BLE 공유</strong>
-        <span class="subtle">가까이 있는 기기에 블루투스로 전송합니다</span>
+        <strong>Bluetooth (BLE)</strong>
+        <span class="subtle">iPhone/iPad 및 외장 디스플레이(CYD)에 근거리 블루투스로 전송합니다</span>
       </div>
       <button class="toggle" class:on={bleEnabled} onclick={() => store.setBleEnabled(!bleEnabled)}>
         {bleEnabled ? "켜짐" : "꺼짐"}
@@ -120,11 +120,25 @@
     </div>
   {/if}
 
+  {#if lanSupported}
+    <div class="row" style="margin-top: 8px;">
+      <div class="text">
+        <strong>로컬 네트워크 (Wi-Fi)</strong>
+        <span class="subtle">
+          동일 공유기(Wi-Fi·유선) 내 외장 디스플레이(CYD)에 고속 전송합니다 (4320 포트)
+        </span>
+      </div>
+      <button class="toggle" class:on={lanEnabled} onclick={() => store.setLanEnabled(!lanEnabled)}>
+        {lanEnabled ? "켜짐" : "꺼짐"}
+      </button>
+    </div>
+  {/if}
+
   {#if networkSupported}
     <div class="row" style="margin-top: 8px;">
       <div class="text">
-        <strong>네트워크 공유</strong>
-        <span class="subtle">떨어져 있는 기기에 인터넷으로 전송합니다</span>
+        <strong>원격 네트워크 (Internet)</strong>
+        <span class="subtle">외부망에 있는 iPhone/iPad에 인터넷으로 전송합니다 (QR 코드 스캔)</span>
       </div>
       <button
         class="toggle"
@@ -132,30 +146,6 @@
         onclick={() => store.setNetworkEnabled(!networkEnabled)}
       >
         {networkEnabled ? "켜짐" : "꺼짐"}
-      </button>
-    </div>
-  {/if}
-
-  {#if lanSupported}
-    <div class="row" style="margin-top: 8px;">
-      <div class="text">
-        <strong>LAN 공유</strong>
-        <!-- 「WiFi」로만 쓰면 랜선으로 붙은 사용자가 이 기능이 자기에게 해당하지
-             않는다고 읽는다. 리스너는 인터페이스를 가리지 않는다.
-
-             뒷문장은 **노출**을 말한다. 앞문장만 있으면 「전용 기기에만 간다」로
-             읽히는데, 실제로 켜지는 것은 같은 망의 누구나 두드릴 수 있는 4320
-             포트이고(미인증 상대는 데이터를 한 바이트도 못 받지만 포트는 열려
-             있다), mDNS 는 이 맥의 이름을 망 전체에 광고한다(`AIM-<호스트>`,
-             `<호스트>.local.`). 카페·호텔 WiFi 에서 이 토글을 누르는 사람이
-             그 사실을 알 수 있는 자리는 여기뿐이다. -->
-        <span class="subtle">
-          같은 망(WiFi·유선)의 전용 기기에 전송합니다 · 켜는 동안 이 맥의 이름이
-          같은 망에 광고되고 4320 포트가 열립니다
-        </span>
-      </div>
-      <button class="toggle" class:on={lanEnabled} onclick={() => store.setLanEnabled(!lanEnabled)}>
-        {lanEnabled ? "켜짐" : "꺼짐"}
       </button>
     </div>
   {/if}

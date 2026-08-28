@@ -121,8 +121,12 @@ async fn ble_set_enabled(
     let served = if enabled { Vec::new() } else { bridge.served_centrals() };
     let result = bridge.set_enabled(enabled);
     drop(bridge);
-    if !enabled {
-        pairing.lock().await.end_sessions(&served);
+    if enabled {
+        pairing.lock().await.begin_pairing(std::time::SystemTime::now());
+    } else {
+        let mut p = pairing.lock().await;
+        p.end_sessions(&served);
+        p.reset_pairing_window();
         state.advertising.store(false, Ordering::Relaxed);
         *state.last_error.lock().unwrap() = None;
     }
@@ -440,8 +444,12 @@ async fn network_set_enabled(
     let served = if enabled { Vec::new() } else { bridge.served_centrals() };
     bridge.set_enabled(enabled);
     drop(bridge);
-    if !enabled {
-        pairing.lock().await.end_sessions(&served);
+    if enabled {
+        pairing.lock().await.begin_pairing(std::time::SystemTime::now());
+    } else {
+        let mut p = pairing.lock().await;
+        p.end_sessions(&served);
+        p.reset_pairing_window();
         *network_state.last_error.lock().unwrap() = None;
     }
     // 설정 저장
@@ -473,8 +481,12 @@ async fn lan_set_enabled(
     let served = if enabled { Vec::new() } else { bridge.served_centrals() };
     bridge.set_enabled(enabled);
     drop(bridge);
-    if !enabled {
-        pairing.lock().await.end_sessions(&served);
+    if enabled {
+        pairing.lock().await.begin_pairing(std::time::SystemTime::now());
+    } else {
+        let mut p = pairing.lock().await;
+        p.end_sessions(&served);
+        p.reset_pairing_window();
         // `last_error` 를 지우는 것은 브리지가 스스로 한다(`set_enabled` 의 doc) —
         // BLE·network 처럼 배선이 기억해야 하는 정리를 여기 두지 않는다.
     }
@@ -1258,6 +1270,9 @@ pub fn run() {
                                     *h.last_error.lock().unwrap() = Some(e.clone());
                                     tracing::error!("BLE 오류: {e}");
                                 }
+                                ble::peripheral::PeripheralEvent::Subscribed(_) => {
+                                    h.bridge.lock().await.reset_gate();
+                                }
                                 ble::peripheral::PeripheralEvent::AuthWrite { central, data } => {
                                     let now = std::time::SystemTime::now();
                                     let granted = {
@@ -1265,6 +1280,7 @@ pub fn run() {
                                         h.bridge.lock().await.handle_auth(central, data, now, &mut p)
                                     };
                                     if granted {
+                                        h.bridge.lock().await.reset_gate();
                                         if let Err(e) = save_paired_peers(&pairing_for_ble).await {
                                             // unpair 류는 Result 로 프론트에 실패를 알리지만, 이
                                             // 경로는 사용자 커맨드가 아니라 이벤트 루프라 그 통로가

@@ -116,7 +116,15 @@ Transport::~Transport() {
 
 void Transport::begin(Config &config) {
     config_ = &config;
+    mode_ = configLoadMode();
 
+    if (mode_ == TransportMode::Ble) {
+        Serial.println("transport: BLE 모드로 시작");
+        ble_.begin(*config_);
+        return;
+    }
+
+    Serial.println("transport: Wi-Fi (LAN) 모드로 시작");
     // T12-B — 딱 한 번. 이유는 transport.h 상단 주석.
     mdnsStarted_ = MDNS.begin(MDNS_HOSTNAME);
     if (!mdnsStarted_) {
@@ -130,9 +138,70 @@ void Transport::begin(Config &config) {
     setAuthStep(configIsPaired(*config_) ? AuthStep::SendAuth2 : AuthStep::NeedsPairing);
 }
 
+void Transport::setMode(TransportMode mode) {
+    if (mode_ == mode) {
+        return;
+    }
+    Serial.printf("transport: 모드 전환 -> %s\n", (mode == TransportMode::Ble) ? "BLE" : "Wi-Fi");
+    if (mode_ == TransportMode::WiFi) {
+        webSocket_.disconnect();
+    } else {
+        ble_.stop();
+    }
+
+    mode_ = mode;
+    configSaveMode(mode);
+
+    if (config_ != nullptr) {
+        if (mode_ == TransportMode::Ble) {
+            ble_.begin(*config_);
+        } else {
+            if (!mdnsStarted_) {
+                mdnsStarted_ = MDNS.begin(MDNS_HOSTNAME);
+            }
+            webSocket_.onEvent([this](WStype_t type, uint8_t *payload, size_t length) {
+                onWsEvent(type, payload, length);
+            });
+            holding_ = false;
+            targetHost_ = "";
+            nextAttemptAtMs_ = 0;
+            setAuthStep(configIsPaired(*config_) ? AuthStep::SendAuth2 : AuthStep::NeedsPairing);
+        }
+    }
+}
+
+bool Transport::authorized() const {
+    return (authStep() == AuthStep::Subscribed);
+}
+
+AuthStep Transport::authStep() const {
+    return (mode_ == TransportMode::Ble) ? ble_.authStep() : authStep_;
+}
+
+uint8_t Transport::attemptsLeft() const {
+    return (mode_ == TransportMode::Ble) ? ble_.attemptsLeft() : attemptsLeft_;
+}
+
+bool Transport::isConnected() const {
+    return (mode_ == TransportMode::Ble) ? ble_.isConnected() : const_cast<WebSocketsClient &>(webSocket_).isConnected();
+}
+
+bool Transport::hasSnapshot() const {
+    return (mode_ == TransportMode::Ble) ? ble_.hasSnapshot() : hasSnapshot_;
+}
+
+const Snapshot &Transport::latestSnapshot() const {
+    return (mode_ == TransportMode::Ble) ? ble_.latestSnapshot() : latestSnapshot_;
+}
+
 void Transport::loop() {
     if (config_ == nullptr) {
         return;  // begin() 이 안 불렸다.
+    }
+
+    if (mode_ == TransportMode::Ble) {
+        ble_.loop();
+        return;
     }
 
     // 재시도를 완전히 멈춘 상태 — brief 규칙(NeedsPairing/Failed 는 사람이
@@ -224,10 +293,6 @@ void Transport::loop() {
     }
 }
 
-bool Transport::authorized() const {
-    return authStep_ == AuthStep::Subscribed;
-}
-
 void Transport::setAuthStep(AuthStep step) {
     if (authStep_ == step) {
         return;
@@ -241,11 +306,25 @@ String Transport::chooseTarget() {
     String mdnsHost;
 
     if (mdnsStarted_) {
-        // ESPmDNS.cpp:216 — 최대 3000ms 블로킹(transport.h 1번).
-        const int n = MDNS.queryService("aim", "tcp");
-        if (n > 0) {
-            mdnsHost = MDNS.IP(0).toString();
-            mdnsFound = true;
+        mdns_result_t *results = nullptr;
+        // ESP-IDF mDNS 쿼리를 250ms 타임아웃으로 실행 (기존 3000ms 블로킹 방지)
+        esp_err_t err = mdns_query_ptr("_aim", "_tcp", 250, 1, &results);
+        if (!err && results != nullptr) {
+            mdns_result_t *r = results;
+            while (r) {
+                if (r->addr) {
+                    if (r->addr->addr.type == ESP_IPADDR_TYPE_V4) {
+                        IPAddress ip(r->addr->addr.u_addr.ip4.addr);
+                        mdnsHost = ip.toString();
+                        mdnsFound = true;
+                        break;
+                    }
+                }
+                r = r->next;
+            }
+            mdns_query_results_free(results);
+        }
+        if (mdnsFound) {
             Serial.printf("transport: mDNS 로 맥을 찾았다 — %s\n", mdnsHost.c_str());
         }
     }
@@ -723,6 +802,10 @@ void Transport::handleSnapshotFrame(const uint8_t *payload, size_t length) {
 }
 
 void Transport::submitCode(const String &code) {
+    if (mode_ == TransportMode::Ble) {
+        ble_.submitCode(code);
+        return;
+    }
     pendingCode_ = code;
     holding_ = false;  // 사람이 새 코드를 넣었다 — 재시도를 막던 래치를 푼다.
 

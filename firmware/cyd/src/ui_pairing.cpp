@@ -32,35 +32,31 @@ lv_obj_t *g_digitsLabel = nullptr;
 lv_obj_t *g_attemptsLabel = nullptr;
 lv_obj_t *g_timeLabel = nullptr;
 lv_obj_t *g_btnMatrix = nullptr;
-lv_obj_t *g_otherLabel = nullptr;  // 페어링과 무관한 상태(재연결 중/인가됨)의 대체 문구.
+lv_obj_t *g_btnClose = nullptr;     // 키패드 닫기(X) 버튼 -> 모드 선택 화면 복귀
+
+// Connecting... 화면용 위젯 (세로형 Wi-Fi / Bluetooth 버튼)
+lv_obj_t *g_connectingContainer = nullptr;
+lv_obj_t *g_connectingTitle = nullptr;
+lv_obj_t *g_btnWifi = nullptr;
+lv_obj_t *g_labelWifi = nullptr;
+lv_obj_t *g_btnBle = nullptr;
+lv_obj_t *g_labelBle = nullptr;
 
 String g_typedDigits;
 
+bool g_manualModeSelection = false;
 bool g_codeWindowStarted = false;
 uint32_t g_codeWindowStartedAtMs = 0;
 
-/// fix round 1 (I-2) — `NeedsPairing`/`Failed` 로 돌아온 적이 있는지
-/// 추적해 카운트다운을 다시 잰다. 센티널로 `Subscribed` 를 쓴다 — 부팅
-/// 직후 첫 `uiPairingUpdate()` 호출에서 아래 리셋이 공짜로 한 번 더
-/// 일어나도(`g_codeWindowStarted` 가 이미 `false` 라) 무해하다.
 AuthStep g_prevStep = AuthStep::Subscribed;
 
-/// **엣지 트리거 캐시 — 실기 실측으로 필요성이 드러났다.** `lv_buttonmatrix_
-/// set/clear_button_ctrl(_all)` 은 실제 소스 확인 결과(`lv_buttonmatrix.c`)
-/// 값이 바뀌었는지 보지 않고 매번 무조건 `invalidate_button_area()` 를
-/// 부른다 — 매 `loop()` 마다(상태 변화가 없어도) 이 함수들을 그대로
-/// 불렀더니 실기에서 `lv_timer_handler()` 한 번이 최대 118,840us 까지
-/// 찍혔다(Task 14a 정상 상태 기준 400~600us 의 약 200배 — 보고서의
-/// 재측정 절 참고). 아래 캐시들은 "이미 그 상태다" 를 걸러 LVGL 무효화
-/// 호출 자체를 상태가 실제로 바뀔 때만 하도록 만든다. 센티널 값(-1 등)은
-/// 첫 호출을 무조건 통과시켜 위젯을 만든 직후의 초기 상태를 확실히
-/// 적용하기 위한 것이다.
 int g_confirmEnabledCache = -1;   // -1=미적용, 0=disabled, 1=enabled.
 int g_buttonsBlockedCache = -1;   // -1=미적용, 0=전체 활성, 1=전체 비활성(ctrl_all DISABLED).
 int g_statusIsExhaustedCache = -1;  // -1=미적용, 0="코드 입력", 1=소진 안내문.
 int g_attemptsShownCache = -1;    // -1=미적용, 그 외 마지막으로 라벨에 찍은 값.
 int32_t g_remainingShownCache = -2;  // -2=미적용, -1="아직 시작 안 함"(빈 칸), 그 외 마지막 값.
 int g_otherLabelSubscribedCache = -1;  // -1=미적용, 0="연결 중", 1="연결됨".
+int g_modeShownCache = -1;        // -1=미적용, 0=WiFi, 1=Ble.
 
 /// 이 화면이 실제로 그려야 하는 상태인가 — 사람이 코드를 입력해야
 /// 하거나(NeedsPairing), 방금 입력한 코드를 처리 중이거나(SendHello2/
@@ -68,7 +64,10 @@ int g_otherLabelSubscribedCache = -1;  // -1=미적용, 0="연결 중", 1="연�
 /// (Failed) 경우다. SendAuth2/SendProof2(기존 토큰으로 조용히 재연결
 /// 중)와 Subscribed(인가됨)는 사람이 할 일이 없으므로 이 화면이 아니라
 /// `g_otherLabel` 이 대신 그린다.
-bool isPairingRelevant(AuthStep step) {
+bool isPairingRelevant(AuthStep step, bool isConnected) {
+    if (!isConnected) {
+        return false; // Mac에 연결되기 전에는 Connecting... 화면을 유지한다.
+    }
     switch (step) {
         case AuthStep::NeedsPairing:
         case AuthStep::SendHello2:
@@ -149,6 +148,37 @@ void onKeypadEvent(lv_event_t *e) {
     refreshConfirmEnabled();
 }
 
+void onWifiBtnClick(lv_event_t *e) {
+    Transport *transport = (Transport *)lv_event_get_user_data(e);
+    g_manualModeSelection = false;
+    if (transport != nullptr) {
+        transport->setMode(TransportMode::WiFi);
+        uiPairingUpdate(*transport);
+        lv_refr_now(nullptr);
+    }
+}
+
+void onBleBtnClick(lv_event_t *e) {
+    Transport *transport = (Transport *)lv_event_get_user_data(e);
+    g_manualModeSelection = false;
+    if (transport != nullptr) {
+        transport->setMode(TransportMode::Ble);
+        uiPairingUpdate(*transport);
+        lv_refr_now(nullptr);
+    }
+}
+
+void onCloseKeypad(lv_event_t *e) {
+    Transport *transport = (Transport *)lv_event_get_user_data(e);
+    g_manualModeSelection = true;
+    g_typedDigits = "";
+    refreshDigitsLabel();
+    if (transport != nullptr) {
+        uiPairingUpdate(*transport);
+    }
+    lv_refr_now(nullptr);
+}
+
 }  // namespace
 
 void uiPairingCreate(Transport &transport) {
@@ -163,6 +193,20 @@ void uiPairingCreate(Transport &transport) {
 
     g_statusTitle = makeLabel(g_root, 8, 8);
     lv_obj_set_style_text_color(g_statusTitle, lv_color_hex(0xffffff), 0);
+
+    // ── 키패드 닫기 (X) 버튼 ──
+    g_btnClose = lv_button_create(g_root);
+    lv_obj_set_pos(g_btnClose, LV_HOR_RES - 48, 6);
+    lv_obj_set_size(g_btnClose, 40, 32);
+    lv_obj_set_style_radius(g_btnClose, 6, 0);
+    lv_obj_set_style_bg_color(g_btnClose, lv_color_hex(0x2c2c2e), 0);
+    lv_obj_add_event_cb(g_btnClose, onCloseKeypad, LV_EVENT_PRESSED, &transport);
+
+    lv_obj_t *lblClose = lv_label_create(g_btnClose);
+    lv_obj_set_style_text_font(lblClose, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(lblClose, lv_color_hex(0xff453a), 0);
+    lv_label_set_text(lblClose, "X");
+    lv_obj_center(lblClose);
 
     g_digitsLabel = makeLabel(g_root, 8, 36);
     lv_obj_set_style_text_font(g_digitsLabel, &lv_font_montserrat_20, 0);
@@ -184,10 +228,43 @@ void uiPairingCreate(Transport &transport) {
     lv_obj_set_size(g_btnMatrix, LV_HOR_RES - 20, LV_VER_RES - 130 - 12);
     lv_obj_add_event_cb(g_btnMatrix, onKeypadEvent, LV_EVENT_VALUE_CHANGED, &transport);
 
-    g_otherLabel = lv_label_create(screen);
-    lv_obj_set_style_text_font(g_otherLabel, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(g_otherLabel, lv_color_hex(0xffffff), 0);
-    lv_obj_center(g_otherLabel);
+    // ── Connecting... 화면 컨테이너 (Wi-Fi / Bluetooth 모드 선택) ──
+    g_connectingContainer = lv_obj_create(screen);
+    lv_obj_remove_style_all(g_connectingContainer);
+    lv_obj_set_pos(g_connectingContainer, 0, 0);
+    lv_obj_set_size(g_connectingContainer, LV_HOR_RES, LV_VER_RES);
+
+    g_connectingTitle = lv_label_create(g_connectingContainer);
+    lv_obj_set_style_text_font(g_connectingTitle, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(g_connectingTitle, lv_color_hex(0xffffff), 0);
+    lv_obj_set_pos(g_connectingTitle, 0, 32);
+    lv_obj_set_size(g_connectingTitle, LV_HOR_RES, 24);
+    lv_obj_set_style_text_align(g_connectingTitle, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(g_connectingTitle, "Connecting...");
+
+    // Wi-Fi 버튼
+    g_btnWifi = lv_button_create(g_connectingContainer);
+    lv_obj_set_pos(g_btnWifi, 40, 85);
+    lv_obj_set_size(g_btnWifi, LV_HOR_RES - 80, 48);
+    lv_obj_set_style_radius(g_btnWifi, 8, 0);
+    lv_obj_add_event_cb(g_btnWifi, onWifiBtnClick, LV_EVENT_PRESSED, &transport);
+
+    g_labelWifi = lv_label_create(g_btnWifi);
+    lv_obj_set_style_text_font(g_labelWifi, &lv_font_montserrat_16, 0);
+    lv_label_set_text(g_labelWifi, "Wi-Fi (LAN)");
+    lv_obj_center(g_labelWifi);
+
+    // Bluetooth 버튼
+    g_btnBle = lv_button_create(g_connectingContainer);
+    lv_obj_set_pos(g_btnBle, 40, 150);
+    lv_obj_set_size(g_btnBle, LV_HOR_RES - 80, 48);
+    lv_obj_set_style_radius(g_btnBle, 8, 0);
+    lv_obj_add_event_cb(g_btnBle, onBleBtnClick, LV_EVENT_PRESSED, &transport);
+
+    g_labelBle = lv_label_create(g_btnBle);
+    lv_obj_set_style_text_font(g_labelBle, &lv_font_montserrat_16, 0);
+    lv_label_set_text(g_labelBle, "Bluetooth (BLE)");
+    lv_obj_center(g_labelBle);
 
     refreshDigitsLabel();
     refreshConfirmEnabled();
@@ -196,6 +273,27 @@ void uiPairingCreate(Transport &transport) {
 
 void uiPairingUpdate(Transport &transport) {
     const AuthStep step = transport.authStep();
+    const TransportMode mode = transport.mode();
+
+    const int modeInt = (mode == TransportMode::Ble) ? 1 : 0;
+    if (modeInt != g_modeShownCache) {
+        g_modeShownCache = modeInt;
+        if (mode == TransportMode::WiFi) {
+            lv_label_set_text(g_connectingTitle, "Connecting via Wi-Fi...");
+            lv_obj_set_style_bg_color(g_btnWifi, lv_color_hex(0x0a84ff), 0);
+            lv_obj_set_style_text_color(g_labelWifi, lv_color_hex(0xffffff), 0);
+
+            lv_obj_set_style_bg_color(g_btnBle, lv_color_hex(0x2c2c2e), 0);
+            lv_obj_set_style_text_color(g_labelBle, lv_color_hex(0x8e8e93), 0);
+        } else {
+            lv_label_set_text(g_connectingTitle, "Connecting via BLE...");
+            lv_obj_set_style_bg_color(g_btnWifi, lv_color_hex(0x2c2c2e), 0);
+            lv_obj_set_style_text_color(g_labelWifi, lv_color_hex(0x8e8e93), 0);
+
+            lv_obj_set_style_bg_color(g_btnBle, lv_color_hex(0x0a84ff), 0);
+            lv_obj_set_style_text_color(g_labelBle, lv_color_hex(0xffffff), 0);
+        }
+    }
 
     const bool wasNeedsPairingOrFailed =
         (g_prevStep == AuthStep::NeedsPairing || g_prevStep == AuthStep::Failed);
@@ -211,29 +309,26 @@ void uiPairingUpdate(Transport &transport) {
         g_codeWindowStartedAtMs = millis();
     }
 
-    if (!isPairingRelevant(step)) {
+    const bool showPairing = !g_manualModeSelection && isPairingRelevant(step, transport.isConnected());
+    if (!showPairing) {
         lv_obj_add_flag(g_root, LV_OBJ_FLAG_HIDDEN);
-        if (step == AuthStep::Subscribed && transport.isConnected() && transport.hasSnapshot()) {
-            lv_obj_add_flag(g_otherLabel, LV_OBJ_FLAG_HIDDEN);
+        if (!g_manualModeSelection && step == AuthStep::Subscribed && transport.isConnected()) {
+            lv_obj_add_flag(g_connectingContainer, LV_OBJ_FLAG_HIDDEN);
             g_otherLabelSubscribedCache = 1;
         } else {
-            lv_obj_remove_flag(g_otherLabel, LV_OBJ_FLAG_HIDDEN);
-            if (g_otherLabelSubscribedCache != 0) {
-                g_otherLabelSubscribedCache = 0;
-                lv_label_set_text(g_otherLabel, "Connecting...");
-            }
+            lv_obj_remove_flag(g_connectingContainer, LV_OBJ_FLAG_HIDDEN);
+            g_otherLabelSubscribedCache = 0;
         }
         return;
     }
 
     lv_obj_remove_flag(g_root, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(g_otherLabel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(g_connectingContainer, LV_OBJ_FLAG_HIDDEN);
     g_otherLabelSubscribedCache = -1;
 
     const uint8_t attemptsLeft = transport.attemptsLeft();
-    const bool exhausted = attemptsLeft == 0;
-    const bool midFlight = (step == AuthStep::SendHello2 || step == AuthStep::SendCode2);
-    const bool blockInput = exhausted || midFlight;
+    const bool exhausted = (attemptsLeft == 0);
+    const bool blockInput = exhausted;
 
     const int desiredStatus = exhausted ? 2 : (!transport.isConnected() ? 1 : 0);
     if (desiredStatus != g_statusIsExhaustedCache) {

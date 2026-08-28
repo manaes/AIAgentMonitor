@@ -16,10 +16,14 @@ impl EmitGate {
     pub fn should_emit(&mut self, snap: &Snapshot, now: SystemTime) -> bool {
         let h = hash_snapshot(snap);
         let unchanged = self.last_hash == Some(h);
-        if unchanged { return false; }
         if let Some(last) = self.last_emit_at {
             let elapsed = now.duration_since(last).unwrap_or_default();
-            if elapsed < self.throttle { return false; }
+            if elapsed < self.throttle {
+                return false;
+            }
+            if unchanged && elapsed < Duration::from_secs(5) {
+                return false;
+            }
         }
         self.last_hash = Some(h);
         self.last_emit_at = Some(now);

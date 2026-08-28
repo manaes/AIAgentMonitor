@@ -39,6 +39,11 @@ impl BleBridge {
         self.enabled
     }
 
+    /// 게이트 해시를 리셋하여 다음 틱에 무조건 스냅샷을 송출하도록 한다.
+    pub fn reset_gate(&mut self) {
+        self.gate.reset();
+    }
+
     /// 실패를 호출자(Tauri 커맨드)에게 그대로 넘긴다. 이 크레이트에는 tracing subscriber 가
     /// 없어 로그가 아무 데도 남지 않으므로, 오류가 UI 까지 도달하는 유일한 경로다.
     pub fn set_enabled(&mut self, on: bool) -> anyhow::Result<()> {
@@ -143,16 +148,15 @@ impl BleBridge {
                 Some(ch) => ch.seal(&json),
                 None => json.clone(),
             };
-            // 청크 크기는 이 central 의 MTU 로 정한다. 예전처럼 전체 최솟값을
-            // 쓰면 MTU 가 작은 기기 하나가 아이폰의 청크까지 잘게 만든다.
-            match framing::chunk(frame_id, &payload, sub.max_notify_len) {
+            // 청크 크기는 이 central 의 MTU 로 정한다. 단, ESP32 수신 버퍼 안정성을 위해 최대 240바이트로 제한한다.
+            let max_chunk = usize::min(sub.max_notify_len, 240);
+            match framing::chunk(frame_id, &payload, max_chunk) {
                 Ok(chunks) => {
-                    self.peripheral.offer_frame_to(CharId::Snapshot, &sub.id, chunks);
+                    self.peripheral
+                        .offer_frame_to(CharId::Snapshot, &sub.id, chunks);
                     sent_any = true;
                 }
                 Err(e) => {
-                    // 한 기기가 못 받는다고 다른 기기까지 막지 않는다 — 예전에는
-                    // 청크 크기가 공용이라 여기서 모두의 프레임이 사라졌다.
                     tracing::error!("청킹 실패({}): {e:?}", sub.id.0);
                 }
             }

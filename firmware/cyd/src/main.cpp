@@ -107,6 +107,19 @@ static uint32_t lvglMaxHandlerUs = 0;
 // 찾아야 한다(`setup()` 참고). 콜백 안에서는 `lv_indev_active()`(LVGL v9
 // 공개 API, "Can be used in action functions too" — `lvgl/src/indev/lv_indev.h`)
 // 로 지금 이 이벤트를 일으킨 입력장치를 되찾는다.
+static lv_indev_read_cb_t g_origTouchReadCb = nullptr;
+static void wrappedTouchReadCb(lv_indev_t *indev, lv_indev_data_t *data) {
+    if (g_origTouchReadCb != nullptr) {
+        g_origTouchReadCb(indev, data);
+    }
+    if (data->point.x >= 240) {
+        data->point.x = 239;
+    }
+    if (data->point.y >= 320) {
+        data->point.y = 319;
+    }
+}
+
 static void onTouchEvent(lv_event_t *e) {
     (void)e;
     lv_indev_t *indev = lv_indev_active();
@@ -118,19 +131,12 @@ static void onTouchEvent(lv_event_t *e) {
     Serial.printf("touch: x=%d y=%d\n", point.x, point.y);
 }
 
-// T14a 가 만든 디버그 로거를 그대로 남긴다 — 좌표를 시리얼에 찍는 것은
-// 페어링 키패드(Task 14b, `ui_pairing.cpp`)가 실제로 위젯을 눌렀을 때도
-// 여전히 유용하다(특히 오른쪽 열 버튼의 가장자리를 눌렀을 때 XPT2046
-// 소프트웨어 미러 X 좌표 off-by-one 이 재현되는지 확인할 때 —
-// `task-14b-brief.md` 상단 캐비어트, `ui_pairing.cpp` 의 대응 옵션 주석
-// 참고). LV_EVENT_PRESSED 는 눌리는 "순간"에 한 번만 온다(누르고 있는
-// 동안 계속 오는 LV_EVENT_PRESSING 이 아니다).
 static void registerTouchDebugLogger() {
-    // 등록된 포인터형(터치) 입력장치를 전부 찾아 콜백을 건다 — 이 보드는
-    // XPT2046 저항막 터치 하나뿐이라 보통 한 번만 걸린다.
     lv_indev_t *indev = nullptr;
     while ((indev = lv_indev_get_next(indev)) != nullptr) {
         if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+            g_origTouchReadCb = lv_indev_get_read_cb(indev);
+            lv_indev_set_read_cb(indev, wrappedTouchReadCb);
             lv_indev_add_event_cb(indev, onTouchEvent, LV_EVENT_PRESSED, nullptr);
         }
     }
@@ -220,16 +226,17 @@ void setup() {
     // `setup()` 이 끝나야 시작되므로 **이 루프 안에서는 힙이 전혀 안 보인다** —
     // 화면 없는 기기가 유일하게 오래 머무를 수 있는 자리인데 계측이 0 이 된다.
     // 누수가 입증된 것은 아니다. 누수가 생기면 보이게 해 두는 것뿐이다.
-    uint32_t attempts = 0;
-    while (!wifiConnectOrPortal(config)) {
-        ++attempts;
-        Serial.printf("wifi: 연결도 설정도 못 했다 (%u번째 실패, heap=%u) — 다시 시도한다\n",
-                      attempts, ESP.getFreeHeap());
+    const TransportMode mode = configLoadMode();
+    if (mode == TransportMode::Ble) {
+        Serial.println("main: 저장된 모드가 BLE입니다. WiFi 연결을 건너뛰고 BLE로 진입합니다.");
+    } else {
+        if (!wifiConnectOrPortal(config)) {
+            Serial.println("wifi: 연결 실패 — 루프에서 모드 전환 또는 재시도 대기");
+        } else {
+            Serial.printf("wifi: 연결됨 ssid=\"%s\" ip=%s rssi=%d\n",
+                          WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+        }
     }
-
-    Serial.printf("wifi: 연결됨 ssid=\"%s\" ip=%s rssi=%d\n",
-                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
-                  WiFi.RSSI());
 
     // WebSocket 이 붙기 전, 부팅 중 한 번만. `MDNS.begin()` 도 여기서 딱 한
     // 번만 불린다(T12-B, `transport.h` 상단 주석).
@@ -289,14 +296,24 @@ void loop() {
         // 그대로다 — WiFi 가 영영 끊긴 기기는 `Transport` 가 맥에 붙으려 계속
         // 재시도하는 동안(백오프가 캡인 30초로 수렴한다) 시리얼에 `wifi=down` 으로
         // 보이는 것이 오늘의 전부다.
-        if (WiFi.isConnected()) {
+        const bool isBle = (transport.mode() == TransportMode::Ble);
+        if (isBle) {
             Serial.printf(
-                "alive  heap=%u wifi=up rssi=%d authStep=%d authorized=%s lvglMaxUs=%u\n",
+                "alive  heap=%u mode=BLE isConn=%s authStep=%d auth=%s snap=%s lvglMaxUs=%u\n",
+                ESP.getFreeHeap(), transport.isConnected() ? "yes" : "no",
+                (int)transport.authStep(), transport.authorized() ? "yes" : "no",
+                transport.hasSnapshot() ? "yes" : "no", lvglMaxHandlerUs);
+        } else if (WiFi.isConnected()) {
+            Serial.printf(
+                "alive  heap=%u mode=WiFi wifi=up rssi=%d authStep=%d auth=%s snap=%s lvglMaxUs=%u\n",
                 ESP.getFreeHeap(), WiFi.RSSI(), (int)transport.authStep(),
-                transport.authorized() ? "yes" : "no", lvglMaxHandlerUs);
+                transport.authorized() ? "yes" : "no", transport.hasSnapshot() ? "yes" : "no",
+                lvglMaxHandlerUs);
         } else {
-            Serial.printf("alive  heap=%u wifi=down lvglMaxUs=%u\n",
-                          ESP.getFreeHeap(), lvglMaxHandlerUs);
+            Serial.printf(
+                "alive  heap=%u mode=WiFi wifi=down authStep=%d auth=%s snap=%s lvglMaxUs=%u\n",
+                ESP.getFreeHeap(), (int)transport.authStep(), transport.authorized() ? "yes" : "no",
+                transport.hasSnapshot() ? "yes" : "no", lvglMaxHandlerUs);
         }
         // 다음 5초 구간의 최댓값을 새로 잰다 — 하트비트 간격마다 리셋.
         lvglMaxHandlerUs = 0;

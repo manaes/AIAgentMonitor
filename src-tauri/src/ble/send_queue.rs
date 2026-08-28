@@ -23,6 +23,7 @@ impl SendQueue {
     }
 
     pub fn offer(&mut self, chunks: Vec<Vec<u8>>) {
+        self.paused = false;
         if self.started && !self.current.is_empty() {
             // 진행 중인 프레임은 건드리지 않고, 대기 슬롯만 최신으로 교체한다.
             self.next = Some(chunks);

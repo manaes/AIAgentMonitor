@@ -8,6 +8,18 @@
 
 #include <Arduino.h>
 
+/// 연결 전송 모드 (WiFi LAN 또는 BLE)
+enum class TransportMode : uint8_t {
+    WiFi = 0,
+    Ble = 1,
+};
+
+/// NVS에서 저장된 연결 모드를 읽는다. 기본값은 WiFi.
+TransportMode configLoadMode();
+
+/// NVS에 연결 모드를 저장한다.
+void configSaveMode(TransportMode mode);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 토큰은 **평문으로** NVS 에 저장된다.
 //

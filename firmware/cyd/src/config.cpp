@@ -9,6 +9,7 @@ namespace {
 constexpr char NVS_NAMESPACE[] = "aim";
 constexpr char KEY_MACHOST[] = "machost";
 constexpr char KEY_TOKEN[] = "token";
+constexpr char KEY_MODE[] = "mode";
 
 /// 설정 포털 AP 이름. 스펙과 브리프가 정한 이름이고, 사람이 폰의 WiFi 목록에서
 /// 찾아야 하므로 바꾸면 문서와 어긋난다.
@@ -297,3 +298,25 @@ bool wifiConnectOrPortal(Config &c) {
     }
     return true;
 }
+
+TransportMode configLoadMode() {
+    Preferences prefs;
+    if (!prefs.begin(NVS_NAMESPACE, /*readOnly=*/true)) {
+        return TransportMode::WiFi;
+    }
+    const uint8_t raw = prefs.getUChar(KEY_MODE, 0);
+    prefs.end();
+    return (raw == 1) ? TransportMode::Ble : TransportMode::WiFi;
+}
+
+void configSaveMode(TransportMode mode) {
+    Preferences prefs;
+    if (!openForWrite(prefs, "mode")) {
+        return;
+    }
+    const uint8_t raw = (mode == TransportMode::Ble) ? 1 : 0;
+    prefs.putUChar(KEY_MODE, raw);
+    prefs.end();
+    Serial.printf("config: 연결 모드 저장 — %s\n", (mode == TransportMode::Ble) ? "BLE" : "WiFi");
+}
+

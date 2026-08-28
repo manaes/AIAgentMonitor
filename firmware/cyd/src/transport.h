@@ -92,70 +92,50 @@
 #include "config.h"
 #include "cryptov2.h"
 #include "snapshot.h"
+#include "transport_ble.h"
 
 class Transport {
   public:
     Transport();
     ~Transport();
 
-    /// 한 번만 부른다 — 보통 `setup()` 에서, WiFi 연결 뒤. `MDNS.begin()`
-    /// 도 여기서 딱 한 번 불린다(위 T12-B).
+    /// 한 번만 부른다 — 보통 `setup()` 에서, WiFi/BLE 설정 로드 뒤.
     void begin(Config &config);
 
-    /// 매 `loop()` 마다 부른다. 한 바퀴가 실제로 블로킹할 수 있는 최댓값과
-    /// 근거는 이 파일 상단의 예산 분석을 보라.
+    /// 매 `loop()` 마다 부른다.
     void loop();
 
-    /// 세션 키가 서고 스냅샷을 구독할 수 있는 상태인가. `authStep() ==
-    /// AuthStep::Subscribed` 의 얇은 편의 함수 — 브리프가 정한 시그니처를
-    /// 유지하면서, Task 14 가 실제로 필요로 하는 정밀도는 `authStep()` 이
-    /// 준다.
+    /// 세션 키가 서고 스냅샷을 구독할 수 있는 상태인가.
     bool authorized() const;
 
-    /// 지금 인증 핸드셰이크의 상태. 아직 소켓조차 없을 때는 "다음에 연결되면
-    /// 보낼 동사"를 미리 담아 둔다(`SendAuth2` 또는 `NeedsPairing`) — 아직
-    /// 아무것도 보내지 않았다는 뜻이지 이미 보냈다는 뜻이 아니다. 소켓이 붙어
-    /// 실제로 그 동사를 보내고 나면 응답에 따라 다음 값으로 넘어간다.
-    AuthStep authStep() const { return authStep_; }
+    /// 현재 활성 모드 (WiFi 또는 BLE)
+    TransportMode mode() const { return mode_; }
 
-    /// 페어링 키패드(Task 14b, `ui_pairing.cpp`)의 확인 버튼이 부른다 —
-    /// "사람이 방금 6자리를 입력했다" 를 전달하는 유일한 통로다. Task 12
-    /// 는 이 진입점을 몰랐다: 그때는 키패드 UI 가 없어서 `hasCode` 가
-    /// 코드 전체에서 항상 false 였다.
-    ///
-    /// 코드를 들고 있다가 다음(또는 지금 붙어 있는 연결을 끊고 새로)
-    /// `loop()` 에서 HELLO2 부터 새로 시작한다 — 저장된 토큰이 있어도
-    /// 코드가 우선한다(`authfsm.h` 의 `authInitialStep` 문서와 같은 규칙,
-    /// 이 함수는 그 규칙을 다시 적지 않고 그대로 위임한다). 코드 자체는
-    /// `Denied`/`Rejected`(→ `NeedsPairing`) 또는 성공(→ `Subscribed`) 으로
-    /// 결론이 날 때까지 들고 있는다 — 그 전에 연결이 그냥 끊기기만 했다면
-    /// (예: WiFi 순단) 같은 코드로 다음 재시도 때 자동으로 다시 HELLO2 를
-    /// 보낸다. 사람이 다시 타이핑하게 만들 이유가 없다.
+    /// 연결 모드를 전환한다. (NVS에 저장됨)
+    void setMode(TransportMode mode);
+
+    /// 지금 인증 핸드셰이크의 상태.
+    AuthStep authStep() const;
+
+    /// 페어링 키패드의 확인 버튼이 부른다.
     void submitCode(const String &code);
 
-    /// 마지막으로 실제 와이어에서 받은 `Denied.left` 값. 첫 시도 전에는
-    /// 맥의 실제 상수(`MAX_ATTEMPTS`, `src-tauri/src/ble/pairing.rs:47`,
-    /// 2026-08-27 그 커밋 기준 확인)와 같은 값 5 로 초기화해 둔다 —
-    /// 와이어에 없는 값을 추측하는 게 아니라, 첫 시도 전에는 실제로 5회가
-    /// 맞기 때문이다(브리프의 "remaining time and remaining attempts"
-    /// 요구를 놓고 T14b-A 가 내린 판단 — `AwaitingCode2` 는 이 값을 전혀
-    /// 싣지 않으므로 첫 화면에서는 이 초기값 말고 얻을 방법이 없다).
-    uint8_t attemptsLeft() const { return attemptsLeft_; }
+    /// 페어링 실패 잔여 횟수.
+    uint8_t attemptsLeft() const;
 
-    /// WebSocket 소켓이 현재 Mac과 연결되어 있는가.
-    bool isConnected() const { return const_cast<WebSocketsClient &>(webSocket_).isConnected(); }
+    /// 현재 Mac과 연결되어 있는가.
+    bool isConnected() const;
 
-    /// 최근에 성공적으로 복호화·파싱된 스냅샷을 받은 적이 있는가. `false`
-    /// 면 `latestSnapshot()` 은 아직 기본값(전부 0/빈 값)이다 — Task 15b
-    /// 는 이 값을 "카드에 무엇을 그릴지" 를 정하기 전에 먼저 물어야 한다.
-    bool hasSnapshot() const { return hasSnapshot_; }
+    /// 최근에 성공적으로 복호화·파싱된 스냅샷을 받은 적이 있는가.
+    bool hasSnapshot() const;
 
-    /// 가장 최근에 받은 스냅샷. `hasSnapshot()` 이 `false` 인 동안은
-    /// 유효하지 않다(기본 생성값일 뿐이다).
-    const Snapshot &latestSnapshot() const { return latestSnapshot_; }
+    /// 가장 최근에 받은 스냅샷.
+    const Snapshot &latestSnapshot() const;
 
   private:
     Config *config_ = nullptr;
+    TransportMode mode_ = TransportMode::WiFi;
+    TransportBle ble_;
     WebSocketsClient webSocket_;
 
     AuthStep authStep_ = AuthStep::NeedsPairing;

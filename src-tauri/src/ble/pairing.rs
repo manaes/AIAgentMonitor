@@ -363,6 +363,11 @@ impl PairingManager {
         code
     }
 
+    /// 열려 있던 페어링 창을 닫고 리셋한다.
+    pub fn reset_pairing_window(&mut self) {
+        self.pending = None;
+    }
+
     /// 영속화된 페어링을 복원한다. 형식(32자 소문자 hex)에 맞지 않는 항목은
     /// 조용히 버린다 — 파일이 손상돼도 인증 우회로 이어지지 않게 한다.
     pub fn load_peers(&mut self, peers: Vec<(String, u64)>) {
