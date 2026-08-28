@@ -126,7 +126,6 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_bg_opa(topRow, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(topRow, 0, 0);
         lv_obj_set_style_pad_all(topRow, 0, 0);
-        lv_obj_set_style_pad_bottom(topRow, 6, 0);
         lv_obj_set_flex_flow(topRow, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(topRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
@@ -136,7 +135,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_label_set_text(cw.nameLabel, "");
 
         cw.rateLabel = lv_label_create(topRow);
-        lv_obj_set_style_text_font(cw.rateLabel, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_font(cw.rateLabel, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(cw.rateLabel, lv_color_hex(0x0a84ff), 0);
         lv_label_set_text(cw.rateLabel, "");
 
