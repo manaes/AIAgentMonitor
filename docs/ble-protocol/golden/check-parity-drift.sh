@@ -175,7 +175,7 @@ done
 # 이 값이 틀렸다고 실패하면: (a) Swift 포팅을 같이 고쳤는지 확인하고
 # (b) `node extract.mjs` 가 출력한 새 문자열로 아래 값을 갱신한다.
 # ---------------------------------------------------------------------------
-relative_time_pin='function relativeTime(secsSinceEpoch) { const elapsed = Math.floor(Date.now() / 1000) - secsSinceEpoch; if (elapsed < 5) return "just now"; if (elapsed < 60) return `${elapsed}s ago`; if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m ago`; return `${Math.floor(elapsed / 3600)}h ago`; }'
+relative_time_pin='function relativeTime(secsSinceEpoch) { const elapsed = Math.floor(Date.now() / 1000) - secsSinceEpoch; if (elapsed < 5) return "방금 전"; if (elapsed < 60) return `${elapsed}초 전`; if (elapsed < 3600) return `${Math.floor(elapsed / 60)}분 전`; return `${Math.floor(elapsed / 3600)}시간 전`; }'
 
 echo "[2] format.ts ↔ 고정 사본 (생성기가 복제하지 않는 함수)"
 actual="$(extract "$format_ts" relativeTime)"

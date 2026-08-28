@@ -11,7 +11,8 @@
 export function formatTokensPerSec(v: number): string {
   if (v < 1) return "0";
   if (v < 1000) return v.toFixed(0);
-  return (v / 1000).toFixed(1) + "k";
+  if (v < 1_000_000) return (v / 1000).toFixed(1) + "k";
+  return (v / 1_000_000).toFixed(1) + "M";
 }
 
 export function formatTokensTotal(n: number): string {

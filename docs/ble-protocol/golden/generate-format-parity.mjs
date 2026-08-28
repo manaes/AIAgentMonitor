@@ -22,7 +22,8 @@
 function formatTokensPerSec(v) {
   if (v < 1) return "0";
   if (v < 1000) return v.toFixed(0);
-  return (v / 1000).toFixed(1) + "k";
+  if (v < 1_000_000) return (v / 1000).toFixed(1) + "k";
+  return (v / 1_000_000).toFixed(1) + "M";
 }
 
 function formatTokensTotal(n) {

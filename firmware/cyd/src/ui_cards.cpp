@@ -77,6 +77,19 @@ void formatResetCountdown(uint64_t resetEpochSec, uint64_t currentEpochSec, char
     }
 }
 
+// tok/s 속도 단축 포맷팅 (예: 0 -> "0 tok/s", 45 -> "45 tok/s", 2100 -> "2.1k tok/s", 1500000 -> "1.5M tok/s")
+void formatTokensPerSec(float v, char *buf, size_t bufSize) {
+    if (v < 1.0f) {
+        snprintf(buf, bufSize, "0 tok/s");
+    } else if (v < 1000.0f) {
+        snprintf(buf, bufSize, "%.0f tok/s", v);
+    } else if (v < 1000000.0f) {
+        snprintf(buf, bufSize, "%.1fk tok/s", v / 1000.0f);
+    } else {
+        snprintf(buf, bufSize, "%.1fM tok/s", v / 1000000.0f);
+    }
+}
+
 }  // namespace
 
 lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
@@ -239,13 +252,9 @@ void uiCardsUpdate(const Transport &transport) {
         // 이름
         lv_label_set_text(cw.nameLabel, getAgentName(ag.kind));
 
-        // tok/s 속도
+        // tok/s 속도 (k/M 단축 표기 적용)
         char rateBuf[32];
-        if (ag.rateTokPerSec > 0.05f) {
-            snprintf(rateBuf, sizeof(rateBuf), "%.1f tok/s", ag.rateTokPerSec);
-        } else {
-            snprintf(rateBuf, sizeof(rateBuf), "0 tok/s");
-        }
+        formatTokensPerSec(ag.rateTokPerSec, rateBuf, sizeof(rateBuf));
         lv_label_set_text(cw.rateLabel, rateBuf);
 
         // 5시간 쿼터 (사용량 표시)
