@@ -24,6 +24,7 @@
 #include "transport.h"
 #include "font_ko.h"
 #include "ui_pairing.h"
+#include "ui_nav.h"
 
 // **위 `#include "font_ko.h"` 자체가 실질적인 코드다, 장식이 아니다.**
 // PlatformIO 의 chain LDF 는 소스의 `#include` 문을 보고 어떤 `lib/<name>/`
@@ -162,7 +163,7 @@ void setup() {
     smartdisplay_init();
     lastLvglTickMs = millis();
     registerTouchDebugLogger();
-    uiPairingCreate(transport);
+    uiNavCreate(transport);
 
     // T14a-A — "부팅 직후 최초 전체 리프레시" 시간. 위젯을 막 만든 직후라
     // 화면 전체가 dirty 상태이므로, 이 첫 lv_timer_handler() 호출이 곧 첫
@@ -251,10 +252,9 @@ void loop() {
     // 문서화 기준 8초)과 이 값을 단순 합산하면 30초 예산 안에 들지만,
     // 둘이 **같은 순간에** 최악을 찍는 조합은 아직 실측된 적이 없다 —
     // Task 14b/15 가 위젯을 늘릴 때 다시 재야 한다.
-    // Task 14b — 화면 내용을 이번 프레임에 그리기 전에 최신 상태로 맞춘다.
-    // 위젯을 다시 만들지 않고 텍스트/버튼 상태만 갱신하므로(T12-D, 깜빡임
-    // 방지) 매 loop() 마다 불러도 싸다.
-    uiPairingUpdate(transport);
+    // Task 15b — 화면 내용을 이번 프레임에 그리기 전에 최신 상태로 맞춘다.
+    // 위젯을 다시 만들지 않고 텍스트/버튼/바 상태만 갱신하므로 매 loop() 마다 불러도 싸다.
+    uiNavUpdate(transport);
 
     lv_tick_inc(now - lastLvglTickMs);
     lastLvglTickMs = now;

@@ -250,11 +250,16 @@ void uiPairingUpdate(Transport &transport) {
 
     if (!isPairingRelevant(step)) {
         lv_obj_add_flag(g_root, LV_OBJ_FLAG_HIDDEN);       // 이미 숨어 있으면 lv_obj_add_flag 자체가 즉시 반환한다(실제 소스 확인).
-        lv_obj_remove_flag(g_otherLabel, LV_OBJ_FLAG_HIDDEN);
-        const int subscribed = (step == AuthStep::Subscribed) ? 1 : 0;
-        if (subscribed != g_otherLabelSubscribedCache) {
-            g_otherLabelSubscribedCache = subscribed;
-            lv_label_set_text(g_otherLabel, subscribed ? "연결됨" : "연결 중");
+        if (step == AuthStep::Subscribed) {
+            // Task 15b: 인가 완료 시에는 카드/세션 뷰가 전체 화면을 차지하므로 안내 라벨을 숨긴다.
+            lv_obj_add_flag(g_otherLabel, LV_OBJ_FLAG_HIDDEN);
+            g_otherLabelSubscribedCache = 1;
+        } else {
+            lv_obj_remove_flag(g_otherLabel, LV_OBJ_FLAG_HIDDEN);
+            if (g_otherLabelSubscribedCache != 0) {
+                g_otherLabelSubscribedCache = 0;
+                lv_label_set_text(g_otherLabel, "연결 중");
+            }
         }
         return;
     }

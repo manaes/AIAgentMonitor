@@ -85,7 +85,8 @@ pub struct ParsedTurn {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub tokens_cache_read: u32,
-    pub quota_remaining: Option<u64>,
+    /// 서버가 보고한 현재 5시간 버킷의 누적 사용량.
+    pub quota_used: Option<u64>,
     pub quota_limit: Option<u64>,
     pub last_step_index: Option<i64>,
 }
@@ -283,7 +284,7 @@ fn parse_quota_submessage(buf: &[u8], turn: &mut ParsedTurn) {
                             None => break,
                         };
                         match f10 {
-                            1 => turn.quota_remaining = Some(val),
+                            1 => turn.quota_used = Some(val),
                             4 => turn.quota_limit = Some(val),
                             _ => {}
                         }
@@ -296,6 +297,15 @@ fn parse_quota_submessage(buf: &[u8], turn: &mut ParsedTurn) {
             break;
         }
     }
+}
+
+/// Antigravity metadata의 quota bucket을 화면용 사용률로 변환한다.
+///
+/// F9.F10.F1은 이름 그대로 이미 `quota_used`다. 이를 remaining으로 취급해
+/// 100에서 빼면 사용률이 정확히 반전된다.
+fn quota_used_pct(turn: &ParsedTurn) -> Option<f32> {
+    let (used, limit) = (turn.quota_used?, turn.quota_limit?);
+    (limit > 0).then(|| ((used as f32 / limit as f32) * 100.0).clamp(0.0, 100.0))
 }
 
 /// `steps.metadata`의 Protobuf BLOB에서 타임스탬프 추출 (F1.F1: epoch seconds, F1.F2: nanos)
@@ -492,16 +502,10 @@ fn tail_conversation_db(
 
                 let is_recent = now.duration_since(ts).unwrap_or_default() <= FIVE_H;
 
-                if let (Some(rem), Some(limit)) = (turn.quota_remaining, turn.quota_limit) {
-                    if limit > 0 {
-                        // rem은 CLI의 "Five Hour Limit Remaining (80.66%)"에 해당.
-                        // 앱의 used_pct(사용률)는 100% - rem_pct = 19.34%
-                        let rem_pct = (rem as f32 / limit as f32) * 100.0;
-                        let used_pct = (100.0 - rem_pct).clamp(0.0, 100.0);
-                        *quota.used_pct_5h.lock().unwrap() = Some(used_pct);
-                        if is_recent {
-                            *quota.reset_5h.lock().unwrap() = Some(ts + FIVE_H);
-                        }
+                if let Some(used_pct) = quota_used_pct(&turn) {
+                    *quota.used_pct_5h.lock().unwrap() = Some(used_pct);
+                    if is_recent {
+                        *quota.reset_5h.lock().unwrap() = Some(ts + FIVE_H);
                     }
                 }
 
@@ -721,9 +725,21 @@ mod tests {
         assert_eq!(turn.tokens_out, 1298);
         assert_eq!(turn.tokens_in, 17357);
         assert_eq!(turn.tokens_cache_read, 318);
-        assert_eq!(turn.quota_remaining, Some(24348));
+        assert_eq!(turn.quota_used, Some(24348));
         assert_eq!(turn.quota_limit, Some(256000));
         assert_eq!(turn.last_step_index, Some(1));
+    }
+
+    #[test]
+    fn quota_used_is_not_inverted_as_remaining() {
+        let turn = ParsedTurn {
+            quota_used: Some(24_348),
+            quota_limit: Some(256_000),
+            ..Default::default()
+        };
+
+        let pct = quota_used_pct(&turn).expect("valid quota bucket");
+        assert!((pct - 9.510_938).abs() < 0.000_1);
     }
 
     #[test]
