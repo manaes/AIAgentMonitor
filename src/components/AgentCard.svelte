@@ -52,12 +52,13 @@
     return null;
   });
 
-  // 수동 동기화: claude를 프록시 경유로 1회 핑(이 핑만 프록시를 거침). 값은 스냅샷으로 자동 반영.
+  // 수동 동기화: Claude는 프록시 핑, Antigravity는 `agy -p /usage`를 즉시 조회한다.
   let syncing = $state(false);
   async function syncQuota() {
     if (syncing) return;
     syncing = true;
-    try { await invoke("sync_quota"); } catch (e) { console.error("sync_quota", e); }
+    const command = agent.kind === "antigravity" ? "sync_antigravity_quota" : "sync_quota";
+    try { await invoke(command); } catch (e) { console.error(command, e); }
     setTimeout(() => { syncing = false; }, 6000);
   }
 </script>
@@ -87,10 +88,12 @@
 
   <QuotaBar tokens_5h={agent.tokens_5h} auto_pct={agent.quota_used_pct} weekly_pct={agent.quota_used_pct_weekly} reset_5h={isReset5h} />
 
-  {#if agent.kind === "claude"}
+  {#if agent.kind === "claude" || agent.kind === "antigravity"}
     <div class="sync-row">
       <button class="inline-btn" onclick={syncQuota} disabled={syncing}
-        title="프록시로 실제 5h 사용량 동기화 (claude를 1회 핑). 활동 중엔 10분마다 자동 보정.">
+        title={agent.kind === "antigravity"
+          ? "agy /usage로 Gemini 5시간·주간 사용량을 즉시 갱신합니다."
+          : "프록시로 실제 5h 사용량 동기화 (claude를 1회 핑). 활동 중엔 10분마다 자동 보정."}>
         {syncing ? "동기화 중…" : "🔄 동기화"}
       </button>
     </div>

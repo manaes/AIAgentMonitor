@@ -15,6 +15,7 @@ import {
   unpairAll,
   getSettings,
   setEnabledAgents,
+  setAntigravityPollInterval,
   type Snapshot,
   type BleStatus,
   type NetworkStatus,
@@ -257,10 +258,26 @@ class SnapshotStore {
   async setEnabledAgents(agents: AgentKind[]) {
     try {
       await setEnabledAgents(agents);
-      this.settings = { enabled_agents: agents };
+      this.settings = {
+        enabled_agents: agents,
+        antigravity_poll_interval_secs: this.settings?.antigravity_poll_interval_secs ?? 300,
+      };
       this.settingsActionError = null;
     } catch (e) {
       this.settingsActionError = `설정을 저장하지 못했습니다: ${e}`;
+    }
+  }
+
+  async setAntigravityPollInterval(seconds: number) {
+    try {
+      await setAntigravityPollInterval(seconds);
+      this.settings = {
+        enabled_agents: this.settings?.enabled_agents ?? ["claude", "codex", "antigravity"],
+        antigravity_poll_interval_secs: seconds,
+      };
+      this.settingsActionError = null;
+    } catch (e) {
+      this.settingsActionError = `Antigravity 갱신 주기를 저장하지 못했습니다: ${e}`;
     }
   }
 }

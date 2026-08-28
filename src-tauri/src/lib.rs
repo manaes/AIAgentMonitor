@@ -17,7 +17,7 @@ use clock::SystemClock;
 use emitter::EmitGate;
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::Duration;
@@ -484,10 +484,31 @@ async fn set_enabled_agents(
     agents: Vec<AgentKind>,
     state: tauri::State<'_, Arc<Mutex<settings::AppSettings>>>,
 ) -> Result<(), String> {
-    let updated = settings::AppSettings { enabled_agents: agents.into_iter().collect() };
+    let mut guard = state.lock().await;
+    let mut updated = guard.clone();
+    updated.enabled_agents = agents.into_iter().collect();
     settings::SettingsStore::save_to(&settings::SettingsStore::path(), &updated)
         .map_err(|e| e.to_string())?;
-    *state.lock().await = updated;
+    *guard = updated;
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_antigravity_poll_interval(
+    seconds: u64,
+    state: tauri::State<'_, Arc<Mutex<settings::AppSettings>>>,
+    poll_interval: tauri::State<'_, Arc<AtomicU64>>,
+) -> Result<(), String> {
+    if !(60..=3600).contains(&seconds) {
+        return Err("Antigravity 갱신 주기는 1분~60분 사이여야 합니다.".into());
+    }
+    let mut guard = state.lock().await;
+    let mut updated = guard.clone();
+    updated.antigravity_poll_interval_secs = seconds;
+    settings::SettingsStore::save_to(&settings::SettingsStore::path(), &updated)
+        .map_err(|e| e.to_string())?;
+    *guard = updated;
+    poll_interval.store(seconds, Ordering::Relaxed);
     Ok(())
 }
 
@@ -634,6 +655,17 @@ async fn sync_quota() -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn sync_antigravity_quota(
+    quota: tauri::State<'_, Arc<watchers::antigravity::AntigravityQuota>>,
+) -> Result<(), String> {
+    let quota = quota.inner().clone();
+    tokio::task::spawn_blocking(move || watchers::antigravity::poll_usage(&quota))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 async fn check_update_on_startup(app: tauri::AppHandle) {
     tokio::time::sleep(Duration::from_secs(5)).await;
 
@@ -714,6 +746,11 @@ pub fn run() {
     let codex_quota = Arc::new(watchers::codex::CodexQuota::default());
     let codex_quota_ping_running = Arc::new(AtomicBool::new(false));
     let antigravity_quota = Arc::new(watchers::antigravity::AntigravityQuota::default());
+    let initial_settings = settings::SettingsStore::load_from(&settings::SettingsStore::path());
+    let antigravity_poll_interval = Arc::new(AtomicU64::new(
+        initial_settings.antigravity_poll_interval_secs,
+    ));
+    let settings_state = Arc::new(Mutex::new(initial_settings));
 
     // Watchers (Claude + Codex + Antigravity). 실패해도 앱은 띄움.
     // Claude Code는 macOS/Windows 모두 ~/.claude/projects 사용 (home()이 OS별 홈 경로 반환)
@@ -729,6 +766,7 @@ pub fn run() {
         antigravity_summaries,
         tx.clone(),
         antigravity_quota.clone(),
+        antigravity_poll_interval.clone(),
     );
 
     // quota 프록시 spawn (포트 4319). Claude Code에 ANTHROPIC_BASE_URL 설정 시에만 트래픽이 흐른다.
@@ -758,9 +796,6 @@ pub fn run() {
     // (간단함 우선, 사용자 확인). BLE/네트워크 미러 페이로드가 이 필터링된
     // Snapshot 에서 만들어지므로 iOS 쪽도 자동으로 같은 필터를 반영한다 —
     // 그쪽 코드는 한 줄도 안 건드린다.
-    let settings_state = Arc::new(Mutex::new(
-        settings::SettingsStore::load_from(&settings::SettingsStore::path()),
-    ));
     // BLE 와 네트워크가 공유하는 페어링 상태(2026-08-25 스펙). 창 하나, 코드 하나,
     // 시도 예산 하나 — 그래야 원 스펙 5.2 의 무차별 대입 근거가 두 전송에 걸쳐
     // 그대로 성립한다(공격자는 어느 전송으로 오든 같은 5회를 나눠 쓴다).
@@ -838,6 +873,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_detail_window,
             sync_quota,
+            sync_antigravity_quota,
             ble_status,
             ble_set_enabled,
             network_status,
@@ -852,6 +888,7 @@ pub fn run() {
             unpair_all,
             get_settings,
             set_enabled_agents,
+            set_antigravity_poll_interval,
         ])
         .setup({
             let aggregator = aggregator.clone();
@@ -859,11 +896,14 @@ pub fn run() {
             let quota_state = quota_state.clone();
             let codex_quota = codex_quota.clone();
             let antigravity_quota = antigravity_quota.clone();
+            let antigravity_poll_interval = antigravity_poll_interval.clone();
             let settings_state = settings_state.clone();
             let shared_pairing = shared_pairing.clone();
             move |app| {
                 use tauri::Manager;
                 app.manage(settings_state.clone());
+                app.manage(antigravity_quota.clone());
+                app.manage(antigravity_poll_interval.clone());
                 app.manage(shared_pairing.clone());
                 // Dock 아이콘 숨김 — setup 초반에 호출
                 #[cfg(target_os = "macos")]

@@ -177,6 +177,7 @@ export async function unpairAll(): Promise<void> {
 
 export type AppSettings = {
   enabled_agents: AgentKind[];
+  antigravity_poll_interval_secs: number;
 };
 
 export async function getSettings(): Promise<AppSettings> {
@@ -185,4 +186,8 @@ export async function getSettings(): Promise<AppSettings> {
 
 export async function setEnabledAgents(agents: AgentKind[]): Promise<void> {
   return invoke<void>("set_enabled_agents", { agents });
+}
+
+export async function setAntigravityPollInterval(seconds: number): Promise<void> {
+  return invoke<void>("set_antigravity_poll_interval", { seconds });
 }

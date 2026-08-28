@@ -17,6 +17,7 @@
   const ALL_KINDS: AgentKind[] = ["claude", "codex", "antigravity"];
 
   let enabled = $derived(new Set(store.settings?.enabled_agents ?? ALL_KINDS));
+  let antigravityPollInterval = $derived(store.settings?.antigravity_poll_interval_secs ?? 300);
 
   function toggle(kind: AgentKind, checked: boolean) {
     const next = new Set(enabled);
@@ -26,6 +27,10 @@
     // 무엇을 내보낼지일 뿐이다. 그래서 전부 꺼도 데이터 자체가 사라지지
     // 않고, 다시 켜면 끊김 없이 바로 보인다.
     store.setEnabledAgents(ALL_KINDS.filter((k) => next.has(k)));
+  }
+
+  function setAntigravityPollInterval(seconds: number) {
+    store.setAntigravityPollInterval(seconds);
   }
 </script>
 
@@ -51,6 +56,25 @@
       </li>
     {/each}
   </ul>
+
+  <div class="polling">
+    <p class="label">Antigravity 갱신 주기</p>
+    <div class="poll-row">
+      <span class="subtle"><code>agy -p /usage</code> 자동 조회</span>
+      <select
+        value={antigravityPollInterval}
+        onchange={(e) => setAntigravityPollInterval(Number(e.currentTarget.value))}
+        aria-label="Antigravity 갱신 주기"
+      >
+        <option value={60}>1분</option>
+        <option value={300}>5분</option>
+        <option value={600}>10분</option>
+        <option value={900}>15분</option>
+        <option value={1800}>30분</option>
+        <option value={3600}>1시간</option>
+      </select>
+    </div>
+  </div>
 </div>
 
 <style>
@@ -72,4 +96,11 @@
     font-size: 12px; color: #f2f2f7;
   }
   .check-row input { accent-color: #0a84ff; }
+  .polling { border-top: 1px solid #3a3a3c; margin-top: 10px; padding-top: 10px; }
+  .poll-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  code { font-size: 9px; }
+  select {
+    background: #3a3a3c; border: 1px solid #48484a; border-radius: 5px;
+    color: #f2f2f7; font-size: 11px; padding: 3px 5px;
+  }
 </style>

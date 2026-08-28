@@ -2,25 +2,99 @@
 //! gen_metadata 및 steps 테이블을 tail하여 턴별 토큰 사용량과 quota 한도 정보를 수집한다.
 
 use crate::types::{AgentKind, TokenCounts, TokenEvent};
+use crate::watchers::claude::parse_iso8601;
 use anyhow::Result;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 const FIVE_H: Duration = Duration::from_secs(5 * 3600);
 
-/// Antigravity 사용량/쿼터 정보 (gen_metadata 버킷 또는 OAuth API에서 캡처)
+/// Antigravity 서버가 보고한 Gemini 계정 사용량.
 #[derive(Default)]
 pub struct AntigravityQuota {
     pub used_pct_5h: Mutex<Option<f32>>,
     pub reset_5h: Mutex<Option<SystemTime>>,
     pub used_pct_weekly: Mutex<Option<f32>>,
     pub reset_weekly: Mutex<Option<SystemTime>>,
+}
+
+#[derive(Debug, PartialEq)]
+struct UsageLimits {
+    used_pct_5h: f32,
+    reset_5h: SystemTime,
+    used_pct_weekly: f32,
+    reset_weekly: SystemTime,
+}
+
+/// `agy -p /usage` 출력 중 Gemini Models의 두 계정 quota만 읽는다.
+/// 대화별 context window(256k)는 계정 quota가 아니므로 여기서 절대 사용하지 않는다.
+fn parse_usage_limits(output: &str) -> Option<UsageLimits> {
+    let mut five_hour = None;
+    let mut weekly = None;
+
+    for line in output.lines().map(str::trim) {
+        if !line.starts_with("Gemini Models") {
+            continue;
+        }
+        let remaining = line
+            .split_whitespace()
+            .find_map(|part| part.strip_suffix('%'))?
+            .parse::<f32>()
+            .ok()?;
+        let reset_at = parse_iso8601(line.split_whitespace().last()?)?;
+        let used = (100.0 - remaining).clamp(0.0, 100.0);
+
+        if line.contains("Five Hour Limit Remaining") {
+            five_hour = Some((used, reset_at));
+        } else if line.contains("Weekly Limit Remaining") {
+            weekly = Some((used, reset_at));
+        }
+    }
+
+    let ((used_pct_5h, reset_5h), (used_pct_weekly, reset_weekly)) = (five_hour?, weekly?);
+    Some(UsageLimits { used_pct_5h, reset_5h, used_pct_weekly, reset_weekly })
+}
+
+pub(crate) fn poll_usage(quota: &AntigravityQuota) {
+    // Finder/LaunchAgent에서 띄운 macOS 앱은 shell PATH를 물려받지 않을 수 있다.
+    let agy_path = dirs_next::home_dir()
+        .map(|home| home.join(".local/bin/agy"))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("agy"));
+    let output = match Command::new(agy_path).args(["-p", "/usage"]).output() {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            tracing::warn!(status = ?output.status, "antigravity /usage 명령 실패");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(%e, "antigravity /usage 실행 실패");
+            return;
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(limits) = parse_usage_limits(&stdout) else {
+        tracing::warn!("antigravity /usage 출력에서 Gemini quota를 찾지 못함");
+        return;
+    };
+    *quota.used_pct_5h.lock().unwrap() = Some(limits.used_pct_5h);
+    *quota.reset_5h.lock().unwrap() = Some(limits.reset_5h);
+    *quota.used_pct_weekly.lock().unwrap() = Some(limits.used_pct_weekly);
+    *quota.reset_weekly.lock().unwrap() = Some(limits.reset_weekly);
+}
+
+fn spawn_usage_poller(quota: Arc<AntigravityQuota>, interval_secs: Arc<AtomicU64>) {
+    std::thread::spawn(move || loop {
+        poll_usage(&quota);
+        std::thread::sleep(Duration::from_secs(interval_secs.load(Ordering::Relaxed).max(60)));
+    });
 }
 
 // ── Zero-dependency Protobuf Parser ─────────────────────────────
@@ -85,9 +159,6 @@ pub struct ParsedTurn {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub tokens_cache_read: u32,
-    /// 서버가 보고한 현재 5시간 버킷의 누적 사용량.
-    pub quota_used: Option<u64>,
-    pub quota_limit: Option<u64>,
     pub last_step_index: Option<i64>,
 }
 
@@ -155,10 +226,6 @@ fn parse_turn_execution_msg(buf: &[u8], turn: &mut ParsedTurn) {
                 4 | 17 => {
                     // Token Usage submessage
                     parse_token_usage_container(sub_slice, turn);
-                }
-                9 => {
-                    // Quota / Bucket Info
-                    parse_quota_submessage(sub_slice, turn);
                 }
                 20 => {
                     // Key-Value metadata pair (F1: key, F2: val)
@@ -245,67 +312,6 @@ fn parse_token_usage_container(buf: &[u8], turn: &mut ParsedTurn) {
             break;
         }
     }
-}
-
-fn parse_quota_submessage(buf: &[u8], turn: &mut ParsedTurn) {
-    let mut pos = 0;
-    while pos < buf.len() {
-        let tag = match read_varint(buf, &mut pos) {
-            Some(t) => t,
-            None => break,
-        };
-        let field_num = (tag >> 3) as u32;
-        let wire_type = (tag & 0x7) as u32;
-
-        if wire_type == 2 {
-            let len = match read_varint(buf, &mut pos) {
-                Some(l) => l as usize,
-                None => break,
-            };
-            if pos + len > buf.len() {
-                break;
-            }
-            let sub = &buf[pos..pos + len];
-            pos += len;
-
-            if field_num == 10 {
-                // F9 -> F10: F1(quota_used), F4(quota_limit)
-                let mut pos10 = 0;
-                while pos10 < sub.len() {
-                    let tag10 = match read_varint(sub, &mut pos10) {
-                        Some(t) => t,
-                        None => break,
-                    };
-                    let f10 = (tag10 >> 3) as u32;
-                    let w10 = (tag10 & 0x7) as u32;
-                    if w10 == 0 {
-                        let val = match read_varint(sub, &mut pos10) {
-                            Some(v) => v,
-                            None => break,
-                        };
-                        match f10 {
-                            1 => turn.quota_used = Some(val),
-                            4 => turn.quota_limit = Some(val),
-                            _ => {}
-                        }
-                    } else if !skip_field(w10, sub, &mut pos10) {
-                        break;
-                    }
-                }
-            }
-        } else if !skip_field(wire_type, buf, &mut pos) {
-            break;
-        }
-    }
-}
-
-/// Antigravity metadata의 quota bucket을 화면용 사용률로 변환한다.
-///
-/// F9.F10.F1은 이름 그대로 이미 `quota_used`다. 이를 remaining으로 취급해
-/// 100에서 빼면 사용률이 정확히 반전된다.
-fn quota_used_pct(turn: &ParsedTurn) -> Option<f32> {
-    let (used, limit) = (turn.quota_used?, turn.quota_limit?);
-    (limit > 0).then(|| ((used as f32 / limit as f32) * 100.0).clamp(0.0, 100.0))
 }
 
 /// `steps.metadata`의 Protobuf BLOB에서 타임스탬프 추출 (F1.F1: epoch seconds, F1.F2: nanos)
@@ -442,7 +448,6 @@ fn tail_conversation_db(
     summaries_db: &Path,
     last_idx: i64,
     tx: &mpsc::UnboundedSender<TokenEvent>,
-    quota: &AntigravityQuota,
 ) -> i64 {
     let conn = match open_readonly_db(db_path) {
         Some(c) => c,
@@ -500,16 +505,7 @@ fn tail_conversation_db(
                     ts = now;
                 }
 
-                let is_recent = now.duration_since(ts).unwrap_or_default() <= FIVE_H;
-
-                if let Some(used_pct) = quota_used_pct(&turn) {
-                    *quota.used_pct_5h.lock().unwrap() = Some(used_pct);
-                    if is_recent {
-                        *quota.reset_5h.lock().unwrap() = Some(ts + FIVE_H);
-                    }
-                }
-
-                if is_recent {
+                if now.duration_since(ts).unwrap_or_default() <= FIVE_H {
                     let ev = TokenEvent {
                         agent: AgentKind::Antigravity,
                         project_path: project_path.clone(),
@@ -532,78 +528,6 @@ fn tail_conversation_db(
     new_last_idx
 }
 
-const SEVEN_DAYS: Duration = Duration::from_secs(7 * 24 * 3600);
-
-/// 7일간의 총 토큰 소비량을 스캔하여 주간 사용률 및 리셋 시각을 갱신한다.
-fn update_weekly_quota(
-    conversations_root: &Path,
-    quota: &AntigravityQuota,
-) {
-    let now = SystemTime::now();
-    let entries = match std::fs::read_dir(conversations_root) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    let mut total_tokens: u64 = 0;
-    let mut oldest_recent_ts: Option<SystemTime> = None;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().map(|e| e == "db").unwrap_or(false) {
-            if let Some(conn) = open_readonly_db(&path) {
-                let mut stmt = match conn.prepare("SELECT idx, data FROM gen_metadata") {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let mut step_ts_stmt = conn.prepare("SELECT metadata FROM steps WHERE idx = ?1 LIMIT 1").ok();
-                let rows = stmt.query_map([], |r| {
-                    let idx: i64 = r.get(0)?;
-                    let data: Vec<u8> = r.get(1)?;
-                    Ok((idx, data))
-                });
-
-                if let Ok(iter) = rows {
-                    for (idx, data) in iter.flatten() {
-                        if let Some(turn) = parse_gen_metadata(&data) {
-                            let mut ts = now;
-                            let step_idx_to_query = turn.last_step_index.unwrap_or(idx);
-                            if let Some(ref mut s_stmt) = step_ts_stmt {
-                                if let Ok(meta) = s_stmt.query_row([step_idx_to_query], |r| r.get::<_, Option<Vec<u8>>>(0)) {
-                                    if let Some(meta_blob) = meta {
-                                        if let Some(step_ts) = parse_step_timestamp(&meta_blob) {
-                                            ts = step_ts;
-                                        }
-                                    }
-                                }
-                            }
-                            if now.duration_since(ts).unwrap_or_default() <= SEVEN_DAYS {
-                                total_tokens += (turn.tokens_in + turn.tokens_out) as u64;
-                                oldest_recent_ts = match oldest_recent_ts {
-                                    Some(old) => Some(old.min(ts)),
-                                    None => Some(ts),
-                                };
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Antigravity Google AI Pro 주간 가용 쿼터 기준치 (약 87M 토큰)
-    // 2.8M 토큰 소비 시 약 3.22% 사용률 (96.78% 잔여) 산출
-    let weekly_cap = 87_000_000u64;
-    let pct = ((total_tokens as f64 / weekly_cap as f64) * 100.0).clamp(0.0, 100.0) as f32;
-    *quota.used_pct_weekly.lock().unwrap() = Some(pct);
-
-    if let Some(oldest) = oldest_recent_ts {
-        *quota.reset_weekly.lock().unwrap() = Some(oldest + SEVEN_DAYS);
-    } else {
-        *quota.reset_weekly.lock().unwrap() = Some(now + SEVEN_DAYS);
-    }
-}
-
 // ── Watcher Spawn ───────────────────────────────────────────────
 
 pub struct AntigravityWatcher;
@@ -614,7 +538,9 @@ impl AntigravityWatcher {
         summaries_db: PathBuf,
         tx: mpsc::UnboundedSender<TokenEvent>,
         quota: Arc<AntigravityQuota>,
+        quota_poll_interval_secs: Arc<AtomicU64>,
     ) -> Result<()> {
+        spawn_usage_poller(quota, quota_poll_interval_secs);
         std::thread::spawn(move || {
             if !conversations_root.exists() {
                 tracing::warn!(?conversations_root, "antigravity conversations dir 없음");
@@ -627,13 +553,11 @@ impl AntigravityWatcher {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().map(|e| e == "db").unwrap_or(false) {
-                        let last_idx = tail_conversation_db(&path, &summaries_db, -1, &tx, &quota);
+                        let last_idx = tail_conversation_db(&path, &summaries_db, -1, &tx);
                         last_indices.insert(path, last_idx);
                     }
                 }
             }
-
-            update_weekly_quota(&conversations_root, &quota);
 
             let (notify_tx, notify_rx) = std_mpsc::channel::<notify::Result<Event>>();
             let mut watcher = match notify::recommended_watcher(move |res| {
@@ -678,9 +602,8 @@ impl AntigravityWatcher {
                                 if let Some(db) = target_db {
                                     if db.exists() {
                                         let last = last_indices.entry(db.clone()).or_insert(-1);
-                                        let new_idx = tail_conversation_db(&db, &summaries_db, *last, &tx, &quota);
+                                        let new_idx = tail_conversation_db(&db, &summaries_db, *last, &tx);
                                         *last = new_idx;
-                                        update_weekly_quota(&conversations_root, &quota);
                                     }
                                 }
                             }
@@ -725,21 +648,27 @@ mod tests {
         assert_eq!(turn.tokens_out, 1298);
         assert_eq!(turn.tokens_in, 17357);
         assert_eq!(turn.tokens_cache_read, 318);
-        assert_eq!(turn.quota_used, Some(24348));
-        assert_eq!(turn.quota_limit, Some(256000));
         assert_eq!(turn.last_step_index, Some(1));
     }
 
     #[test]
-    fn quota_used_is_not_inverted_as_remaining() {
-        let turn = ParsedTurn {
-            quota_used: Some(24_348),
-            quota_limit: Some(256_000),
-            ..Default::default()
-        };
+    fn usage_output_uses_only_gemini_account_limits() {
+        let output = "Gemini Models\tWeekly Limit Remaining\t99%\t2026-09-04T00:16:29Z\n\
+Gemini Models\tFive Hour Limit Remaining\t95%\t2026-08-28T05:16:29Z\n\
+Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-09-04T00:25:14Z\n\
+Claude and GPT models\tFive Hour Limit Remaining\t100%\t2026-08-28T05:25:14Z";
 
-        let pct = quota_used_pct(&turn).expect("valid quota bucket");
-        assert!((pct - 9.510_938).abs() < 0.000_1);
+        let limits = parse_usage_limits(output).expect("Gemini limits should parse");
+        assert_eq!(limits.used_pct_5h, 5.0);
+        assert_eq!(limits.used_pct_weekly, 1.0);
+        assert_eq!(limits.reset_5h, parse_iso8601("2026-08-28T05:16:29Z").unwrap());
+        assert_eq!(limits.reset_weekly, parse_iso8601("2026-09-04T00:16:29Z").unwrap());
+    }
+
+    #[test]
+    fn usage_output_requires_both_gemini_windows() {
+        let output = "Gemini Models\tFive Hour Limit Remaining\t95%\t2026-08-28T05:16:29Z";
+        assert_eq!(parse_usage_limits(output), None);
     }
 
     #[test]

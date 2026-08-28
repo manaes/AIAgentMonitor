@@ -8,16 +8,28 @@ use std::path::{Path, PathBuf};
 
 use crate::types::AgentKind;
 
+pub const DEFAULT_ANTIGRAVITY_POLL_INTERVAL_SECS: u64 = 5 * 60;
+
+fn default_antigravity_poll_interval_secs() -> u64 {
+    DEFAULT_ANTIGRAVITY_POLL_INTERVAL_SECS
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
     pub enabled_agents: HashSet<AgentKind>,
+    /// `agy -p /usage` 자동 갱신 간격. 기존 설정 파일에는 없으므로 serde 기본값을 둔다.
+    #[serde(default = "default_antigravity_poll_interval_secs")]
+    pub antigravity_poll_interval_secs: u64,
 }
 
 impl Default for AppSettings {
     /// 기존 사용자가 설정 탭을 한 번도 안 건드려도 동작이 그대로여야 한다 —
     /// 기본값은 전체 활성이다.
     fn default() -> Self {
-        Self { enabled_agents: HashSet::from([AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity]) }
+        Self {
+            enabled_agents: HashSet::from([AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity]),
+            antigravity_poll_interval_secs: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_SECS,
+        }
     }
 }
 
@@ -85,7 +97,10 @@ mod tests {
     fn save_then_load_round_trips_a_partial_selection() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("settings.json");
-        let saved = AppSettings { enabled_agents: HashSet::from([AgentKind::Codex]) };
+        let saved = AppSettings {
+            enabled_agents: HashSet::from([AgentKind::Codex]),
+            antigravity_poll_interval_secs: 15 * 60,
+        };
         SettingsStore::save_to(&p, &saved).unwrap();
         assert_eq!(SettingsStore::load_from(&p), saved);
     }
@@ -99,7 +114,10 @@ mod tests {
         let p = dir.path().join("settings.json");
         SettingsStore::save_to(&p, &AppSettings::default()).unwrap();
         let ino1 = std::fs::metadata(&p).unwrap().ino();
-        SettingsStore::save_to(&p, &AppSettings { enabled_agents: HashSet::from([AgentKind::Claude]) }).unwrap();
+        SettingsStore::save_to(&p, &AppSettings {
+            enabled_agents: HashSet::from([AgentKind::Claude]),
+            antigravity_poll_interval_secs: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_SECS,
+        }).unwrap();
         let ino2 = std::fs::metadata(&p).unwrap().ino();
         assert_ne!(ino1, ino2);
     }
@@ -116,5 +134,11 @@ mod tests {
         std::fs::write(&stale, b"garbage").unwrap();
         SettingsStore::save_to(&p, &AppSettings::default()).unwrap();
         assert!(!stale.exists());
+    }
+
+    #[test]
+    fn legacy_settings_get_the_five_minute_poll_default() {
+        let parsed: AppSettings = serde_json::from_str(r#"{"enabled_agents":["antigravity"]}"#).unwrap();
+        assert_eq!(parsed.antigravity_poll_interval_secs, DEFAULT_ANTIGRAVITY_POLL_INTERVAL_SECS);
     }
 }
