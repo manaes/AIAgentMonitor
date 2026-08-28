@@ -12,12 +12,21 @@ namespace {
 // 에이전트 카드 UI 위젯 묶음
 struct AgentCardWidgets {
     lv_obj_t *card = nullptr;
-    lv_obj_t *nameLabel = nullptr;
-    lv_obj_t *rateLabel = nullptr;
-    lv_obj_t *usage5hLabel = nullptr;
-    lv_obj_t *bar5h = nullptr;
-    lv_obj_t *usageWkLabel = nullptr;
-    lv_obj_t *barWk = nullptr;
+    lv_obj_t *topRow = nullptr;
+    lv_obj_t *nameLabel = nullptr;       // 14px, #8e8e93
+    lv_obj_t *rateLabel = nullptr;       // 14px, #0a84ff
+
+    // 5시간 쿼터 위젯
+    lv_obj_t *row5h = nullptr;           // flex row (space-between)
+    lv_obj_t *info5hLabel = nullptr;     // 14px, #8e8e93 (예: "5h (4h 55m)")
+    lv_obj_t *pct5hLabel = nullptr;      // 16px, getPctColor (예: "0%")
+    lv_obj_t *bar5h = nullptr;           // 높이 6px 게이지 바
+
+    // 주간 쿼터 위젯
+    lv_obj_t *rowWk = nullptr;           // flex row (space-between)
+    lv_obj_t *infoWkLabel = nullptr;     // 14px, #8e8e93 (예: "Week (2d 8h)")
+    lv_obj_t *pctWkLabel = nullptr;      // 16px, getPctColor (예: "100%")
+    lv_obj_t *barWk = nullptr;           // 높이 6px 게이지 바
 };
 
 lv_obj_t *g_cardsRoot = nullptr;
@@ -46,7 +55,7 @@ const char *getAgentName(SnapshotAgentKind kind) {
     }
 }
 
-// 리셋 카운트다운 포맷팅 (예: "4h 56m 29s", "2d 4h 12m")
+// 리셋 카운트다운 간소화 포맷팅 (예: "4h 55m", "2d 8h", "17m 55s")
 void formatResetCountdown(uint64_t resetEpochSec, uint64_t currentEpochSec, char *buf, size_t bufSize) {
     if (resetEpochSec <= currentEpochSec) {
         snprintf(buf, bufSize, "0s");
@@ -58,9 +67,9 @@ void formatResetCountdown(uint64_t resetEpochSec, uint64_t currentEpochSec, char
     uint32_t mins = (uint32_t)((diff % 3600) / 60);
     uint32_t secs = (uint32_t)(diff % 60);
     if (days > 0) {
-        snprintf(buf, bufSize, "%ud %uh %um", (unsigned)days, (unsigned)hours, (unsigned)mins);
+        snprintf(buf, bufSize, "%ud %uh", (unsigned)days, (unsigned)hours);
     } else if (hours > 0) {
-        snprintf(buf, bufSize, "%uh %um %us", (unsigned)hours, (unsigned)mins, (unsigned)secs);
+        snprintf(buf, bufSize, "%uh %um", (unsigned)hours, (unsigned)mins);
     } else if (mins > 0) {
         snprintf(buf, bufSize, "%um %us", (unsigned)mins, (unsigned)secs);
     } else {
@@ -93,7 +102,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     lv_obj_set_style_bg_opa(g_cardsContainer, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_cardsContainer, 0, 0);
     lv_obj_set_style_pad_all(g_cardsContainer, 0, 0);
-    lv_obj_set_style_pad_row(g_cardsContainer, 4, 0);
+    lv_obj_set_style_pad_row(g_cardsContainer, 6, 0);
     lv_obj_set_scrollbar_mode(g_cardsContainer, LV_SCROLLBAR_MODE_OFF);
     lv_obj_remove_flag(g_cardsContainer, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -120,49 +129,75 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_flex_flow(cw.card, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_style_pad_row(cw.card, 3, 0);
 
-        // 상단 행 (이름 + tok/s)
-        lv_obj_t *topRow = lv_obj_create(cw.card);
-        lv_obj_set_size(topRow, lv_pct(100), LV_SIZE_CONTENT);
-        lv_obj_set_style_bg_opa(topRow, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(topRow, 0, 0);
-        lv_obj_set_style_pad_all(topRow, 0, 0);
-        lv_obj_set_flex_flow(topRow, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(topRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        // 1행: 헤더 (이름 14px 회색 + 속도 14px 파랑)
+        cw.topRow = lv_obj_create(cw.card);
+        lv_obj_set_size(cw.topRow, lv_pct(100), LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(cw.topRow, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(cw.topRow, 0, 0);
+        lv_obj_set_style_pad_all(cw.topRow, 0, 0);
+        lv_obj_set_style_pad_bottom(cw.topRow, 4, 0);
+        lv_obj_set_flex_flow(cw.topRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(cw.topRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-        cw.nameLabel = lv_label_create(topRow);
-        lv_obj_set_style_text_font(cw.nameLabel, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(cw.nameLabel, lv_color_hex(0xffffff), 0);
+        cw.nameLabel = lv_label_create(cw.topRow);
+        lv_obj_set_style_text_font(cw.nameLabel, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(cw.nameLabel, lv_color_hex(0x8e8e93), 0);
         lv_label_set_text(cw.nameLabel, "");
 
-        cw.rateLabel = lv_label_create(topRow);
-        lv_obj_set_style_text_font(cw.rateLabel, &lv_font_montserrat_20, 0);
+        cw.rateLabel = lv_label_create(cw.topRow);
+        lv_obj_set_style_text_font(cw.rateLabel, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(cw.rateLabel, lv_color_hex(0x0a84ff), 0);
         lv_label_set_text(cw.rateLabel, "");
 
-        // 5시간 쿼터 통합 라벨 (예: "5h 0% (4h 56m 29s)")
-        cw.usage5hLabel = lv_label_create(cw.card);
-        lv_obj_set_style_text_font(cw.usage5hLabel, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(cw.usage5hLabel, lv_color_hex(0x8e8e93), 0);
-        lv_label_set_text(cw.usage5hLabel, "");
+        // 2행: 5시간 쿼터 텍스트행 (좌: 5h 남은시간, 우: 사용량 %)
+        cw.row5h = lv_obj_create(cw.card);
+        lv_obj_set_size(cw.row5h, lv_pct(100), LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(cw.row5h, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(cw.row5h, 0, 0);
+        lv_obj_set_style_pad_all(cw.row5h, 0, 0);
+        lv_obj_set_flex_flow(cw.row5h, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(cw.row5h, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-        // 5시간 쿼터 바 (0%여도 최소 1% 및 트랙 노출)
+        cw.info5hLabel = lv_label_create(cw.row5h);
+        lv_obj_set_style_text_font(cw.info5hLabel, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(cw.info5hLabel, lv_color_hex(0x8e8e93), 0);
+        lv_label_set_text(cw.info5hLabel, "");
+
+        cw.pct5hLabel = lv_label_create(cw.row5h);
+        lv_obj_set_style_text_font(cw.pct5hLabel, &lv_font_montserrat_16, 0);
+        lv_label_set_text(cw.pct5hLabel, "");
+
+        // 5시간 쿼터 바 (높이 6px, 0%여도 최소 1% 및 트랙 노출)
         cw.bar5h = lv_bar_create(cw.card);
-        lv_obj_set_size(cw.bar5h, lv_pct(100), 5);
+        lv_obj_set_size(cw.bar5h, lv_pct(100), 6);
         lv_obj_set_style_bg_color(cw.bar5h, lv_color_hex(0x3a3a3c), 0);
-        lv_obj_set_style_radius(cw.bar5h, 2, 0);
+        lv_obj_set_style_radius(cw.bar5h, 3, 0);
         lv_bar_set_range(cw.bar5h, 0, 100);
 
-        // 주간 쿼터 통합 라벨 (예: "Week 20% (2d 4h 12m)")
-        cw.usageWkLabel = lv_label_create(cw.card);
-        lv_obj_set_style_text_font(cw.usageWkLabel, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(cw.usageWkLabel, lv_color_hex(0x8e8e93), 0);
-        lv_label_set_text(cw.usageWkLabel, "");
+        // 3행: 주간 쿼터 텍스트행 (좌: Week 남은시간, 우: 사용량 %)
+        cw.rowWk = lv_obj_create(cw.card);
+        lv_obj_set_size(cw.rowWk, lv_pct(100), LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(cw.rowWk, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(cw.rowWk, 0, 0);
+        lv_obj_set_style_pad_all(cw.rowWk, 0, 0);
+        lv_obj_set_style_pad_top(cw.rowWk, 2, 0);
+        lv_obj_set_flex_flow(cw.rowWk, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(cw.rowWk, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-        // 주간 쿼터 바
+        cw.infoWkLabel = lv_label_create(cw.rowWk);
+        lv_obj_set_style_text_font(cw.infoWkLabel, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(cw.infoWkLabel, lv_color_hex(0x8e8e93), 0);
+        lv_label_set_text(cw.infoWkLabel, "");
+
+        cw.pctWkLabel = lv_label_create(cw.rowWk);
+        lv_obj_set_style_text_font(cw.pctWkLabel, &lv_font_montserrat_16, 0);
+        lv_label_set_text(cw.pctWkLabel, "");
+
+        // 주간 쿼터 바 (높이 6px)
         cw.barWk = lv_bar_create(cw.card);
-        lv_obj_set_size(cw.barWk, lv_pct(100), 5);
+        lv_obj_set_size(cw.barWk, lv_pct(100), 6);
         lv_obj_set_style_bg_color(cw.barWk, lv_color_hex(0x3a3a3c), 0);
-        lv_obj_set_style_radius(cw.barWk, 2, 0);
+        lv_obj_set_style_radius(cw.barWk, 3, 0);
         lv_bar_set_range(cw.barWk, 0, 100);
 
         lv_obj_add_flag(cw.card, LV_OBJ_FLAG_HIDDEN);
@@ -216,20 +251,25 @@ void uiCardsUpdate(const Transport &transport) {
             formatResetCountdown(ag.reset5hEpochSec, currentEpochSec, resetBuf, sizeof(resetBuf));
         }
 
-        char uBuf[128];
+        char info5hBuf[64];
         if (resetBuf[0] != '\0') {
-            snprintf(uBuf, sizeof(uBuf), "5h %.0f%% (%s)", pct5h, resetBuf);
+            snprintf(info5hBuf, sizeof(info5hBuf), "5h (%s)", resetBuf);
         } else {
-            snprintf(uBuf, sizeof(uBuf), "5h %.0f%%", pct5h);
+            snprintf(info5hBuf, sizeof(info5hBuf), "5h");
         }
-        lv_label_set_text(cw.usage5hLabel, uBuf);
-        lv_obj_set_style_text_color(cw.usage5hLabel, getPctColor(pct5h), 0);
+        lv_label_set_text(cw.info5hLabel, info5hBuf);
+
+        char pct5hBuf[32];
+        snprintf(pct5hBuf, sizeof(pct5hBuf), "%.0f%%", pct5h);
+        lv_label_set_text(cw.pct5hLabel, pct5hBuf);
+        lv_obj_set_style_text_color(cw.pct5hLabel, getPctColor(pct5h), 0);
 
         // 0%여도 그래프(바)는 최소 1%로 항상 표시
         int32_t bar5hVal = (int32_t)pct5h;
         if (bar5hVal < 1) bar5hVal = 1;
         lv_bar_set_value(cw.bar5h, bar5hVal, LV_ANIM_OFF);
         lv_obj_set_style_bg_color(cw.bar5h, getPctColor(pct5h), LV_PART_INDICATOR);
+        lv_obj_clear_flag(cw.row5h, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(cw.bar5h, LV_OBJ_FLAG_HIDDEN);
 
         // 주간 쿼터 (사용량 표시, Week)
@@ -243,24 +283,28 @@ void uiCardsUpdate(const Transport &transport) {
                 formatResetCountdown(ag.resetWeeklyEpochSec, currentEpochSec, resetWkBuf, sizeof(resetWkBuf));
             }
 
-            char wBuf[128];
+            char infoWkBuf[64];
             if (resetWkBuf[0] != '\0') {
-                snprintf(wBuf, sizeof(wBuf), "Week %.0f%% (%s)", pctWk, resetWkBuf);
+                snprintf(infoWkBuf, sizeof(infoWkBuf), "Week (%s)", resetWkBuf);
             } else {
-                snprintf(wBuf, sizeof(wBuf), "Week %.0f%%", pctWk);
+                snprintf(infoWkBuf, sizeof(infoWkBuf), "Week");
             }
-            lv_label_set_text(cw.usageWkLabel, wBuf);
-            lv_obj_set_style_text_color(cw.usageWkLabel, getPctColor(pctWk), 0);
-            lv_obj_clear_flag(cw.usageWkLabel, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(cw.infoWkLabel, infoWkBuf);
+
+            char pctWkBuf[32];
+            snprintf(pctWkBuf, sizeof(pctWkBuf), "%.0f%%", pctWk);
+            lv_label_set_text(cw.pctWkLabel, pctWkBuf);
+            lv_obj_set_style_text_color(cw.pctWkLabel, getPctColor(pctWk), 0);
 
             // 주간 쿼터 바 항상 노출 (최소 1%)
             int32_t barWkVal = (int32_t)pctWk;
             if (barWkVal < 1) barWkVal = 1;
             lv_bar_set_value(cw.barWk, barWkVal, LV_ANIM_OFF);
             lv_obj_set_style_bg_color(cw.barWk, getPctColor(pctWk), LV_PART_INDICATOR);
+            lv_obj_clear_flag(cw.rowWk, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(cw.barWk, LV_OBJ_FLAG_HIDDEN);
         } else {
-            lv_obj_add_flag(cw.usageWkLabel, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(cw.rowWk, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(cw.barWk, LV_OBJ_FLAG_HIDDEN);
         }
     }
