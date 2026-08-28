@@ -83,6 +83,7 @@ bool isPairingRelevant(AuthStep step) {
 lv_obj_t *makeLabel(lv_obj_t *parent, int32_t x, int32_t y) {
     lv_obj_t *label = lv_label_create(parent);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), 0);
     lv_obj_set_pos(label, x, y);
     return label;
 }
@@ -165,9 +166,19 @@ void uiPairingCreate(Transport &transport) {
     lv_obj_set_size(g_root, LV_HOR_RES, LV_VER_RES);
 
     g_statusTitle = makeLabel(g_root, 8, 8);
+    lv_obj_set_style_text_color(g_statusTitle, lv_color_hex(0xffffff), 0);
+
     g_digitsLabel = makeLabel(g_root, 8, 36);
+    lv_obj_set_style_text_font(g_digitsLabel, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(g_digitsLabel, lv_color_hex(0x0a84ff), 0);
+
     g_attemptsLabel = makeLabel(g_root, 8, 64);
+    lv_obj_set_style_text_font(g_attemptsLabel, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(g_attemptsLabel, lv_color_hex(0x8e8e93), 0);
+
     g_timeLabel = makeLabel(g_root, 8, 86);
+    lv_obj_set_style_text_font(g_timeLabel, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(g_timeLabel, lv_color_hex(0x8e8e93), 0);
 
     g_btnMatrix = lv_buttonmatrix_create(g_root);
     lv_buttonmatrix_set_map(g_btnMatrix, KEYPAD_MAP);
@@ -179,6 +190,7 @@ void uiPairingCreate(Transport &transport) {
 
     g_otherLabel = lv_label_create(screen);
     lv_obj_set_style_text_font(g_otherLabel, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(g_otherLabel, lv_color_hex(0xffffff), 0);
     lv_obj_center(g_otherLabel);
 
     refreshDigitsLabel();

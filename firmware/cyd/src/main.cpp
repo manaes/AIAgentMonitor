@@ -160,6 +160,9 @@ void setup() {
     // 같이 멈춰 있다 — Task 14a 때부터 있던 한계이고 이 태스크가 고치는
     // 범위가 아니다.
     smartdisplay_init();
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(lv_screen_active(), lv_color_hex(0xffffff), 0);
     lastLvglTickMs = millis();
     registerTouchDebugLogger();
     uiNavCreate(transport);

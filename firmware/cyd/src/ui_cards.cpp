@@ -112,6 +112,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
 
     g_noDataLabel = lv_label_create(g_cardsRoot);
     lv_obj_set_style_text_font(g_noDataLabel, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(g_noDataLabel, lv_color_hex(0x8e8e93), 0);
     lv_label_set_text(g_noDataLabel, "Waiting for data...");
     lv_obj_center(g_noDataLabel);
 
