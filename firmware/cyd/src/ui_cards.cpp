@@ -17,10 +17,8 @@ struct AgentCardWidgets {
     lv_obj_t *rateLabel = nullptr;
     lv_obj_t *usage5hLabel = nullptr;
     lv_obj_t *bar5h = nullptr;
-    lv_obj_t *reset5hLabel = nullptr;
     lv_obj_t *usageWkLabel = nullptr;
     lv_obj_t *barWk = nullptr;
-    lv_obj_t *resetWkLabel = nullptr;
 };
 
 lv_obj_t *g_cardsRoot = nullptr;
@@ -59,10 +57,10 @@ void formatResetCountdown(uint64_t resetEpochSec, uint64_t currentEpochSec, char
     uint32_t hours = (uint32_t)(diff / 3600);
     uint32_t mins = (uint32_t)((diff % 3600) / 60);
     if (hours > 0) {
-        snprintf(buf, bufSize, "%u시간 %u분 뒤 초기화", (unsigned)hours, (unsigned)mins);
+        snprintf(buf, bufSize, "%u시간 %u분뒤 초기화", (unsigned)hours, (unsigned)mins);
     } else {
         uint32_t secs = (uint32_t)(diff % 60);
-        snprintf(buf, bufSize, "%u분 %u초 뒤 초기화", (unsigned)mins, (unsigned)secs);
+        snprintf(buf, bufSize, "%u분 %u초뒤 초기화", (unsigned)mins, (unsigned)secs);
     }
 }
 
@@ -127,26 +125,20 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_text_color(cw.rateLabel, lv_color_hex(0x0a84ff), 0);
         lv_label_set_text(cw.rateLabel, "");
 
-        // 5시간 쿼터 라벨
+        // 5시간 쿼터 통합 라벨 (예: "5h 20%남음 4시간 55분뒤 초기화")
         cw.usage5hLabel = lv_label_create(cw.card);
         lv_obj_set_style_text_font(cw.usage5hLabel, &font_ko, 0);
         lv_obj_set_style_text_color(cw.usage5hLabel, lv_color_hex(0x8e8e93), 0);
         lv_label_set_text(cw.usage5hLabel, "");
 
-        // 5시간 쿼터 바
+        // 5시간 쿼터 바 (0%여도 항상 노출)
         cw.bar5h = lv_bar_create(cw.card);
         lv_obj_set_size(cw.bar5h, lv_pct(100), 4);
         lv_obj_set_style_bg_color(cw.bar5h, lv_color_hex(0x1c1c1e), 0);
         lv_obj_set_style_radius(cw.bar5h, 2, 0);
         lv_bar_set_range(cw.bar5h, 0, 100);
 
-        // 5시간 리셋 안내 라벨
-        cw.reset5hLabel = lv_label_create(cw.card);
-        lv_obj_set_style_text_font(cw.reset5hLabel, &font_ko, 0);
-        lv_obj_set_style_text_color(cw.reset5hLabel, lv_color_hex(0x636366), 0);
-        lv_label_set_text(cw.reset5hLabel, "");
-
-        // 주간 쿼터 라벨
+        // 주간 쿼터 통합 라벨 (예: "주간 80%남음 2일뒤 초기화")
         cw.usageWkLabel = lv_label_create(cw.card);
         lv_obj_set_style_text_font(cw.usageWkLabel, &font_ko, 0);
         lv_obj_set_style_text_color(cw.usageWkLabel, lv_color_hex(0x8e8e93), 0);
@@ -158,12 +150,6 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_bg_color(cw.barWk, lv_color_hex(0x1c1c1e), 0);
         lv_obj_set_style_radius(cw.barWk, 2, 0);
         lv_bar_set_range(cw.barWk, 0, 100);
-
-        // 주간 리셋 안내 라벨
-        cw.resetWkLabel = lv_label_create(cw.card);
-        lv_obj_set_style_text_font(cw.resetWkLabel, &font_ko, 0);
-        lv_obj_set_style_text_color(cw.resetWkLabel, lv_color_hex(0x636366), 0);
-        lv_label_set_text(cw.resetWkLabel, "");
 
         lv_obj_add_flag(cw.card, LV_OBJ_FLAG_HIDDEN);
     }
@@ -207,61 +193,59 @@ void uiCardsUpdate(const Transport &transport) {
         lv_label_set_text(cw.rateLabel, rateBuf);
 
         // 5시간 쿼터
-        if (ag.has5hUsagePct) {
-            char uBuf[64];
-            float pct = ag.usage5hPct;
-            if (pct > 100.0f) pct = 100.0f;
-            snprintf(uBuf, sizeof(uBuf), "5h 한도 %.0f%% (%.0f%% 남음)", pct, 100.0f - pct);
-            lv_label_set_text(cw.usage5hLabel, uBuf);
-            lv_obj_set_style_text_color(cw.usage5hLabel, getPctColor(pct), 0);
+        float pct5h = ag.has5hUsagePct ? ag.usage5hPct : 0.0f;
+        if (pct5h > 100.0f) pct5h = 100.0f;
+        if (pct5h < 0.0f) pct5h = 0.0f;
+        float rem5h = 100.0f - pct5h;
 
-            lv_bar_set_value(cw.bar5h, (int32_t)pct, LV_ANIM_OFF);
-            lv_obj_set_style_bg_color(cw.bar5h, getPctColor(pct), LV_PART_INDICATOR);
-            lv_obj_clear_flag(cw.bar5h, LV_OBJ_FLAG_HIDDEN);
-
-            if (ag.has5hResetAt) {
-                char rBuf[64];
-                formatResetCountdown(ag.reset5hEpochSec, currentEpochSec, rBuf, sizeof(rBuf));
-                lv_label_set_text(cw.reset5hLabel, rBuf);
-                lv_obj_clear_flag(cw.reset5hLabel, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_add_flag(cw.reset5hLabel, LV_OBJ_FLAG_HIDDEN);
-            }
-        } else {
-            char uBuf[64];
-            snprintf(uBuf, sizeof(uBuf), "5h 토큰: %u · 동기화 전", (unsigned)ag.tokens5hCumulative);
-            lv_label_set_text(cw.usage5hLabel, uBuf);
-            lv_obj_set_style_text_color(cw.usage5hLabel, lv_color_hex(0x8e8e93), 0);
-            lv_obj_add_flag(cw.bar5h, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(cw.reset5hLabel, LV_OBJ_FLAG_HIDDEN);
+        char resetBuf[64] = "";
+        if (ag.has5hResetAt) {
+            formatResetCountdown(ag.reset5hEpochSec, currentEpochSec, resetBuf, sizeof(resetBuf));
         }
+
+        char uBuf[128];
+        if (resetBuf[0] != '\0') {
+            snprintf(uBuf, sizeof(uBuf), "5h %.0f%%남음 %s", rem5h, resetBuf);
+        } else {
+            snprintf(uBuf, sizeof(uBuf), "5h %.0f%%남음", rem5h);
+        }
+        lv_label_set_text(cw.usage5hLabel, uBuf);
+        lv_obj_set_style_text_color(cw.usage5hLabel, getPctColor(pct5h), 0);
+
+        // 0%여도 그래프(바)는 항상 노출
+        lv_bar_set_value(cw.bar5h, (int32_t)pct5h, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(cw.bar5h, getPctColor(pct5h), LV_PART_INDICATOR);
+        lv_obj_clear_flag(cw.bar5h, LV_OBJ_FLAG_HIDDEN);
 
         // 주간 쿼터
         if (ag.hasWeeklyUsagePct) {
-            char wBuf[64];
-            float wpct = ag.usageWeeklyPct;
-            if (wpct > 100.0f) wpct = 100.0f;
-            snprintf(wBuf, sizeof(wBuf), "주간 한도 %.0f%% (%.0f%% 남음)", wpct, 100.0f - wpct);
+            float pctWk = ag.usageWeeklyPct;
+            if (pctWk > 100.0f) pctWk = 100.0f;
+            if (pctWk < 0.0f) pctWk = 0.0f;
+            float remWk = 100.0f - pctWk;
+
+            char resetWkBuf[64] = "";
+            if (ag.hasWeeklyResetAt) {
+                formatResetCountdown(ag.resetWeeklyEpochSec, currentEpochSec, resetWkBuf, sizeof(resetWkBuf));
+            }
+
+            char wBuf[128];
+            if (resetWkBuf[0] != '\0') {
+                snprintf(wBuf, sizeof(wBuf), "주간 %.0f%%남음 %s", remWk, resetWkBuf);
+            } else {
+                snprintf(wBuf, sizeof(wBuf), "주간 %.0f%%남음", remWk);
+            }
             lv_label_set_text(cw.usageWkLabel, wBuf);
-            lv_obj_set_style_text_color(cw.usageWkLabel, getPctColor(wpct), 0);
+            lv_obj_set_style_text_color(cw.usageWkLabel, getPctColor(pctWk), 0);
             lv_obj_clear_flag(cw.usageWkLabel, LV_OBJ_FLAG_HIDDEN);
 
-            lv_bar_set_value(cw.barWk, (int32_t)wpct, LV_ANIM_OFF);
-            lv_obj_set_style_bg_color(cw.barWk, getPctColor(wpct), LV_PART_INDICATOR);
+            // 주간 쿼터 바 항상 노출
+            lv_bar_set_value(cw.barWk, (int32_t)pctWk, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(cw.barWk, getPctColor(pctWk), LV_PART_INDICATOR);
             lv_obj_clear_flag(cw.barWk, LV_OBJ_FLAG_HIDDEN);
-
-            if (ag.hasWeeklyResetAt) {
-                char rBuf[64];
-                formatResetCountdown(ag.resetWeeklyEpochSec, currentEpochSec, rBuf, sizeof(rBuf));
-                lv_label_set_text(cw.resetWkLabel, rBuf);
-                lv_obj_clear_flag(cw.resetWkLabel, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_add_flag(cw.resetWkLabel, LV_OBJ_FLAG_HIDDEN);
-            }
         } else {
             lv_obj_add_flag(cw.usageWkLabel, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(cw.barWk, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(cw.resetWkLabel, LV_OBJ_FLAG_HIDDEN);
         }
     }
 }
