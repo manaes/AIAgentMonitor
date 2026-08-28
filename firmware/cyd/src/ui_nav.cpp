@@ -28,17 +28,17 @@ void uiNavSetView(UiView /*view*/) {
 }
 
 void uiNavUpdate(Transport &transport) {
-    const bool isSubscribed = (transport.authStep() == AuthStep::Subscribed);
+    const bool isSubscribed = (transport.authStep() == AuthStep::Subscribed && transport.isConnected() && transport.hasSnapshot());
 
     if (isSubscribed) {
-        // 인가 완료된 상태: 카드 대시보드 활성화 및 갱신
+        // 인가 완료 및 스냅샷 유효 상태: 카드 대시보드 활성화 및 갱신
         if (g_cardsVisibleCache != 1) {
             g_cardsVisibleCache = 1;
             uiCardsSetVisible(true);
         }
         uiCardsUpdate(transport);
     } else {
-        // 페어링 또는 재인증 중: 카드 대시보드 숨김, 페어링 UI 표시
+        // 연결 끊김 / 재연결 중 / 페어링 대기: 카드 대시보드 숨김
         if (g_cardsVisibleCache != 0) {
             g_cardsVisibleCache = 0;
             uiCardsSetVisible(false);

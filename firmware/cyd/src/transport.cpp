@@ -48,6 +48,10 @@ constexpr size_t MAX_SNAPSHOT_FRAME_BYTES = 64 * 1024;
 /// 30초 예산 안에서 여러 번 헛되이 반복하게 된다.
 constexpr uint8_t SNAPSHOT_DECRYPT_FAIL_LIMIT = 3;
 
+/// 스냅샷 수신 타임아웃 (45초). 맥은 30초 주기로 스냅샷을 브로드캐스트하므로,
+/// 45초 이상 수신되지 않으면 연결 또는 데이터 스트림 단절로 보고 소켓 재연결을 트리거한다.
+constexpr uint32_t SNAPSHOT_TIMEOUT_MS = 45000;
+
 int hexNibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -154,6 +158,12 @@ void Transport::loop() {
 
     if (webSocket_.isConnected()) {
         webSocket_.loop();
+        // 스냅샷 수신 타임아웃 검사: 인가 완료 후 45초 동안 스냅샷이 오지 않으면 재연결 유도
+        if (authStep_ == AuthStep::Subscribed && hasSnapshot_ && (millis() - lastSnapshotAtMs_ > SNAPSHOT_TIMEOUT_MS)) {
+            Serial.println("transport: 스냅샷 수신 타임아웃 (45초) — 소켓을 재연결한다");
+            hasSnapshot_ = false;
+            webSocket_.disconnect();
+        }
         return;
     }
 
@@ -316,12 +326,18 @@ void Transport::handleSocketDisconnected() {
     delete channel_;
     channel_ = nullptr;
     targetHost_ = "";  // 다음 판에서 대상을 다시 고른다.
+    hasSnapshot_ = false;
 
-    // authStep_ 이 아직 NeedsPairing/Failed 로 확정되지 않았다면(= 링크가
-    // 그냥 끊겼다) 재시도한다. 이미 확정됐다면 handleReply() 가 이미
-    // holding_ 을 세웠고 disconnect() 도 그쪽에서 불렀으므로 여기서는 그
-    // 결정을 다시 만들지 않는다 — `transportReconnectDecision` 은 그
-    // 확정 시점에 한 번만 묻는다.
+    // authStep_ 이 아직 NeedsPairing/Failed 로 확정된 상태가 아니라면
+    // (단순 링크 단절/맥 앱 종료/공유 끄기 등), 페어링 상태에 맞춰 재연결 또는 키패드로 돌린다.
+    if (authStep_ != AuthStep::NeedsPairing && authStep_ != AuthStep::Failed) {
+        if (config_ != nullptr && configIsPaired(*config_)) {
+            setAuthStep(AuthStep::SendAuth2);
+        } else {
+            setAuthStep(AuthStep::NeedsPairing);
+        }
+    }
+
     if (transportReconnectDecision(authStep_) == ReconnectDecision::Retry) {
         scheduleNextAttempt();
     }
@@ -361,6 +377,11 @@ void Transport::handleReply(const String &text) {
             break;
         case AuthStep::NeedsPairing:
         case AuthStep::Failed:
+            if (config_ != nullptr && configIsPaired(*config_) && pendingCode_.length() == 0) {
+                // 저장된 토큰으로 인증을 시도했으나 거부된 경우 (맥에서 페어링 해제/재페어링 필요)
+                Serial.println("transport: 기존 토큰이 거부됨 — 페어링 토큰 삭제 및 키패드 화면으로 복귀");
+                configClearToken(*config_);
+            }
             // 브리프 규칙 — 재시도하지 않는다. 사람이 (Task 14b 키패드
             // 화면에서) 새 코드를 넣어야 풀린다. 이번 시도에 쓴 코드는
             // 더 이상 유효하지 않다(맥의 CODE2 는 성공·실패와 무관하게
@@ -374,7 +395,7 @@ void Transport::handleReply(const String &text) {
             // 빠져 있었다 — 다 쓴 ECDH 공유 비밀·논스를 그 자리에서
             // 지운다는 이 파일 전체(Task 10 이래)의 원칙을 여기서도
             // 지킨다.
-            holding_ = true;
+            holding_ = (step == AuthStep::Failed);
             pendingCode_ = "";
             v2Wipe(pendingSs_, sizeof pendingSs_);
             v2Wipe(pendingNonceBytes_, sizeof pendingNonceBytes_);
@@ -677,6 +698,7 @@ void Transport::handleSnapshotFrame(const uint8_t *payload, size_t length) {
     latestSnapshot_ = *parsed;
     delete parsed;
     hasSnapshot_ = true;
+    lastSnapshotAtMs_ = millis();
 
     const uint32_t totalUs = micros() - handleStartUs;
     // Task 12/14a 계측 관례 — WStype_BIN 콜백 안(WebSocket 라이브러리

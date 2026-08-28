@@ -247,6 +247,7 @@ class Transport {
     /// `false` 인 동안은 기본 생성값일 뿐 유효하지 않다.
     Snapshot latestSnapshot_;
     bool hasSnapshot_ = false;
+    uint32_t lastSnapshotAtMs_ = 0;
 
     void onWsEvent(WStype_t type, uint8_t *payload, size_t length);
     void handleSocketConnected();

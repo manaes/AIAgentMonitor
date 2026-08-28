@@ -205,7 +205,7 @@ void uiPairingUpdate(Transport &transport) {
 
     if (!isPairingRelevant(step)) {
         lv_obj_add_flag(g_root, LV_OBJ_FLAG_HIDDEN);
-        if (step == AuthStep::Subscribed) {
+        if (step == AuthStep::Subscribed && transport.isConnected() && transport.hasSnapshot()) {
             lv_obj_add_flag(g_otherLabel, LV_OBJ_FLAG_HIDDEN);
             g_otherLabelSubscribedCache = 1;
         } else {
