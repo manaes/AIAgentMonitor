@@ -5,7 +5,6 @@
 
 #include <Arduino.h>
 #include <stdio.h>
-#include "font_ko.h"
 #include "snapshot.h"
 
 namespace {
@@ -96,8 +95,8 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     lv_obj_remove_flag(g_cardsContainer, LV_OBJ_FLAG_SCROLLABLE);
 
     g_noDataLabel = lv_label_create(g_cardsRoot);
-    lv_obj_set_style_text_font(g_noDataLabel, &font_ko, 0);
-    lv_label_set_text(g_noDataLabel, "데이터 수신 대기 중...");
+    lv_obj_set_style_text_font(g_noDataLabel, &lv_font_montserrat_16, 0);
+    lv_label_set_text(g_noDataLabel, "Waiting for data...");
     lv_obj_center(g_noDataLabel);
 
     // 에이전트 카드 위젯 사전 생성
@@ -128,18 +127,18 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_flex_align(topRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
         cw.nameLabel = lv_label_create(topRow);
-        lv_obj_set_style_text_font(cw.nameLabel, &font_ko, 0);
+        lv_obj_set_style_text_font(cw.nameLabel, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(cw.nameLabel, lv_color_hex(0xffffff), 0);
         lv_label_set_text(cw.nameLabel, "");
 
         cw.rateLabel = lv_label_create(topRow);
-        lv_obj_set_style_text_font(cw.rateLabel, &font_ko, 0);
+        lv_obj_set_style_text_font(cw.rateLabel, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(cw.rateLabel, lv_color_hex(0x0a84ff), 0);
         lv_label_set_text(cw.rateLabel, "");
 
         // 5시간 쿼터 통합 라벨 (예: "5h 0% (4h 56m 29s)")
         cw.usage5hLabel = lv_label_create(cw.card);
-        lv_obj_set_style_text_font(cw.usage5hLabel, &font_ko, 0);
+        lv_obj_set_style_text_font(cw.usage5hLabel, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(cw.usage5hLabel, lv_color_hex(0x8e8e93), 0);
         lv_label_set_text(cw.usage5hLabel, "");
 
@@ -152,7 +151,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
 
         // 주간 쿼터 통합 라벨 (예: "Week 20% (2d 4h 12m)")
         cw.usageWkLabel = lv_label_create(cw.card);
-        lv_obj_set_style_text_font(cw.usageWkLabel, &font_ko, 0);
+        lv_obj_set_style_text_font(cw.usageWkLabel, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(cw.usageWkLabel, lv_color_hex(0x8e8e93), 0);
         lv_label_set_text(cw.usageWkLabel, "");
 

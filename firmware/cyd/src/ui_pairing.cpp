@@ -1,8 +1,7 @@
 #include "ui_pairing.h"
 
+#include <lvgl.h>
 #include <string.h>
-
-#include "font_ko.h"
 
 namespace {
 
@@ -20,17 +19,11 @@ constexpr uint32_t CODE_WINDOW_SECONDS = 120;
 /// KEYPAD_MAP 에서 "확인" 버튼의 0-기반 인덱스(줄바꿈 "\n" 은 세지 않는다).
 constexpr uint32_t CONFIRM_BTN_ID = 11;
 
-/// 브리프 스케치는 백스페이스에 "←"(U+2190)를 쓰지만, font_ko 는 ASCII
-/// (0x20-0x7F) + 한글 음절 51자만 담고 있어(`tools/build-font.sh` 상단
-/// 주석) 화살표 글리프가 없다 — `LV_USE_FONT_PLACEHOLDER=1`(끄면 안 되는
-/// 전역 제약) 이라 보더만 있는 네모로 나온다. 이 한 글자를 위해 폰트
-/// 서브셋을 U+2190 까지 넓히는 대신, ASCII 안에서 뜻이 통하는 "<" 로
-/// 대체한다.
 const char *KEYPAD_MAP[] = {
     "1", "2", "3", "\n",
     "4", "5", "6", "\n",
     "7", "8", "9", "\n",
-    "<", "0", "확인", "",
+    "<", "0", "OK", "",
 };
 
 lv_obj_t *g_root = nullptr;         // 페어링 키패드 전체(라벨+버튼 매트릭스)를 담는 컨테이너.
@@ -89,7 +82,7 @@ bool isPairingRelevant(AuthStep step) {
 
 lv_obj_t *makeLabel(lv_obj_t *parent, int32_t x, int32_t y) {
     lv_obj_t *label = lv_label_create(parent);
-    lv_obj_set_style_text_font(label, &font_ko, 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_16, 0);
     lv_obj_set_pos(label, x, y);
     return label;
 }
@@ -178,32 +171,14 @@ void uiPairingCreate(Transport &transport) {
 
     g_btnMatrix = lv_buttonmatrix_create(g_root);
     lv_buttonmatrix_set_map(g_btnMatrix, KEYPAD_MAP);
-    // btnmatrix 는 버튼 글자를 LV_PART_ITEMS 스타일로 그린다(실제 소스
-    // 확인: lv_buttonmatrix.c 의 lv_obj_init_draw_label_dsc(obj,
-    // LV_PART_ITEMS, ...)) — LV_PART_MAIN 에만 폰트를 걸면 "확인" 이 LVGL
-    // 기본 폰트(한글 없음)로 그려져 상자만 보인다.
-    lv_obj_set_style_text_font(g_btnMatrix, &font_ko, LV_PART_ITEMS);
+    lv_obj_set_style_text_font(g_btnMatrix, &lv_font_montserrat_16, LV_PART_ITEMS);
 
-    // T14a 인수인계 — XPT2046 소프트웨어 미러 X 좌표 off-by-one
-    // (`esp32_smartdisplay@2.1.1` 의 `esp_lcd_touch.c:92`,
-    // task-14a-report.md "발견한 버그 2"). 대응 옵션 (ii) 채택 — 버튼
-    // 매트릭스를 화면 진짜 가장자리에서 안쪽으로 여백을 두고 배치해
-    // 우회한다. 근거: 그 버그는 미러 변환에서 `-1` 이 빠진 **상수** +1
-    // 오차라, 화면의 정확히 마지막 1 raw 픽셀 열(터치 IC 분해능 기준으로도
-    // 아주 좁은 띠)에서만 무효 좌표(x=240, 유효 범위 밖)를 낸다 — 아래
-    // 여백(가로 10px, 세로 12px)은 그 폭보다 훨씬 넓다. 그 결과 문제가
-    // 되는 물리적 가장자리는 항상 "버튼도 아무것도 없는 여백" 에 떨어져,
-    // 오터치가 나도 반응이 없을 뿐 옆 버튼이 대신 눌리지는 않는다.
-    // 근본 수정(옵션 i, `esp_lcd_touch.c` 자동 패치)은 하지 않았다 —
-    // `.pio/libdeps/` 아래 서드파티 소스라 `rm -rf .pio` 클린 빌드마다
-    // 사라지고, 지속시키려면 `extra_scripts` 인프라가 새로 필요해 이
-    // 태스크(키패드 화면) 범위를 넘는다.
     lv_obj_set_pos(g_btnMatrix, 10, 130);
     lv_obj_set_size(g_btnMatrix, LV_HOR_RES - 20, LV_VER_RES - 130 - 12);
     lv_obj_add_event_cb(g_btnMatrix, onKeypadEvent, LV_EVENT_VALUE_CHANGED, &transport);
 
     g_otherLabel = lv_label_create(screen);
-    lv_obj_set_style_text_font(g_otherLabel, &font_ko, 0);
+    lv_obj_set_style_text_font(g_otherLabel, &lv_font_montserrat_16, 0);
     lv_obj_center(g_otherLabel);
 
     refreshDigitsLabel();
@@ -214,18 +189,6 @@ void uiPairingCreate(Transport &transport) {
 void uiPairingUpdate(Transport &transport) {
     const AuthStep step = transport.authStep();
 
-    // fix round 1 (I-2) — `NeedsPairing`/`Failed` 로 "막" 돌아왔다면(직전
-    // 프레임은 그 상태가 아니었다면) 카운트다운을 다시 처음부터 잰다.
-    // 원래 "부팅 후 1회만 시작"이었는데, 그 근거("맥의 open_window() 는
-    // begin_pairing 시점에 한 번만 창을 연다")는 **같은 창 안의 재시도**
-    // 에만 성립했다 — 리뷰가 실제로 확인한 `pairing.rs:356-364` 의
-    // `begin_pairing()` 은 사용자가 맥에서 페어링을 다시 시작할 때마다
-    // `attempts_left`/TTL 을 처음부터 다시 잰다. CYD 는 "같은 창의 재시도"
-    // 와 "완전히 새 창"을 와이어로 구별할 방법이 없으므로(둘 다 그냥
-    // HELLO2→AwaitingCode2 왕복 하나로만 보인다), 리셋하지 않으면 만료된
-    // 창 이후 화면이 "남은 시간 0초"에 영구히 멈춰 실제로는 120초 남은
-    // 새 창을 만료된 것처럼 보여준다 — 매번 다시 재는 쪽이 그보다 덜
-    // 틀린다.
     const bool wasNeedsPairingOrFailed =
         (g_prevStep == AuthStep::NeedsPairing || g_prevStep == AuthStep::Failed);
     const bool isNeedsPairingOrFailed =
@@ -235,30 +198,21 @@ void uiPairingUpdate(Transport &transport) {
     }
     g_prevStep = step;
 
-    // T14b-A — 로컬 추정 카운트다운. 이 화면이 (다시) SendCode2(=
-    // AwaitingCode2 를 받아 CODE2 를 보낼 차례) 에 들어오는 순간 시작한다
-    // — 위 리셋 덕분에 새 페어링 시도마다 다시 잰다. 맥이 실제로 창을
-    // 연 시각과 이 시작 시각의 오차는 사람이 맥 화면의 6자리를 보고 이
-    // 기기로 옮겨 오는 데 걸린 시간과, HELLO2 왕복 지연뿐이다 — 대체로
-    // 짧지만 **보장되지는 않는다.** 맥이 앱 재시작·수동 취소 등으로
-    // 창을 일찍 닫으면 이 값은 그냥 틀린다. 그래서 절대 시각이 아니라
-    // "남은 초" 만 보여주고, 어디에도 "정확하다"는 주장을 남기지 않는다.
     if (!g_codeWindowStarted && step == AuthStep::SendCode2) {
         g_codeWindowStarted = true;
         g_codeWindowStartedAtMs = millis();
     }
 
     if (!isPairingRelevant(step)) {
-        lv_obj_add_flag(g_root, LV_OBJ_FLAG_HIDDEN);       // 이미 숨어 있으면 lv_obj_add_flag 자체가 즉시 반환한다(실제 소스 확인).
+        lv_obj_add_flag(g_root, LV_OBJ_FLAG_HIDDEN);
         if (step == AuthStep::Subscribed) {
-            // Task 15b: 인가 완료 시에는 카드/세션 뷰가 전체 화면을 차지하므로 안내 라벨을 숨긴다.
             lv_obj_add_flag(g_otherLabel, LV_OBJ_FLAG_HIDDEN);
             g_otherLabelSubscribedCache = 1;
         } else {
             lv_obj_remove_flag(g_otherLabel, LV_OBJ_FLAG_HIDDEN);
             if (g_otherLabelSubscribedCache != 0) {
                 g_otherLabelSubscribedCache = 0;
-                lv_label_set_text(g_otherLabel, "연결 중");
+                lv_label_set_text(g_otherLabel, "Connecting...");
             }
         }
         return;
@@ -266,16 +220,9 @@ void uiPairingUpdate(Transport &transport) {
 
     lv_obj_remove_flag(g_root, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(g_otherLabel, LV_OBJ_FLAG_HIDDEN);
-    g_otherLabelSubscribedCache = -1;  // 이 화면을 다시 벗어날 때 문구를 강제로 다시 정하게 한다.
+    g_otherLabelSubscribedCache = -1;
 
     const uint8_t attemptsLeft = transport.attemptsLeft();
-    // attemptsLeft()==0 은 실제 Denied 응답으로만 도달한다(Transport 의
-    // 기본값은 5) — 즉 이 화면이 부팅 직후 보여 줄 수 있는 값이 아니라,
-    // 적어도 한 번의 실제 거절을 거쳐야만 참이 된다. `NeedsPairing`/
-    // `Failed` 둘 다 authfsm.cpp 판정 표에서 서로 다른 세 원인(코드 오답·
-    // 핸드셰이크 만료·창 만료)을 구별하지 않고 하나로 묶으므로, 여기서도
-    // 그 둘을 다시 가르지 않고 attemptsLeft 하나로만 "다 썼다" 를 판정한다
-    // (브리프 리뷰 T14b 지시 — 새 상태를 만들지 말고 있는 구분을 쓴다).
     const bool exhausted = attemptsLeft == 0;
     const bool midFlight = (step == AuthStep::SendHello2 || step == AuthStep::SendCode2);
     const bool blockInput = exhausted || midFlight;
@@ -284,11 +231,11 @@ void uiPairingUpdate(Transport &transport) {
     if (desiredStatus != g_statusIsExhaustedCache) {
         g_statusIsExhaustedCache = desiredStatus;
         if (desiredStatus == 2) {
-            lv_label_set_text(g_statusTitle, "맥에서 페어링을 다시 시작하세요");
+            lv_label_set_text(g_statusTitle, "Please re-pair in App");
         } else if (desiredStatus == 1) {
-            lv_label_set_text(g_statusTitle, "연결 대기 중");
+            lv_label_set_text(g_statusTitle, "Connecting...");
         } else {
-            lv_label_set_text(g_statusTitle, "코드 입력");
+            lv_label_set_text(g_statusTitle, "Enter Code");
         }
     }
 
@@ -297,18 +244,14 @@ void uiPairingUpdate(Transport &transport) {
         g_buttonsBlockedCache = desiredBlocked;
         if (blockInput) {
             lv_buttonmatrix_set_button_ctrl_all(g_btnMatrix, LV_BUTTONMATRIX_CTRL_DISABLED);
-            g_confirmEnabledCache = 0;  // ctrl_all 이 "확인" 도 같이 껐다 — 캐시를 맞춘다.
+            g_confirmEnabledCache = 0;
         } else {
             lv_buttonmatrix_clear_button_ctrl_all(g_btnMatrix, LV_BUTTONMATRIX_CTRL_DISABLED);
-            g_confirmEnabledCache = 1;  // ctrl_all 이 "확인" 도 같이 켰다 — 캐시를 맞춘 뒤 실제 조건으로 되돌린다.
-            refreshConfirmEnabled();    // 6자리 미만이면 여기서 다시 끈다(캐시가 방금 바뀌었으니 실제로 호출된다).
+            g_confirmEnabledCache = 1;
+            refreshConfirmEnabled();
         }
     }
 
-    // exhausted 인 동안은 입력이 막혀 있으므로(위 blockInput) 실제로는
-    // exhausted 에 막 들어온 그 순간에만 g_typedDigits 가 비어 있지 않을
-    // 수 있다 — 길이 검사 자체가 사실상 엣지 트리거라 별도 캐시가 필요
-    // 없다.
     if (exhausted && g_typedDigits.length() > 0) {
         g_typedDigits = "";
         refreshDigitsLabel();
@@ -317,7 +260,7 @@ void uiPairingUpdate(Transport &transport) {
     const int attemptsInt = (int)attemptsLeft;
     if (attemptsInt != g_attemptsShownCache) {
         g_attemptsShownCache = attemptsInt;
-        lv_label_set_text_fmt(g_attemptsLabel, "남은 시도 %u회", (unsigned)attemptsLeft);
+        lv_label_set_text_fmt(g_attemptsLabel, "Attempts left: %u", (unsigned)attemptsLeft);
     }
 
     if (g_codeWindowStarted) {
@@ -325,18 +268,11 @@ void uiPairingUpdate(Transport &transport) {
         const uint32_t elapsedSec = elapsedMs / 1000;
         const uint32_t remaining =
             elapsedSec >= CODE_WINDOW_SECONDS ? 0 : CODE_WINDOW_SECONDS - elapsedSec;
-        // 초 단위라 사실상 초당 한 번만 실제로 바뀐다 — 캐시가 그 이하
-        // 빈도로 자연히 걸러 준다(매 loop() 마다 같은 초를 다시 찍지
-        // 않는다).
         if ((int32_t)remaining != g_remainingShownCache) {
             g_remainingShownCache = (int32_t)remaining;
-            lv_label_set_text_fmt(g_timeLabel, "남은 시간 %u초", (unsigned)remaining);
+            lv_label_set_text_fmt(g_timeLabel, "Time: %us", (unsigned)remaining);
         }
     } else if (g_remainingShownCache != -1) {
-        // 아직 맥에게서 코드를 요구받은 적이 없다(HELLO2 조차 못 보냈다 —
-        // 오프라인이거나 아직 연결 중) — 추정할 시작점이 없으므로 빈
-        // 칸으로 둔다. "0초" 를 보여주면 창이 이미 닫혔다는 거짓 신호가
-        // 된다.
         g_remainingShownCache = -1;
         lv_label_set_text(g_timeLabel, "");
     }

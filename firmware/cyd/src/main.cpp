@@ -22,7 +22,6 @@
 
 #include "config.h"
 #include "transport.h"
-#include "font_ko.h"
 #include "ui_pairing.h"
 #include "ui_nav.h"
 
