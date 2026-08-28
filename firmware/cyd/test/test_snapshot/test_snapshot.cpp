@@ -58,24 +58,9 @@ void test_parses_normal_snapshot_all_fields() {
     TEST_ASSERT_EQUAL_FLOAT(41.5f, a0.usageWeeklyPct);
     TEST_ASSERT_TRUE(a0.hasWeeklyResetAt);
     TEST_ASSERT_EQUAL_UINT64(1755900000, a0.resetWeeklyEpochSec);
-    TEST_ASSERT_EQUAL_size_t(2, a0.projectCount);
-    TEST_ASSERT_FALSE(a0.projectsTruncated);
-
-    const SnapshotProject &p0 = a0.projects[0];
-    TEST_ASSERT_EQUAL_UINT32(3826002220, p0.id);
-    TEST_ASSERT_EQUAL_STRING("foo", p0.name.c_str());
-    TEST_ASSERT_EQUAL_STRING("claude-opus-5", p0.model.c_str());
-    TEST_ASSERT_EQUAL_FLOAT(98.25f, p0.rateTokPerSec);
-    TEST_ASSERT_EQUAL_UINT64(1755499987, p0.lastActivityEpochSec);
-    TEST_ASSERT_TRUE(p0.status == SnapshotProjectStatus::Active);
-
-    const SnapshotProject &p1 = a0.projects[1];
-    TEST_ASSERT_TRUE(p1.status == SnapshotProjectStatus::Idle);
 
     const SnapshotAgent &a1 = s.agents[1];
     TEST_ASSERT_TRUE(a1.kind == SnapshotAgentKind::Codex);
-    TEST_ASSERT_EQUAL_size_t(0, a1.projectCount);
-    TEST_ASSERT_FALSE(a1.projectsTruncated);
 }
 
 // ── "동기화 전" 상태: p5/r5/pw/rw 가 키 자체로 안 온다 ────────────────────
@@ -132,51 +117,20 @@ void test_wrong_type_nested_field_fails_cleanly() {
     TEST_ASSERT_FALSE(parse(json, s));
 }
 
-// ── s(프로젝트 상태) 범위 밖 값 — Dormant 로 fail-safe ─────────────────────
+// ── 에이전트 개수가 상한을 넘으면 잘라내고 truncated 를 세운다 ────────────
 
-void test_out_of_range_project_status_falls_back_to_dormant() {
-    const char *json =
-        "{\"v\":1,\"t\":1,\"a\":[{\"k\":0,\"r\":1.0,\"t5\":1,\"pj\":["
-        "{\"id\":1,\"n\":\"x\",\"m\":\"y\",\"r\":1.0,\"t\":1,\"s\":9}"
-        "]}]}";
-    Snapshot s;
-    TEST_ASSERT_TRUE_MESSAGE(parse(json, s), "범위 밖 s 는 파싱 실패가 아니다");
-    TEST_ASSERT_TRUE(s.agents[0].projects[0].status == SnapshotProjectStatus::Dormant);
-}
-
-// ── k(에이전트 종류) — Antigravity(2)와 그 밖의 값(Unknown) ────────────────
-//
-// 브리프 표에는 k 가 0/1 두 값뿐이라고 적혀 있었지만, 실제 wire.rs 는
-// Antigravity=2 도 만든다(snapshot.h 상단 주석) — 그 실제 값과, 향후 더
-// 늘어날 수 있는 값(Unknown fail-safe)을 둘 다 확인한다.
-void test_antigravity_and_unknown_agent_kind() {
-    const char *json =
-        "{\"v\":1,\"t\":1,\"a\":["
-        "{\"k\":2,\"r\":1.0,\"t5\":1,\"pj\":[]},"
-        "{\"k\":99,\"r\":1.0,\"t5\":1,\"pj\":[]}"
-        "]}";
-    Snapshot s;
-    TEST_ASSERT_TRUE(parse(json, s));
-    TEST_ASSERT_TRUE(s.agents[0].kind == SnapshotAgentKind::Antigravity);
-    TEST_ASSERT_TRUE(s.agents[1].kind == SnapshotAgentKind::Unknown);
-}
-
-// ── 프로젝트 개수가 상한을 넘으면 잘라내고 truncated 를 세운다(실패 아님) ──
-
-void test_projects_beyond_cap_are_truncated_not_failed() {
-    String json = "{\"v\":1,\"t\":1,\"a\":[{\"k\":0,\"r\":1.0,\"t5\":1,\"pj\":[";
-    const size_t overflowCount = SNAPSHOT_MAX_PROJECTS_PER_AGENT + 3;
-    for (size_t i = 0; i < overflowCount; i++) {
+void test_agents_beyond_cap_are_truncated_not_failed() {
+    String json = "{\"v\":1,\"t\":1,\"a\":[";
+    for (size_t i = 0; i < SNAPSHOT_MAX_AGENTS + 2; i++) {
         if (i > 0) json += ",";
-        json += "{\"id\":" + String((unsigned)i) +
-                ",\"n\":\"p\",\"m\":\"m\",\"r\":1.0,\"t\":1,\"s\":0}";
+        json += "{\"k\":0,\"r\":1.0,\"t5\":1}";
     }
-    json += "]}]}";
+    json += "]}";
 
     Snapshot s;
     TEST_ASSERT_TRUE(parse(json.c_str(), s));
-    TEST_ASSERT_EQUAL_size_t(SNAPSHOT_MAX_PROJECTS_PER_AGENT, s.agents[0].projectCount);
-    TEST_ASSERT_TRUE(s.agents[0].projectsTruncated);
+    TEST_ASSERT_EQUAL_size_t(SNAPSHOT_MAX_AGENTS, s.agentCount);
+    TEST_ASSERT_TRUE(s.agentsTruncated);
 }
 
 void setup() {
@@ -187,9 +141,8 @@ void setup() {
     RUN_TEST(test_truncated_json_fails_cleanly);
     RUN_TEST(test_wrong_type_top_level_fails_cleanly);
     RUN_TEST(test_wrong_type_nested_field_fails_cleanly);
-    RUN_TEST(test_out_of_range_project_status_falls_back_to_dormant);
     RUN_TEST(test_antigravity_and_unknown_agent_kind);
-    RUN_TEST(test_projects_beyond_cap_are_truncated_not_failed);
+    RUN_TEST(test_agents_beyond_cap_are_truncated_not_failed);
     UNITY_END();
 }
 

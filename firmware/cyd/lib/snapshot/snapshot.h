@@ -83,44 +83,30 @@ struct SnapshotProject {
 /// `MirrorAgent`(wire.rs) 하나.
 ///
 /// **퍼센트 단위는 맥과 동일하게 0~100 float 다(0~1 소수가 아니다).**
-/// `src-tauri/src/ble/wire.rs` 의 `omits_null_quota_fields_from_json` 테스트가
-/// `quota_used_pct: Some(62.0)` 를 `"p5":62` 로 그대로 직렬화하는 것을 직접
-/// 확인해 준다 — 이 파서는 그 숫자를 나누거나 곱하지 않고 그대로 옮겨 담는다.
-/// Task 15b 가 화면에 `%` 를 붙일 때 이 값을 다시 100을 곱하면 틀린다.
 struct SnapshotAgent {
     SnapshotAgentKind kind = SnapshotAgentKind::Unknown;  // wire.rs `k`
     float rateTokPerSec = 0.0f;         // wire.rs `r` — tok/s
     uint32_t tokens5hCumulative = 0;    // wire.rs `t5` — "동기화 전" 캐시 표시에만 쓰이는 값
 
-    /// wire.rs `p5`(`Option<f32>`). 맥이 아직 5h 사용률을 동기화하지 못한
-    /// 상태("동기화 전")면 이 키 자체가 JSON 에 없다 — 그때는 false 로
-    /// 남는다. **0.0f 를 "0%" 로 착각하면 안 된다.**
-    bool has5hUsagePct = false;
+    bool has5hUsagePct = false;         // wire.rs `p5`
     float usage5hPct = 0.0f;            // 0~100
 
-    bool has5hResetAt = false;          // wire.rs `r5`(`Option<u64>`)
+    bool has5hResetAt = false;          // wire.rs `r5`
     uint64_t reset5hEpochSec = 0;       // epoch 초
 
-    bool hasWeeklyUsagePct = false;     // wire.rs `pw`(`Option<f32>`)
+    bool hasWeeklyUsagePct = false;     // wire.rs `pw`
     float usageWeeklyPct = 0.0f;        // 0~100
 
-    bool hasWeeklyResetAt = false;      // wire.rs `rw`(`Option<u64>`)
+    bool hasWeeklyResetAt = false;      // wire.rs `rw`
     uint64_t resetWeeklyEpochSec = 0;   // epoch 초
-
-    SnapshotProject projects[SNAPSHOT_MAX_PROJECTS_PER_AGENT];  // wire.rs `pj`
-    size_t projectCount = 0;
-    /// `pj` 의 실제 원소 수가 `SNAPSHOT_MAX_PROJECTS_PER_AGENT` 를 넘어
-    /// 잘려 나갔는가.
-    bool projectsTruncated = false;
 };
 
-/// `MirrorSnapshot`(wire.rs) 전체.
+/// `MirrorSnapshot`(wire.rs) 전체 (초경량 카드 전용 모델, 약 180바이트).
 struct Snapshot {
     uint8_t protocolVersion = 0;        // wire.rs `v`
     uint64_t emittedAtEpochSec = 0;     // wire.rs `t` — epoch 초
     SnapshotAgent agents[SNAPSHOT_MAX_AGENTS];  // wire.rs `a`
     size_t agentCount = 0;
-    /// `a` 의 실제 원소 수가 `SNAPSHOT_MAX_AGENTS` 를 넘어 잘려 나갔는가.
     bool agentsTruncated = false;
 };
 

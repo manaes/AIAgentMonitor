@@ -694,11 +694,9 @@ void Transport::handleSnapshotFrame(const uint8_t *payload, size_t length) {
     if (latestSnapshot_.agentCount > 0) {
         const SnapshotAgent &a0 = latestSnapshot_.agents[0];
         Serial.printf(
-            "snapshot: agent[0] kind=%u rate=%.2ftok/s t5=%u p5=%s(%.1f%%) "
-            "projects=%u(truncated=%s)\n",
+            "snapshot: agent[0] kind=%u rate=%.2ftok/s t5=%u p5=%s(%.1f%%)\n",
             (unsigned)a0.kind, a0.rateTokPerSec, (unsigned)a0.tokens5hCumulative,
-            a0.has5hUsagePct ? "yes" : "no", a0.usage5hPct,
-            (unsigned)a0.projectCount, a0.projectsTruncated ? "yes" : "no");
+            a0.has5hUsagePct ? "yes" : "no", a0.usage5hPct);
     }
 }
 

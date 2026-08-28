@@ -46,9 +46,9 @@ bool parseProject(JsonObjectConst obj, SnapshotProject &out) {
 /// 둘을 굳이 가르지 않는다: 맥은 이 필드를 절대 다른 타입으로 보내지 않으므로
 /// (wire.rs 의 `Option<f32>`/`Option<u64>`, `serde` 직렬화가 타입을 보장한다)
 /// "타입이 다른 optional 필드" 는 실제로 도달 불가능한 경로다.
+/// 에이전트 객체 하나. 필수 필드(`k`/`r`/`t5`)만 빠르게 파싱.
 bool parseAgent(JsonObjectConst obj, SnapshotAgent &out) {
-    if (!obj["k"].is<int>() || !obj["r"].is<float>() || !obj["t5"].is<uint32_t>() ||
-        !obj["pj"].is<JsonArrayConst>()) {
+    if (!obj["k"].is<int>() || !obj["r"].is<float>() || !obj["t5"].is<uint32_t>()) {
         return false;
     }
     out.kind = mapAgentKind(obj["k"].as<int>());
@@ -67,20 +67,6 @@ bool parseAgent(JsonObjectConst obj, SnapshotAgent &out) {
     out.hasWeeklyResetAt = obj["rw"].is<uint64_t>();
     out.resetWeeklyEpochSec = out.hasWeeklyResetAt ? obj["rw"].as<uint64_t>() : 0;
 
-    JsonArrayConst pj = obj["pj"];
-    out.projectCount = 0;
-    out.projectsTruncated = false;
-    for (JsonObjectConst po : pj) {
-        if (out.projectCount >= SNAPSHOT_MAX_PROJECTS_PER_AGENT) {
-            out.projectsTruncated = true;
-            break;
-        }
-        SnapshotProject p;
-        if (!parseProject(po, p)) {
-            return false;  // snapshotParse 문서 — 필수 필드 오류는 스냅샷 전체를 버린다.
-        }
-        out.projects[out.projectCount++] = p;
-    }
     return true;
 }
 
@@ -96,28 +82,25 @@ bool snapshotParse(const uint8_t *json, size_t len, Snapshot &out) {
         return false;
     }
 
-    // 스택 오버플로우(8KB 한도) 방지를 위해 대용량 구조체를 힙에 할당
-    Snapshot *result = new Snapshot();
-    result->protocolVersion = doc["v"].as<uint8_t>();
-    result->emittedAtEpochSec = doc["t"].as<uint64_t>();
+    Snapshot result;
+    result.protocolVersion = doc["v"].as<uint8_t>();
+    result.emittedAtEpochSec = doc["t"].as<uint64_t>();
 
     JsonArrayConst agents = doc["a"];
-    result->agentCount = 0;
-    result->agentsTruncated = false;
+    result.agentCount = 0;
+    result.agentsTruncated = false;
     for (JsonObjectConst ao : agents) {
-        if (result->agentCount >= SNAPSHOT_MAX_AGENTS) {
-            result->agentsTruncated = true;
+        if (result.agentCount >= SNAPSHOT_MAX_AGENTS) {
+            result.agentsTruncated = true;
             break;
         }
         SnapshotAgent a;
         if (!parseAgent(ao, a)) {
-            delete result;
-            return false;  // out 을 건드리지 않은 채(snapshot.h 문서) 그대로 반환.
+            return false;  // out 을 건드리지 않은 채 그대로 반환.
         }
-        result->agents[result->agentCount++] = a;
+        result.agents[result.agentCount++] = a;
     }
 
-    out = *result;
-    delete result;
+    out = result;
     return true;
 }

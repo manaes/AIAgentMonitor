@@ -81,7 +81,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     lv_obj_set_pos(g_cardsRoot, 0, 0);
     lv_obj_set_style_bg_opa(g_cardsRoot, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_cardsRoot, 0, 0);
-    lv_obj_set_style_pad_all(g_cardsRoot, 4, 0);
+    lv_obj_set_style_pad_all(g_cardsRoot, 6, 0);
 
     g_cardsContainer = lv_obj_create(g_cardsRoot);
     lv_obj_set_size(g_cardsContainer, lv_pct(100), lv_pct(100));
@@ -89,7 +89,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     lv_obj_set_style_bg_opa(g_cardsContainer, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_cardsContainer, 0, 0);
     lv_obj_set_style_pad_all(g_cardsContainer, 0, 0);
-    lv_obj_set_style_pad_row(g_cardsContainer, 6, 0);
+    lv_obj_set_style_pad_row(g_cardsContainer, 8, 0);
 
     g_noDataLabel = lv_label_create(g_cardsRoot);
     lv_obj_set_style_text_font(g_noDataLabel, &font_ko, 0);
@@ -105,11 +105,11 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_height(cw.card, LV_SIZE_CONTENT);
         lv_obj_set_style_bg_color(cw.card, lv_color_hex(0x2c2c2e), 0);
         lv_obj_set_style_bg_opa(cw.card, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(cw.card, 6, 0);
+        lv_obj_set_style_radius(cw.card, 8, 0);
         lv_obj_set_style_border_width(cw.card, 0, 0);
-        lv_obj_set_style_pad_all(cw.card, 6, 0);
+        lv_obj_set_style_pad_all(cw.card, 8, 0);
         lv_obj_set_flex_flow(cw.card, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_style_pad_row(cw.card, 2, 0);
+        lv_obj_set_style_pad_row(cw.card, 4, 0);
 
         // 상단 행 (이름 + tok/s)
         lv_obj_t *topRow = lv_obj_create(cw.card);
@@ -197,11 +197,10 @@ void uiCardsUpdate(const Transport &transport) {
         }
         lv_label_set_text(cw.rateLabel, rateBuf);
 
-        // 5시간 쿼터
+        // 5시간 쿼터 (사용량 표시)
         float pct5h = ag.has5hUsagePct ? ag.usage5hPct : 0.0f;
         if (pct5h > 100.0f) pct5h = 100.0f;
         if (pct5h < 0.0f) pct5h = 0.0f;
-        float rem5h = 100.0f - pct5h;
 
         char resetBuf[64] = "";
         if (ag.has5hResetAt) {
@@ -210,9 +209,9 @@ void uiCardsUpdate(const Transport &transport) {
 
         char uBuf[128];
         if (resetBuf[0] != '\0') {
-            snprintf(uBuf, sizeof(uBuf), "5h %.0f%% (%s)", rem5h, resetBuf);
+            snprintf(uBuf, sizeof(uBuf), "5h %.0f%% (%s)", pct5h, resetBuf);
         } else {
-            snprintf(uBuf, sizeof(uBuf), "5h %.0f%%", rem5h);
+            snprintf(uBuf, sizeof(uBuf), "5h %.0f%%", pct5h);
         }
         lv_label_set_text(cw.usage5hLabel, uBuf);
         lv_obj_set_style_text_color(cw.usage5hLabel, getPctColor(pct5h), 0);
@@ -224,12 +223,11 @@ void uiCardsUpdate(const Transport &transport) {
         lv_obj_set_style_bg_color(cw.bar5h, getPctColor(pct5h), LV_PART_INDICATOR);
         lv_obj_clear_flag(cw.bar5h, LV_OBJ_FLAG_HIDDEN);
 
-        // 주간 쿼터
+        // 주간 쿼터 (사용량 표시, Week)
         if (ag.hasWeeklyUsagePct) {
             float pctWk = ag.usageWeeklyPct;
             if (pctWk > 100.0f) pctWk = 100.0f;
             if (pctWk < 0.0f) pctWk = 0.0f;
-            float remWk = 100.0f - pctWk;
 
             char resetWkBuf[64] = "";
             if (ag.hasWeeklyResetAt) {
@@ -238,9 +236,9 @@ void uiCardsUpdate(const Transport &transport) {
 
             char wBuf[128];
             if (resetWkBuf[0] != '\0') {
-                snprintf(wBuf, sizeof(wBuf), "wk %.0f%% (%s)", remWk, resetWkBuf);
+                snprintf(wBuf, sizeof(wBuf), "Week %.0f%% (%s)", pctWk, resetWkBuf);
             } else {
-                snprintf(wBuf, sizeof(wBuf), "wk %.0f%%", remWk);
+                snprintf(wBuf, sizeof(wBuf), "Week %.0f%%", pctWk);
             }
             lv_label_set_text(cw.usageWkLabel, wBuf);
             lv_obj_set_style_text_color(cw.usageWkLabel, getPctColor(pctWk), 0);
