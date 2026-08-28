@@ -80,7 +80,10 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     lv_obj_set_pos(g_cardsRoot, 0, 0);
     lv_obj_set_style_bg_opa(g_cardsRoot, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_cardsRoot, 0, 0);
-    lv_obj_set_style_pad_all(g_cardsRoot, 4, 0);
+    lv_obj_set_style_pad_top(g_cardsRoot, 2, 0);
+    lv_obj_set_style_pad_bottom(g_cardsRoot, 2, 0);
+    lv_obj_set_style_pad_left(g_cardsRoot, 4, 0);
+    lv_obj_set_style_pad_right(g_cardsRoot, 4, 0);
     lv_obj_set_scrollbar_mode(g_cardsRoot, LV_SCROLLBAR_MODE_OFF);
     lv_obj_remove_flag(g_cardsRoot, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -90,7 +93,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     lv_obj_set_style_bg_opa(g_cardsContainer, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_cardsContainer, 0, 0);
     lv_obj_set_style_pad_all(g_cardsContainer, 0, 0);
-    lv_obj_set_style_pad_row(g_cardsContainer, 6, 0);
+    lv_obj_set_style_pad_row(g_cardsContainer, 4, 0);
     lv_obj_set_scrollbar_mode(g_cardsContainer, LV_SCROLLBAR_MODE_OFF);
     lv_obj_remove_flag(g_cardsContainer, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -110,8 +113,8 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_bg_opa(cw.card, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(cw.card, 8, 0);
         lv_obj_set_style_border_width(cw.card, 0, 0);
-        lv_obj_set_style_pad_top(cw.card, 8, 0);
-        lv_obj_set_style_pad_bottom(cw.card, 8, 0);
+        lv_obj_set_style_pad_top(cw.card, 16, 0);
+        lv_obj_set_style_pad_bottom(cw.card, 16, 0);
         lv_obj_set_style_pad_left(cw.card, 8, 0);
         lv_obj_set_style_pad_right(cw.card, 8, 0);
         lv_obj_set_flex_flow(cw.card, LV_FLEX_FLOW_COLUMN);
