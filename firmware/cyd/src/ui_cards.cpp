@@ -141,7 +141,6 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_bg_opa(cw.topRow, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(cw.topRow, 0, 0);
         lv_obj_set_style_pad_all(cw.topRow, 0, 0);
-        lv_obj_set_style_pad_bottom(cw.topRow, 4, 0);
         lv_obj_set_flex_flow(cw.topRow, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(cw.topRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
@@ -161,6 +160,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_bg_opa(cw.row5h, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(cw.row5h, 0, 0);
         lv_obj_set_style_pad_all(cw.row5h, 0, 0);
+        lv_obj_set_style_pad_top(cw.row5h, 6, 0);
         lv_obj_set_flex_flow(cw.row5h, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(cw.row5h, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
