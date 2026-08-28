@@ -81,7 +81,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     lv_obj_set_pos(g_cardsRoot, 0, 0);
     lv_obj_set_style_bg_opa(g_cardsRoot, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_cardsRoot, 0, 0);
-    lv_obj_set_style_pad_all(g_cardsRoot, 3, 0);
+    lv_obj_set_style_pad_all(g_cardsRoot, 4, 0);
     lv_obj_set_scrollbar_mode(g_cardsRoot, LV_SCROLLBAR_MODE_OFF);
     lv_obj_remove_flag(g_cardsRoot, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -112,7 +112,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_radius(cw.card, 6, 0);
         lv_obj_set_style_border_width(cw.card, 0, 0);
         lv_obj_set_style_pad_top(cw.card, 4, 0);
-        lv_obj_set_style_pad_bottom(cw.card, 5, 0);
+        lv_obj_set_style_pad_bottom(cw.card, 4, 0);
         lv_obj_set_style_pad_left(cw.card, 6, 0);
         lv_obj_set_style_pad_right(cw.card, 6, 0);
         lv_obj_set_flex_flow(cw.card, LV_FLEX_FLOW_COLUMN);
