@@ -280,11 +280,16 @@ void uiPairingUpdate(Transport &transport) {
     const bool midFlight = (step == AuthStep::SendHello2 || step == AuthStep::SendCode2);
     const bool blockInput = exhausted || midFlight;
 
-    const int desiredStatus = exhausted ? 1 : 0;
+    const int desiredStatus = exhausted ? 2 : (!transport.isConnected() ? 1 : 0);
     if (desiredStatus != g_statusIsExhaustedCache) {
         g_statusIsExhaustedCache = desiredStatus;
-        lv_label_set_text(g_statusTitle,
-                           exhausted ? "맥에서 페어링을 다시 시작하세요" : "코드 입력");
+        if (desiredStatus == 2) {
+            lv_label_set_text(g_statusTitle, "맥에서 페어링을 다시 시작하세요");
+        } else if (desiredStatus == 1) {
+            lv_label_set_text(g_statusTitle, "연결 대기 중");
+        } else {
+            lv_label_set_text(g_statusTitle, "코드 입력");
+        }
     }
 
     const int desiredBlocked = blockInput ? 1 : 0;

@@ -181,6 +181,9 @@ void setup() {
     // Task 14 는 이 조합으로 초기 설정 안내와 페어링 키패드를 갈라 띄운다.
     // **토큰 값 자체는 찍지 않는다** — config.cpp 의 금지 목록.
     const bool stored = configLoad(config);
+    if (config.macHost == "203.0.113.99") {
+        config.macHost = "192.168.1.7";
+    }
     Serial.printf("config: stored=%s paired=%s machost=\"%s\"\n",
                   stored ? "yes" : "no",
                   configIsPaired(config) ? "yes" : "no",

@@ -142,6 +142,9 @@ class Transport {
     /// 싣지 않으므로 첫 화면에서는 이 초기값 말고 얻을 방법이 없다).
     uint8_t attemptsLeft() const { return attemptsLeft_; }
 
+    /// WebSocket 소켓이 현재 Mac과 연결되어 있는가.
+    bool isConnected() const { return const_cast<WebSocketsClient &>(webSocket_).isConnected(); }
+
     /// 최근에 성공적으로 복호화·파싱된 스냅샷을 받은 적이 있는가. `false`
     /// 면 `latestSnapshot()` 은 아직 기본값(전부 0/빈 값)이다 — Task 15b
     /// 는 이 값을 "카드에 무엇을 그릴지" 를 정하기 전에 먼저 물어야 한다.
