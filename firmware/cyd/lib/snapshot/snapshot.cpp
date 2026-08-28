@@ -96,25 +96,28 @@ bool snapshotParse(const uint8_t *json, size_t len, Snapshot &out) {
         return false;
     }
 
-    Snapshot result;
-    result.protocolVersion = doc["v"].as<uint8_t>();
-    result.emittedAtEpochSec = doc["t"].as<uint64_t>();
+    // 스택 오버플로우(8KB 한도) 방지를 위해 대용량 구조체를 힙에 할당
+    Snapshot *result = new Snapshot();
+    result->protocolVersion = doc["v"].as<uint8_t>();
+    result->emittedAtEpochSec = doc["t"].as<uint64_t>();
 
     JsonArrayConst agents = doc["a"];
-    result.agentCount = 0;
-    result.agentsTruncated = false;
+    result->agentCount = 0;
+    result->agentsTruncated = false;
     for (JsonObjectConst ao : agents) {
-        if (result.agentCount >= SNAPSHOT_MAX_AGENTS) {
-            result.agentsTruncated = true;
+        if (result->agentCount >= SNAPSHOT_MAX_AGENTS) {
+            result->agentsTruncated = true;
             break;
         }
         SnapshotAgent a;
         if (!parseAgent(ao, a)) {
+            delete result;
             return false;  // out 을 건드리지 않은 채(snapshot.h 문서) 그대로 반환.
         }
-        result.agents[result.agentCount++] = a;
+        result->agents[result->agentCount++] = a;
     }
 
-    out = result;
+    out = *result;
+    delete result;
     return true;
 }

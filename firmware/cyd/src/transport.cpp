@@ -634,9 +634,8 @@ void Transport::handleSnapshotFrame(const uint8_t *payload, size_t length) {
     const uint32_t handleStartUs = micros();
 
     // 평문은 반드시 프레임보다 짧다(counter+tag 24바이트만큼) — 프레임
-    // 길이만큼 잡아 두면 항상 넉넉하다. 힙에서 받는 이유: 최대 64KiB 라
-    // 스택(이 보드의 태스크 스택은 그보다 훨씬 작다)에 둘 수 없다.
-    uint8_t *plainBuf = new uint8_t[length];
+    // 길이 + 1 만큼 잡아 널 종단을 보장한다.
+    uint8_t *plainBuf = new uint8_t[length + 1];
     size_t plainLen = 0;
     const bool opened = channel_->open(payload, length, plainBuf, &plainLen);
     if (!opened) {
@@ -648,42 +647,35 @@ void Transport::handleSnapshotFrame(const uint8_t *payload, size_t length) {
             (unsigned)length, (unsigned)snapshotDecryptFailStreak_);
 
         if (snapshotDecryptFailStreak_ >= SNAPSHOT_DECRYPT_FAIL_LIMIT) {
-            // Step 2 — 연속 실패 임계값. 근거는 SNAPSHOT_DECRYPT_FAIL_LIMIT
-            // 문서(위). 세션을 죽이지 않고(Failed/NeedsPairing 으로 가지
-            // 않고) **재연결만 강제한다** — 저장된 토큰은 여전히 유효할
-            // 수 있으므로, AUTH2/PROOF2 를 처음부터 다시 돌려 새
-            // `channel_` 을 만드는 쪽이 더 관대하고 스스로 회복 가능한
-            // 대응이다. 토큰 자체가 문제라면(맥이 이미 이 기기를 해제한
-            // 경우 등) 그 재연결이 결국 Denied/Rejected 를 받아
-            // `handleReply()` 의 기존 로직이 알아서 `NeedsPairing` 으로
-            // 떨어뜨린다 — 여기서 새로 그 판단을 만들 필요가 없다.
             Serial.println(
                 "snapshot: 연속 복호화 실패가 임계값을 넘었다 — 세션 키가 "
                 "어긋난 것으로 보고 재연결한다");
             snapshotDecryptFailStreak_ = 0;
-            webSocket_.disconnect();  // handleSocketDisconnected() 가 재시도를 예약한다(Subscribed → Retry).
+            webSocket_.disconnect();
         }
         return;
     }
     snapshotDecryptFailStreak_ = 0;
+    plainBuf[plainLen] = '\0';  // 안전한 JSON 파싱을 위한 널 종단
     const uint32_t decryptUs = micros() - handleStartUs;
 
-    // Step 3/4 — 순수 함수로 파싱(lib/snapshot/snapshot.cpp). 여기 콜백
-    // 안에는 JSON 파싱 로직이 한 줄도 없다.
+    // Step 3/4 — 대용량 구조체를 힙에 할당하여 스택 오버플로우 방지
     const uint32_t parseStartUs = micros();
-    Snapshot parsed;
-    const bool parsedOk = snapshotParse(plainBuf, plainLen, parsed);
+    Snapshot *parsed = new Snapshot();
+    const bool parsedOk = snapshotParse(plainBuf, plainLen, *parsed);
     const uint32_t parseUs = micros() - parseStartUs;
     delete[] plainBuf;
 
     if (!parsedOk) {
+        delete parsed;
         // 평문 원문은 절대 찍지 않는다(브리프 로그 금지 목록) — 길이만.
         Serial.printf("snapshot: 파싱 실패(평문 %u바이트) — 이 프레임만 버린다\n",
                       (unsigned)plainLen);
         return;
     }
 
-    latestSnapshot_ = parsed;
+    latestSnapshot_ = *parsed;
+    delete parsed;
     hasSnapshot_ = true;
 
     const uint32_t totalUs = micros() - handleStartUs;
@@ -694,13 +686,13 @@ void Transport::handleSnapshotFrame(const uint8_t *payload, size_t length) {
         "snapshot: 수신 처리 총 %uus(복호화 %uus, 파싱 %uus, 30초 예산 대비 "
         "%.4f%%) agents=%u truncated=%s\n",
         totalUs, decryptUs, parseUs, totalUs / 300000.0,
-        (unsigned)parsed.agentCount, parsed.agentsTruncated ? "yes" : "no");
+        (unsigned)latestSnapshot_.agentCount, latestSnapshot_.agentsTruncated ? "yes" : "no");
 
     // 파싱된 요약값만 찍는다 — 개수·숫자는 괜찮지만 원문 JSON 은 절대
     // 아니다(브리프 로그 금지 목록). 첫 에이전트만 대표로 찍어 시리얼을
     // 스냅샷마다 넘치게 하지 않는다.
-    if (parsed.agentCount > 0) {
-        const SnapshotAgent &a0 = parsed.agents[0];
+    if (latestSnapshot_.agentCount > 0) {
+        const SnapshotAgent &a0 = latestSnapshot_.agents[0];
         Serial.printf(
             "snapshot: agent[0] kind=%u rate=%.2ftok/s t5=%u p5=%s(%.1f%%) "
             "projects=%u(truncated=%s)\n",
