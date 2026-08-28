@@ -50,7 +50,7 @@ void uiNavCreate(Transport &transport) {
 
     // 3. 상단 탭 네비게이션 바 생성
     g_navBar = lv_obj_create(screen);
-    lv_obj_set_size(g_navBar, LV_HOR_RES, 28);
+    lv_obj_set_size(g_navBar, LV_HOR_RES, 32);
     lv_obj_set_pos(g_navBar, 0, 0);
     lv_obj_set_style_bg_color(g_navBar, lv_color_hex(0x1c1c1e), 0);
     lv_obj_set_style_border_width(g_navBar, 0, 0);
@@ -60,8 +60,8 @@ void uiNavCreate(Transport &transport) {
 
     // 카드 탭 버튼
     g_btnCards = lv_button_create(g_navBar);
-    lv_obj_set_size(g_btnCards, 112, 24);
-    lv_obj_set_style_radius(g_btnCards, 4, 0);
+    lv_obj_set_size(g_btnCards, 112, 26);
+    lv_obj_set_style_radius(g_btnCards, 5, 0);
     lv_obj_set_style_border_width(g_btnCards, 0, 0);
     lv_obj_add_event_cb(g_btnCards, onTabClicked, LV_EVENT_CLICKED, nullptr);
 
@@ -72,8 +72,8 @@ void uiNavCreate(Transport &transport) {
 
     // 세션 탭 버튼
     g_btnSessions = lv_button_create(g_navBar);
-    lv_obj_set_size(g_btnSessions, 112, 24);
-    lv_obj_set_style_radius(g_btnSessions, 4, 0);
+    lv_obj_set_size(g_btnSessions, 112, 26);
+    lv_obj_set_style_radius(g_btnSessions, 5, 0);
     lv_obj_set_style_border_width(g_btnSessions, 0, 0);
     lv_obj_add_event_cb(g_btnSessions, onTabClicked, LV_EVENT_CLICKED, nullptr);
 

@@ -62,7 +62,7 @@ VENV_DIR="$TOOLS_DIR/.venv"             # .gitignore 처리됨 — fonttools 전
 WORDS_FILE="$TOOLS_DIR/ko-words.txt"
 OUT_FILE="$CYD_DIR/lib/font_ko/font_ko.c"
 
-FONT_SIZE=12
+FONT_SIZE=16
 FONT_BUDGET_BYTES=$((50 * 1024))  # 브리프의 50KB 참고치. 넘어도 flash 예산(주석 참고)
                                     # 안에서 괜찮으면 계속 진행 — 이 스크립트는 강제로
                                     # 막지 않고 결과 크기를 알려주기만 한다.

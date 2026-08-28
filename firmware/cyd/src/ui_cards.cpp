@@ -131,11 +131,11 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_text_color(cw.usage5hLabel, lv_color_hex(0x8e8e93), 0);
         lv_label_set_text(cw.usage5hLabel, "");
 
-        // 5시간 쿼터 바 (0%여도 항상 노출)
+        // 5시간 쿼터 바 (0%여도 최소 1% 및 트랙 노출)
         cw.bar5h = lv_bar_create(cw.card);
-        lv_obj_set_size(cw.bar5h, lv_pct(100), 4);
-        lv_obj_set_style_bg_color(cw.bar5h, lv_color_hex(0x1c1c1e), 0);
-        lv_obj_set_style_radius(cw.bar5h, 2, 0);
+        lv_obj_set_size(cw.bar5h, lv_pct(100), 6);
+        lv_obj_set_style_bg_color(cw.bar5h, lv_color_hex(0x3a3a3c), 0);
+        lv_obj_set_style_radius(cw.bar5h, 3, 0);
         lv_bar_set_range(cw.bar5h, 0, 100);
 
         // 주간 쿼터 통합 라벨 (예: "주간 80%남음 2일뒤 초기화")
@@ -146,9 +146,9 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
 
         // 주간 쿼터 바
         cw.barWk = lv_bar_create(cw.card);
-        lv_obj_set_size(cw.barWk, lv_pct(100), 4);
-        lv_obj_set_style_bg_color(cw.barWk, lv_color_hex(0x1c1c1e), 0);
-        lv_obj_set_style_radius(cw.barWk, 2, 0);
+        lv_obj_set_size(cw.barWk, lv_pct(100), 6);
+        lv_obj_set_style_bg_color(cw.barWk, lv_color_hex(0x3a3a3c), 0);
+        lv_obj_set_style_radius(cw.barWk, 3, 0);
         lv_bar_set_range(cw.barWk, 0, 100);
 
         lv_obj_add_flag(cw.card, LV_OBJ_FLAG_HIDDEN);
@@ -212,8 +212,10 @@ void uiCardsUpdate(const Transport &transport) {
         lv_label_set_text(cw.usage5hLabel, uBuf);
         lv_obj_set_style_text_color(cw.usage5hLabel, getPctColor(pct5h), 0);
 
-        // 0%여도 그래프(바)는 항상 노출
-        lv_bar_set_value(cw.bar5h, (int32_t)pct5h, LV_ANIM_OFF);
+        // 0%여도 그래프(바)는 최소 1%로 항상 표시
+        int32_t bar5hVal = (int32_t)pct5h;
+        if (bar5hVal < 1) bar5hVal = 1;
+        lv_bar_set_value(cw.bar5h, bar5hVal, LV_ANIM_OFF);
         lv_obj_set_style_bg_color(cw.bar5h, getPctColor(pct5h), LV_PART_INDICATOR);
         lv_obj_clear_flag(cw.bar5h, LV_OBJ_FLAG_HIDDEN);
 
@@ -239,8 +241,10 @@ void uiCardsUpdate(const Transport &transport) {
             lv_obj_set_style_text_color(cw.usageWkLabel, getPctColor(pctWk), 0);
             lv_obj_clear_flag(cw.usageWkLabel, LV_OBJ_FLAG_HIDDEN);
 
-            // 주간 쿼터 바 항상 노출
-            lv_bar_set_value(cw.barWk, (int32_t)pctWk, LV_ANIM_OFF);
+            // 주간 쿼터 바 항상 노출 (최소 1%)
+            int32_t barWkVal = (int32_t)pctWk;
+            if (barWkVal < 1) barWkVal = 1;
+            lv_bar_set_value(cw.barWk, barWkVal, LV_ANIM_OFF);
             lv_obj_set_style_bg_color(cw.barWk, getPctColor(pctWk), LV_PART_INDICATOR);
             lv_obj_clear_flag(cw.barWk, LV_OBJ_FLAG_HIDDEN);
         } else {
