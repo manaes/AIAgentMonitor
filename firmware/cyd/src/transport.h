@@ -91,6 +91,7 @@
 #include "authfsm.h"
 #include "config.h"
 #include "cryptov2.h"
+#include "snapshot.h"
 
 class Transport {
   public:
@@ -141,6 +142,15 @@ class Transport {
     /// 싣지 않으므로 첫 화면에서는 이 초기값 말고 얻을 방법이 없다).
     uint8_t attemptsLeft() const { return attemptsLeft_; }
 
+    /// 최근에 성공적으로 복호화·파싱된 스냅샷을 받은 적이 있는가. `false`
+    /// 면 `latestSnapshot()` 은 아직 기본값(전부 0/빈 값)이다 — Task 15b
+    /// 는 이 값을 "카드에 무엇을 그릴지" 를 정하기 전에 먼저 물어야 한다.
+    bool hasSnapshot() const { return hasSnapshot_; }
+
+    /// 가장 최근에 받은 스냅샷. `hasSnapshot()` 이 `false` 인 동안은
+    /// 유효하지 않다(기본 생성값일 뿐이다).
+    const Snapshot &latestSnapshot() const { return latestSnapshot_; }
+
   private:
     Config *config_ = nullptr;
     WebSocketsClient webSocket_;
@@ -174,6 +184,23 @@ class Transport {
     /// 오면 이 값으로 `SealedChannel` 을 만든다 — `authOnReply` 는 그
     /// 시점에 이미 사라진 `ss`/논스를 다시 볼 수 없으므로, 여기서
     /// 들고 있어야 한다.
+    ///
+    /// **Task 15a 조사 결과, 이름의 `pending` 이 실제로 정확하다 — 오해를
+    /// 살 이름이 아니다.** Task 15a 브리프는 "`pending` 이라는 이름이
+    /// `Subscribed` 상태 내내 살아 있는 세션 키를 페어링 전용 값처럼
+    /// 보이게 한다" 고 적었지만, `transport.cpp` 의 `finishHandshake()`
+    /// 를 직접 읽어 보면 이 두 배열은 `channel_` 을 만드는 즉시(성공한
+    /// AUTH2/PROOF2 흐름이든 HELLO2/CODE2 흐름이든 둘 다) `v2Wipe()` 로
+    /// 지워진다 — 정말로 "다음 단계로 넘어갈 때까지만" 사는 값이다.
+    /// **`Subscribed` 상태 내내 살아 있는 실제 세션 키 보관소는 아래
+    /// `channel_`(`SealedChannel*`) 하나뿐이다** — 봉인 스냅샷을 열 때
+    /// (`handleSnapshotFrame()`, Task 15a)도 이 배열이 아니라 `channel_`
+    /// 을 그대로 쓴다. 이름을 바꾸지 않고 이 주석으로 남기는 이유:
+    /// 실제 문제(session key 가 어디 사는지 헷갈림)는 이름이 아니라
+    /// "wipe 되는 시점" 이 코드 흐름 안에 흩어져 있다는 것이었고, 그건
+    /// 이 doc 주석 하나로 충분히 설명된다 — 이름을 바꾸면 이미 검증된
+    /// 핸드셰이크 코드(`sendProof2`/`finishHandshake`)의 여러 줄을
+    /// 건드리게 되는데, 그 변경이 주는 이득이 없다.
     uint8_t pendingS2c_[32] = {0};
     uint8_t pendingC2s_[32] = {0};
 
@@ -196,7 +223,27 @@ class Transport {
     /// `attemptsLeft()` 문서 참고.
     uint8_t attemptsLeft_ = 5;
 
+    /// `Subscribed` 상태 내내 살아 있는 실제 세션 키 보관소(위 `pendingS2c_`
+    /// 문서 참고). `finishHandshake()` 가 성공할 때 `(c2s, s2c)` 순서로
+    /// 만든다(`SealedChannel(sendKey, recvKey)` — 이 기기 기준 송신은 c2s,
+    /// 수신은 s2c). `handleSnapshotFrame()`(Task 15a)이 맥→CYD 방향
+    /// 봉인 프레임을 열 때 이 객체의 `open()` 을 그대로 쓴다 — s2c 키를
+    /// 따로 들고 있다가 두 번째 `SealedChannel` 을 새로 만들 필요가 없다
+    /// (애초에 `pendingS2c_` 는 이 시점에 이미 지워진 값이라 그럴 수도
+    /// 없다).
     SealedChannel *channel_ = nullptr;
+
+    /// `handleSnapshotFrame()` 에서 연속으로 복호화에 실패한 횟수.
+    /// 성공하면 0으로 되돌린다. `SNAPSHOT_DECRYPT_FAIL_LIMIT`
+    /// (`transport.cpp`)에 닿으면 "이 한 프레임이 아니라 세션 키 자체가
+    /// 어긋났다" 는 신호로 보고 소켓을 끊어 재연결(→ AUTH2/PROOF2 재핸드셰이크
+    /// → 새 `channel_`)을 강제한다 — 근거는 `handleSnapshotFrame()` 주석.
+    uint8_t snapshotDecryptFailStreak_ = 0;
+
+    /// 가장 최근에 성공적으로 복호화·파싱된 스냅샷. `hasSnapshot_` 이
+    /// `false` 인 동안은 기본 생성값일 뿐 유효하지 않다.
+    Snapshot latestSnapshot_;
+    bool hasSnapshot_ = false;
 
     void onWsEvent(WStype_t type, uint8_t *payload, size_t length);
     void handleSocketConnected();
@@ -205,6 +252,7 @@ class Transport {
     void sendCode2(const ReplyView &reply);
     void sendProof2(const ReplyView &reply);
     void finishHandshake(const ReplyView &reply);
+    void handleSnapshotFrame(const uint8_t *payload, size_t length);
     void sendVerb(const char *prefix, const uint8_t *data, size_t len);
     void setAuthStep(AuthStep step);
     void scheduleNextAttempt();
