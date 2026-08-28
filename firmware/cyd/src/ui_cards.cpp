@@ -81,7 +81,9 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     lv_obj_set_pos(g_cardsRoot, 0, 0);
     lv_obj_set_style_bg_opa(g_cardsRoot, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_cardsRoot, 0, 0);
-    lv_obj_set_style_pad_all(g_cardsRoot, 6, 0);
+    lv_obj_set_style_pad_all(g_cardsRoot, 3, 0);
+    lv_obj_set_scrollbar_mode(g_cardsRoot, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(g_cardsRoot, LV_OBJ_FLAG_SCROLLABLE);
 
     g_cardsContainer = lv_obj_create(g_cardsRoot);
     lv_obj_set_size(g_cardsContainer, lv_pct(100), lv_pct(100));
@@ -89,7 +91,9 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     lv_obj_set_style_bg_opa(g_cardsContainer, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_cardsContainer, 0, 0);
     lv_obj_set_style_pad_all(g_cardsContainer, 0, 0);
-    lv_obj_set_style_pad_row(g_cardsContainer, 8, 0);
+    lv_obj_set_style_pad_row(g_cardsContainer, 4, 0);
+    lv_obj_set_scrollbar_mode(g_cardsContainer, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(g_cardsContainer, LV_OBJ_FLAG_SCROLLABLE);
 
     g_noDataLabel = lv_label_create(g_cardsRoot);
     lv_obj_set_style_text_font(g_noDataLabel, &font_ko, 0);
@@ -105,11 +109,14 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_height(cw.card, LV_SIZE_CONTENT);
         lv_obj_set_style_bg_color(cw.card, lv_color_hex(0x2c2c2e), 0);
         lv_obj_set_style_bg_opa(cw.card, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(cw.card, 8, 0);
+        lv_obj_set_style_radius(cw.card, 6, 0);
         lv_obj_set_style_border_width(cw.card, 0, 0);
-        lv_obj_set_style_pad_all(cw.card, 8, 0);
+        lv_obj_set_style_pad_top(cw.card, 4, 0);
+        lv_obj_set_style_pad_bottom(cw.card, 5, 0);
+        lv_obj_set_style_pad_left(cw.card, 6, 0);
+        lv_obj_set_style_pad_right(cw.card, 6, 0);
         lv_obj_set_flex_flow(cw.card, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_style_pad_row(cw.card, 4, 0);
+        lv_obj_set_style_pad_row(cw.card, 2, 0);
 
         // 상단 행 (이름 + tok/s)
         lv_obj_t *topRow = lv_obj_create(cw.card);
@@ -130,7 +137,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_style_text_color(cw.rateLabel, lv_color_hex(0x0a84ff), 0);
         lv_label_set_text(cw.rateLabel, "");
 
-        // 5시간 쿼터 통합 라벨 (예: "5h 100% (4h 56m 29s)")
+        // 5시간 쿼터 통합 라벨 (예: "5h 0% (4h 56m 29s)")
         cw.usage5hLabel = lv_label_create(cw.card);
         lv_obj_set_style_text_font(cw.usage5hLabel, &font_ko, 0);
         lv_obj_set_style_text_color(cw.usage5hLabel, lv_color_hex(0x8e8e93), 0);
@@ -138,12 +145,12 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
 
         // 5시간 쿼터 바 (0%여도 최소 1% 및 트랙 노출)
         cw.bar5h = lv_bar_create(cw.card);
-        lv_obj_set_size(cw.bar5h, lv_pct(100), 6);
+        lv_obj_set_size(cw.bar5h, lv_pct(100), 5);
         lv_obj_set_style_bg_color(cw.bar5h, lv_color_hex(0x3a3a3c), 0);
-        lv_obj_set_style_radius(cw.bar5h, 3, 0);
+        lv_obj_set_style_radius(cw.bar5h, 2, 0);
         lv_bar_set_range(cw.bar5h, 0, 100);
 
-        // 주간 쿼터 통합 라벨 (예: "wk 80% (2d 4h 12m)")
+        // 주간 쿼터 통합 라벨 (예: "Week 20% (2d 4h 12m)")
         cw.usageWkLabel = lv_label_create(cw.card);
         lv_obj_set_style_text_font(cw.usageWkLabel, &font_ko, 0);
         lv_obj_set_style_text_color(cw.usageWkLabel, lv_color_hex(0x8e8e93), 0);
@@ -151,9 +158,9 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
 
         // 주간 쿼터 바
         cw.barWk = lv_bar_create(cw.card);
-        lv_obj_set_size(cw.barWk, lv_pct(100), 6);
+        lv_obj_set_size(cw.barWk, lv_pct(100), 5);
         lv_obj_set_style_bg_color(cw.barWk, lv_color_hex(0x3a3a3c), 0);
-        lv_obj_set_style_radius(cw.barWk, 3, 0);
+        lv_obj_set_style_radius(cw.barWk, 2, 0);
         lv_bar_set_range(cw.barWk, 0, 100);
 
         lv_obj_add_flag(cw.card, LV_OBJ_FLAG_HIDDEN);
