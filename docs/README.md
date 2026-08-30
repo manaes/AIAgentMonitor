@@ -4,6 +4,7 @@
 
 - [프로젝트 개요](../README.md)
 - [아키텍처와 데이터 흐름](ARCHITECTURE.md)
+- [iOS·CYD 데이터 송수신](DATA_TRANSPORT.md)
 - [페어링과 E2EE 보안 모델](SECURITY.md)
 - [ESP32 CYD 설치 및 문제 해결](CYD_SETUP_GUIDE.md)
 - [Codex 저장 형식 호환성](codex-schema.md)

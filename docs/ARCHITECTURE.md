@@ -35,6 +35,7 @@
 
 ## 기준 문서
 
+- [iOS·CYD 데이터 송수신](DATA_TRANSPORT.md)
 - [보안과 E2EE](SECURITY.md)
 - [CYD 설치 및 문제 해결](CYD_SETUP_GUIDE.md)
 - [Codex 저장 형식 호환성](codex-schema.md)
