@@ -76,7 +76,7 @@
 |---|---|---|
 | Claude Code | `~/.claude/projects/*/*.jsonl` FSEvents tail | 토큰 (in/out/cache), 세션, 모델 |
 | Claude Code | 내부 프록시(포트 4319) 경유 자동 핑 | 실측 5h/주간 사용률, 리셋 시각 |
-| Codex | `~/.codex/state_5.sqlite` → rollout JSONL | 토큰 delta, 실측 5h/주간 사용률 |
+| Codex | `~/.codex/sessions/**/rollout-*.jsonl` (최신) 또는 `state_5.sqlite` 인덱스(구버전) | 토큰 delta, 실측 5h/주간 사용률 |
 
 모든 접근은 **read-only** 또는 로컬 프록시이며 외부 서버로 데이터가 전송되지 않습니다.
 
@@ -95,7 +95,7 @@ graph TD
     subgraph Sources["데이터 소스 (read-only)"]
         CJ[("~/.claude/projects/*.jsonl")]
         CH[("Anthropic 응답 헤더")]
-        CX[("~/.codex/state_5.sqlite<br/>+ rollout JSONL")]
+        CX[("~/.codex/sessions/**/rollout JSONL<br/>구버전: state_5.sqlite 인덱스")]
     end
     subgraph Proc["Tauri 2 프로세스"]
         subgraph BE["Rust 백엔드 (src-tauri/src)"]
@@ -147,7 +147,7 @@ flowchart LR
     Store --> UI
 ```
 
-1. **수집** — `ClaudeWatcher` 는 FSEvents 로 jsonl 을 tail-follow 하며 `assistant` 메시지의 usage·model·timestamp 를 `TokenEvent` 로, `CodexWatcher` 는 2초마다 `state_5.sqlite`(read-only WAL)에서 활성 스레드를 찾아 rollout JSONL 의 `token_count`·`rate_limits` 를 읽어 같은 채널로 보낸다. `QuotaProxy` 는 `127.0.0.1:4319` 에서 Claude 요청을 그대로 Anthropic 으로 포워딩하면서 `anthropic-ratelimit-unified-5h/7d-*` 헤더만 관찰해 `QuotaState` 로 적재한다.
+1. **수집** — `ClaudeWatcher` 는 FSEvents 로 JSONL 을 tail-follow한다. `CodexWatcher` 는 최신 Codex의 `~/.codex/sessions/**/rollout-*.jsonl`을 직접 찾고, 구버전에서는 `state_5.sqlite`의 인덱스를 폴백으로 사용해 `token_count`·`rate_limits`를 읽는다. `QuotaProxy` 는 `127.0.0.1:4319` 에서 Claude 요청을 포워딩하면서 사용률 헤더만 관찰한다.
 2. **집계** — `Aggregator` 가 `TokenEvent` 를 `EventRing`(10초 EMA로 tok/s)과 `RotatingBucket`(60×5분 = 5h 합산)에 누적하고, 프로젝트별 활동 상태(Active<60s / Idle<300s / Dormant)를 갱신한다.
 3. **송출** — 250ms 틱마다 `snapshot()` 으로 `Snapshot{ emitted_at, agents[] }` 를 만들고 실측 quota 를 주입한 뒤, `EmitGate` 가 **내용 해시가 바뀌었고 직전 송출에서 500ms 이상 지났을 때만** `app.emit("snapshot")` 한다(불필요한 재렌더 차단).
 4. **렌더** — 프론트는 `store.init()` 에서 `listen("snapshot")` 으로 구독하고, 수신 시 `store.snap` 갱신 → Svelte 5 룬 반응성으로 AgentCard/QuotaBar/SessionList 가 재렌더된다. 별도 1초 타이머로 카운트다운·stale 표시를 갱신한다.
@@ -161,14 +161,15 @@ flowchart LR
 | 백→프 | event | `snapshot` (250ms 생성·500ms 게이트) |
 | 프→백 | command | `open_detail_window` · `sync_quota` |
 
-### 4. 영속화 / 로그
+### 4. 영속화 / 진단
 
 | 대상 | 위치 | 시점 |
 |---|---|---|
 | Claude quota 캐시 | `~/.config/ai-agent-monitor/claude-quota.json` | quota 헤더 관찰 시 |
-| 로그 | `~/Library/Logs/AIMonitor/app.log` (macOS) | 상시(tracing) |
+| 앱 오류 | Detail의 Devices/Settings 패널 | 전송·설정 작업 실패 시 |
+| CYD 진단 | USB 시리얼 115200 baud | 부팅·터치·연결·인증 상태 |
 
-> Aggregator 의 ring/rotating 과 Codex quota 는 인메모리라 앱 재시작 시 초기화된다(Claude quota 는 위 캐시에서 콜드스타트 복원).
+> Aggregator의 ring/rotating은 인메모리지만 시작 시 최근 Claude/Codex 원본 로그를 재생한다. Claude quota는 별도 캐시에서 복원하고 Codex quota는 최신 rollout의 `rate_limits`에서 복원한다. 현재 `tracing` subscriber는 없어 파일 로그를 만들지 않는다.
 
 ---
 
@@ -200,6 +201,6 @@ pnpm tauri build
 
 ### Codex SQLite 스키마
 
-`CodexWatcher`(`src-tauri/src/watchers/codex.rs`)는 공식 문서가 없는 `~/.codex/state_5.sqlite` 의 `threads` 테이블을 **read-only** 로 직접 쿼리해 활성 세션의 `rollout_path` 를 찾는다. 이 스키마는 Codex 내부 구현이라 **버전에 따라 바뀔 수 있는 외부 의존성**이므로, 탐색 시점의 테이블/컬럼 구조를 [`docs/codex-schema.md`](docs/codex-schema.md) 에 기록해 둔다.
+`CodexWatcher`는 최신 Codex에서는 날짜별 rollout 디렉터리를 직접 탐색하고, `threads` 테이블이 존재하는 구버전에서만 `state_5.sqlite`를 읽는다. 두 형식과 호환성 메모는 [`docs/codex-schema.md`](docs/codex-schema.md)에 기록한다.
 
-> 스키마가 깨지면(컬럼명 변경 등) Codex 사용률이 갱신되지 않으므로, codex.rs 의 쿼리(`SELECT id, model, cwd, rollout_path FROM threads WHERE …`)를 손볼 때 이 문서를 함께 갱신한다.
+현재 아키텍처, 전송 경로와 보안 경계는 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/SECURITY.md`](docs/SECURITY.md)를 참고하세요. CYD 설치는 [`docs/CYD_SETUP_GUIDE.md`](docs/CYD_SETUP_GUIDE.md)에 정리되어 있습니다.

@@ -9,7 +9,8 @@ AI Agent Monitor를 릴리즈(프로덕션) 빌드하고 배포하는 방법.
 ```bash
 cd <repo>
 . "$HOME/.cargo/env"
-npm run tauri build -- --config '{"build":{"beforeDevCommand":"","beforeBuildCommand":"npm run build"}}'
+pnpm install --frozen-lockfile
+pnpm tauri build
 open "src-tauri/target/release/bundle/macos/AI Agent Monitor.app"
 ```
 
@@ -26,10 +27,10 @@ open "src-tauri/target/release/bundle/macos/AI Agent Monitor.app"
 |---|---|
 | Rust (rustup) | `~/.cargo/bin` — `cargo`/`rustc` |
 | Node | mise 등으로 설치됨 |
-| 빌드 명령 | 아래 참고 — pnpm이 Node 버전과 안 맞으면 npm으로 우회 |
+| pnpm | lockfile 고정 설치 및 Tauri 빌드 |
 | (배포 시) Xcode + Developer ID 인증서 | 서명·공증용 |
 
-> **pnpm 주의**: 이 저장소는 `pnpm-workspace.yaml`(pnpm v10 형식)을 쓰는데, pnpm v10 latest는 Node 22+를 요구한다. 현재 환경(Node 20)에서는 `pnpm tauri build`가 실패하므로 `beforeBuildCommand`를 `npm run build`로 우회한다(아래). 깔끔하게 하려면 `mise use -g node@22 && npm i -g pnpm` 후 `pnpm tauri build`.
+CI와 동일하게 Node 22와 lockfile에 맞는 pnpm 사용을 권장한다.
 
 ---
 
@@ -39,10 +40,7 @@ open "src-tauri/target/release/bundle/macos/AI Agent Monitor.app"
 cd <repo>
 . "$HOME/.cargo/env"
 
-# pnpm 우회(현재 환경) — beforeBuildCommand를 npm으로
-npm run tauri build -- --config '{"build":{"beforeBuildCommand":"npm run build"}}'
-
-# 또는 Node 22 + pnpm 정상화 시
+pnpm install --frozen-lockfile
 pnpm tauri build
 ```
 
@@ -120,7 +118,7 @@ export APPLE_TEAM_ID="<TEAMID>"
 # export APPLE_API_KEY="<KeyID>"
 # export APPLE_API_KEY_PATH="/path/AuthKey_<KeyID>.p8"
 
-npm run tauri build -- --config '{"build":{"beforeBuildCommand":"npm run build"}}'
+pnpm tauri build
 ```
 > CI/무인 빌드는 키체인 대신 인증서를 주입: `APPLE_CERTIFICATE`(base64 .p12) + `APPLE_CERTIFICATE_PASSWORD` + `APPLE_SIGNING_IDENTITY`.
 > 공증은 Apple 서버 왕복이라 빌드가 수 분 더 걸린다.
@@ -142,5 +140,5 @@ xcrun stapler validate "$APP"       # The validate action worked!
 - **Claude 사용량(%)**: opt-in. Claude Code 환경에 `ANTHROPIC_BASE_URL=http://localhost:4319` 설정 시 프록시가 `anthropic-ratelimit-*` 헤더로 실측 캡처. 또는 popover의 "🔄 동기화" 버튼 / 활동 중 10분마다 자동 핑(`claude -p ping`). ⚠️ 상시 `ANTHROPIC_BASE_URL`을 영구 설정하면 앱이 꺼졌을 때 Claude Code 요청이 실패하니, 영구 설정은 앱을 로그인 자동실행으로 항상 띄울 때만 권장.
 - **Codex 사용량(%)**: zero-config. `~/.codex/sessions/.../rollout-*.jsonl`의 `rate_limits`를 읽어 5h·주간 사용률을 자동 표시(프록시·핑 불필요).
 - **claude 핑**: 절대경로 `~/.local/bin/claude`를 우선 사용 → Finder 실행(빈약한 PATH)에서도 동작.
-- **로그**: `~/Library/Logs/AIMonitor/app.log.*` (일 단위 회전). tray 우클릭 → Open Log Folder.
+- **진단**: 현재 Rust `tracing` subscriber가 없어 파일 로그가 생성되지 않는다. Devices 탭의 오류와 CYD 시리얼 로그를 우선 확인한다.
 - **자체 DB 없음**: 메모리 5h ring/bucket. 재시작 시 jsonl/rollout 다시 읽어 5h 복원.

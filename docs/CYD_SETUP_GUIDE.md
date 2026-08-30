@@ -6,7 +6,7 @@ AI Agent Monitor는 책상 위에 두고 Claude Code, OpenAI Codex, Antigravity�
 
 ## 1. 준비물
 
-* **ESP32-2432S028R 보드** (2.8인치 240×320 저항막 터치 디스플레이 일체형 ESP32)
+* **ESP32-2432S028Rv3 보드** (ST7789, 2.8인치 240×320 저항막 터치, USB-C + Micro-USB 구성으로 검증됨)
 * **USB-C 또는 Micro-USB 케이블** (데이터 통신 지원 케이블)
 * **PC/Mac 개발 환경**: VS Code + [PlatformIO IDE](https://platformio.org/) 확장 프로그램
 
@@ -29,7 +29,9 @@ cd firmware/cyd
 pio run -e cyd -t upload
 ```
 
-> **참고**: 만약 특정 시리얼 포트를 명시하고 싶다면 `firmware/cyd/platformio.ini` 파일의 `upload_port` 항목을 수정하거나 `pio run -e cyd -t upload --upload-port /dev/cu.usbserial-1120`과 같이 지정할 수 있습니다.
+> `platformio.ini`의 커밋된 포트 이름은 개발 장비의 USB 허브 위치에 종속됩니다. 그대로 믿지 말고 `pio device list`로 현재 포트를 확인한 뒤 `pio run -e cyd -t upload --upload-port /dev/cu.usbserial-XXXX`처럼 명령행에서 지정하세요. 포트가 여러 개면 쓰기 전에 `esptool ... chip_id`로 실제 ESP32인지 확인합니다.
+
+> 다른 CYD 리비전은 디스플레이 컨트롤러와 터치 핀 배치가 다를 수 있습니다. 화면이 보인다는 이유만으로 `Rv3` 보드 정의가 완전히 호환된다고 가정하지 마세요.
 
 ---
 
@@ -42,7 +44,7 @@ pio run -e cyd -t upload
 2. **설정 페이지 접속**:
    * 연결 후 자동으로 캡티브 포털 설정 창이 팝업됩니다.
    * (자동으로 뜨지 않는 경우 웹 브라우저에서 `http://192.168.4.1` 접속)
-3. **네트워크 및 호스트 설정**:
+3. **네트워크 및 호스트 설정** (첫 부팅 기본 모드는 Wi-Fi이므로 BLE만 사용할 예정이어도 초기 설정을 한 번 완료하는 것이 가장 빠릅니다):
    * **WiFi SSID / Password**: 집 또는 사무실에서 사용 중인 2.4GHz WiFi 공유기 정보 입력
    * **Mac Host**: 
      * **비워두기 (권장)**: mDNS(`aim-cyd.local`)를 통해 맥 앱을 자동으로 탐색합니다.
@@ -111,7 +113,7 @@ CYD 보드는 **Wi-Fi (LAN)** 및 **Bluetooth LE (BLE)** 두 가지 방식으로
 ## 6. 자주 묻는 질문 및 문제 해결 (FAQ & Troubleshooting)
 
 ### Q. 화면에 `Connecting via BLE...` 또는 `Connecting via Wi-Fi...`만 계속 뜹니다.
-* **Mac 앱의 해당 공유 토글이 켜져 있는지 확인**: Mac 앱의 [Devices] 탭에서 **"Bluetooth (BLE)"** 또는 **"로컬 네트워크 (Wi-Fi)"**가 켜져 있는지 확인해 주세요.
+* **Mac 앱의 해당 공유 토글이 켜져 있는지 확인**: Mac 앱의 [Devices] 탭에서 **"Bluetooth (BLE)"** 또는 **"로컬 네트워크 (Wi-Fi)"**가 켜져 있는지 확인해 주세요. 두 전송은 독립적으로 동시에 켤 수 있지만 CYD는 한 번에 선택한 한 경로로 연결합니다.
 * **BLE 연결 시**: Mac과 보드의 거리를 5m 이내로 유지해 주시고, Mac의 Bluetooth가 켜져 있는지 확인해 주세요.
 * **Wi-Fi 연결 시**: Mac과 CYD 보드가 같은 공유기(서브넷)에 연결되어 있는지 및 4320 포트가 방화벽에 차단되지 않았는지 확인해 주세요.
 * **모드 전환**: 화면의 **`[ Wi-Fi (LAN) ]`** 또는 **`[ Bluetooth (BLE) ]`** 버튼을 눌러 다른 연결 방식으로 손쉽게 변경할 수 있습니다.
@@ -122,3 +124,22 @@ CYD 보드는 **Wi-Fi (LAN)** 및 **Bluetooth LE (BLE)** 두 가지 방식으로
 ### Q. 페어링을 초기화하고 다시 연결하고 싶습니다.
 * Mac 앱의 [Devices] 탭 하단에서 등록된 기기의 **[Unpair]** 또는 **[모든 기기 연결 해제]** 버튼을 누릅니다.
 * CYD 보드는 토큰 무효화를 감지하여 자동으로 기존 자격증명을 지우고 **`Enter Code` 키패드 화면**으로 돌아옵니다. 새 코드를 입력해 다시 페어링하시면 됩니다.
+
+### Q. 버튼은 보이는데 아무것도 눌리지 않습니다.
+* v1.7.2 이전 펌웨어는 Wi-Fi 캡티브 포털 대기 중 LVGL 입력 처리가 멈추는 문제가 있었습니다. 최신 `firmware/cyd`를 다시 플래시하세요.
+* 시리얼 모니터를 115200 baud로 열고 터치 시 `touch: x=... y=...`가 출력되는지 확인합니다. 출력이 없다면 보드 리비전과 XPT2046 핀 정의를 먼저 의심하세요.
+
+### Q. 앱과 CYD 모두 토큰/사용률이 비어 있습니다.
+* CYD는 자체적으로 Claude/Codex 로그를 읽지 않으며 Mac 앱이 만든 스냅샷만 표시합니다. 먼저 Tauri Detail 창에서 값이 보이는지 확인하세요.
+* Codex 0.151+는 세션 인덱스 구조가 바뀌었으므로 앱 v1.7.2 이상이 필요합니다.
+* Claude quota는 자동/수동 ping이 성공하거나 프록시가 quota 헤더를 관찰해야 표시됩니다. 최근 실제 Claude 응답의 usage가 없으면 토큰 카드가 비어 있을 수 있습니다.
+* Codex rollout에 `token_count.rate_limits`가 있는지, Devices 탭에서 CYD가 `연결됨`인지 순서대로 확인합니다.
+
+## 7. 연결과 보안 요약
+
+* BLE와 LAN 모두 X25519 + HKDF-SHA256 + ChaCha20-Poly1305 E2EE v2를 사용합니다.
+* 6자리 코드는 120초 동안 유효하며 한 창에서 최대 5회 시도할 수 있습니다.
+* 최초 발급 토큰도 암호화 채널 안에서 전달되고 NVS에 저장됩니다. 이후에는 저장 토큰과 새 임시 X25519 키를 함께 사용해 자동 재인증합니다.
+* LAN 자동 검색이 실패하면 Mac Devices 탭에 표시된 `IP:4320`을 Mac Host에 직접 넣습니다.
+
+자세한 보안 경계는 [SECURITY.md](SECURITY.md), 전체 데이터 흐름은 [ARCHITECTURE.md](ARCHITECTURE.md)를 참고하세요.

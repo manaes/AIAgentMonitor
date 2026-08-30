@@ -1,5 +1,7 @@
 # LAN 전송 종단 검증 (하드웨어 불필요)
 
+> 개발자용 회귀 검증 문서다. 현재 사용법은 [`../docs/CYD_SETUP_GUIDE.md`](../docs/CYD_SETUP_GUIDE.md), 아키텍처는 [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)를 따른다.
+
 CYD 펌웨어가 존재하기 **전에** 맥 쪽 LAN 전송 전 구간을 확인한다. 이것이 LAN 을
 BLE 보다 먼저 한 이유 그 자체다 — 나중에 보드를 구워 놓고 무언가 실패했을 때
 "맥은 이미 통과했다"고 말할 수 있어야 한다.

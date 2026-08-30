@@ -1,4 +1,6 @@
-# Codex SQLite Schema (탐색일: 2026-05-28)
+# Codex 저장 형식 호환성
+
+> 현재 기본 경로는 SQLite가 아니라 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`이다. Codex 0.151에서 `state_5.sqlite`의 `threads` 테이블이 사라진 것을 확인했으며, 앱 v1.7.2부터 날짜별 rollout을 직접 탐색한다. 아래 SQLite 내용은 2026-05-28 당시 구버전 호환과 회귀 분석을 위한 기록이다.
 
 ## 개요
 
