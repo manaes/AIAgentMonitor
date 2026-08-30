@@ -2,6 +2,7 @@
 
 #include <Preferences.h>
 #include <WiFiManager.h>
+#include <lvgl.h>
 
 namespace {
 
@@ -249,9 +250,26 @@ bool wifiConnectOrPortal(Config &c) {
     // 남는데, 그게 바로 이 제한이 막으려던 상태다.
     wm.setConfigPortalTimeout(PORTAL_TIMEOUT_S);
 
+    // Keep LVGL (including the touch input driver) alive while WiFiManager's
+    // captive portal is waiting for credentials.  The default blocking portal
+    // owns setup() for up to five minutes, which otherwise leaves the already
+    // visible mode buttons completely inert.
+    wm.setConfigPortalBlocking(false);
+
     wm.addParameter(&host);
 
-    if (!wm.autoConnect(PORTAL_AP_SSID)) {
+    bool connected = wm.autoConnect(PORTAL_AP_SSID);
+    uint32_t lvLastTickMs = millis();
+    while (!connected && wm.getConfigPortalActive()) {
+        connected = wm.process();
+
+        const uint32_t now = millis();
+        lv_tick_inc(now - lvLastTickMs);
+        lvLastTickMs = now;
+        lv_timer_handler();
+        delay(1);
+    }
+    if (!connected) {
         return false;
     }
 
@@ -319,4 +337,3 @@ void configSaveMode(TransportMode mode) {
     prefs.end();
     Serial.printf("config: 연결 모드 저장 — %s\n", (mode == TransportMode::Ble) ? "BLE" : "WiFi");
 }
-

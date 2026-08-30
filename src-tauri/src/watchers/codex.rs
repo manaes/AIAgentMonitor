@@ -88,6 +88,79 @@ struct ThreadRow {
     rollout_path: String,
 }
 
+#[derive(Deserialize)]
+struct SessionMetaLine {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    payload: Option<SessionMeta>,
+}
+
+#[derive(Deserialize, Default)]
+struct SessionMeta {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    cwd: String,
+}
+
+/// Codex 0.151+ no longer keeps the `threads` table in state_5.sqlite.  The
+/// canonical rollout files still live under ~/.codex/sessions/YYYY/MM/DD, so
+/// discover the newest ones directly and read their session_meta first line.
+fn recent_session_rollouts(root: &Path) -> Vec<ThreadRow> {
+    fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "jsonl")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("rollout-"))
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut paths = Vec::new();
+    collect(root, &mut paths);
+    paths.sort_by_key(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH)
+    });
+    paths.reverse();
+
+    paths
+        .into_iter()
+        .take(5)
+        .filter_map(|path| {
+            let first = BufReader::new(File::open(&path).ok()?)
+                .lines()
+                .next()?
+                .ok()?;
+            let line: SessionMetaLine = serde_json::from_str(&first).ok()?;
+            if line.kind != "session_meta" {
+                return None;
+            }
+            let meta = line.payload?;
+            if meta.id.is_empty() || meta.cwd.is_empty() {
+                return None;
+            }
+            Some(ThreadRow {
+                id: meta.id,
+                model: "codex".to_string(),
+                cwd: meta.cwd,
+                rollout_path: path.to_string_lossy().into_owned(),
+            })
+        })
+        .collect()
+}
+
 /// 최근 활성(archived=0) thread 몇 개의 rollout 경로를 sqlite에서 조회 (read-only WAL).
 fn active_threads(db: &Path) -> Vec<ThreadRow> {
     let conn = match Connection::open_with_flags(
@@ -244,8 +317,13 @@ impl CodexWatcher {
         }
         std::thread::spawn(move || {
             let mut offsets: HashMap<PathBuf, u64> = HashMap::new();
+            let sessions_root = state_db.parent().unwrap_or(Path::new(".")).join("sessions");
             loop {
-                for t in active_threads(&state_db) {
+                let mut threads = active_threads(&state_db);
+                if threads.is_empty() {
+                    threads = recent_session_rollouts(&sessions_root);
+                }
+                for t in threads {
                     let path = PathBuf::from(&t.rollout_path);
                     if !path.exists() {
                         continue;
@@ -268,7 +346,11 @@ mod tests {
 
     #[test]
     fn parse_counts_splits_cached_input_and_output() {
-        let u = Usage { input_tokens: 21853, cached_input_tokens: 4480, output_tokens: 238 };
+        let u = Usage {
+            input_tokens: 21853,
+            cached_input_tokens: 4480,
+            output_tokens: 238,
+        };
         let c = parse_counts(&u);
         assert_eq!(c.tokens_cache_read, 4480);
         assert_eq!(c.tokens_in, 21853 - 4480);
@@ -280,8 +362,16 @@ mod tests {
     fn rate_limits_populate_quota() {
         let q = CodexQuota::default();
         let rl = RateLimits {
-            primary: Some(Window { used_percent: 31.0, window_minutes: Some(300), resets_at: 1_780_158_830 }),
-            secondary: Some(Window { used_percent: 60.0, window_minutes: Some(10080), resets_at: 1_780_378_930 }),
+            primary: Some(Window {
+                used_percent: 31.0,
+                window_minutes: Some(300),
+                resets_at: 1_780_158_830,
+            }),
+            secondary: Some(Window {
+                used_percent: 60.0,
+                window_minutes: Some(10080),
+                resets_at: 1_780_378_930,
+            }),
         };
         apply_rate_limits(&rl, &q);
         assert_eq!(*q.used_pct_5h.lock().unwrap(), Some(31.0));
@@ -294,7 +384,11 @@ mod tests {
     fn rate_limits_primary_weekly_window() {
         let q = CodexQuota::default();
         let rl = RateLimits {
-            primary: Some(Window { used_percent: 90.0, window_minutes: Some(10080), resets_at: 1_787_203_953 }),
+            primary: Some(Window {
+                used_percent: 90.0,
+                window_minutes: Some(10080),
+                resets_at: 1_787_203_953,
+            }),
             secondary: None,
         };
         apply_rate_limits(&rl, &q);
