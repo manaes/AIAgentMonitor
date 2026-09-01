@@ -1,6 +1,6 @@
 # 실기기 확인 절차
 
-> 이 문서는 프로토콜 실기기 검증과 레거시 호환 절차를 보존한다. 현재 사용자 설치는 [`../CYD_SETUP_GUIDE.md`](../CYD_SETUP_GUIDE.md), 현재 보안 모델은 [`../SECURITY.md`](../SECURITY.md)를 기준으로 한다. v1 절은 호환 검증용이며 신규 클라이언트는 E2EE v2를 구현해야 한다.
+> 이 문서는 프로토콜 실기기 검증과 레거시 호환 절차를 보존한다. 현재 사용자 설치는 [`../../firmware/docs/CYD_SETUP_GUIDE.md`](../../firmware/docs/CYD_SETUP_GUIDE.md), 현재 보안 모델은 [`../SECURITY.md`](../SECURITY.md)를 기준으로 한다. v1 절은 호환 검증용이며 신규 클라이언트는 E2EE v2를 구현해야 한다.
 >
 > BLE는 iOS 시뮬레이터에서 동작하지 않는다. 아래는 실제 iPhone이 있어야 하는 유일한 단계다.
 > 작성일 2026-08-18 · 브랜치 `feat/ble-ios-mirror` (1단계)
@@ -599,7 +599,7 @@ ifconfig <그 인터페이스> | grep 'inet '  # 그 인터페이스의 IPv4
 
 ### 8-4. 윈도우 — 아직 손으로 돌려 보지 않았다
 
-이 앱은 윈도우 MSI 도 낸다(`docs/release-notes/v1.5.0.md`). LAN 코드에는
+이 앱은 윈도우 MSI 도 낸다(`app/docs/release-notes/v1.5.0.md`). LAN 코드에는
 `#[cfg(target_os)]` 게이트가 없으므로 게시와 주소 표시도 거기서 돈다.
 서브프로세스(`ipconfig`/`scutil`)를 쓰지 않고 UDP 소켓과 `gethostname` 만
 쓰는 이유가 그것이다 — 다만 **실제로 윈도우에서 돌려 본 사람은 아직 없다.**

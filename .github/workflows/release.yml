@@ -24,9 +24,9 @@ jobs:
         id: notes
         shell: bash
         run: |
-          NOTES_FILE="docs/release-notes/${GITHUB_REF_NAME}.md"
+          NOTES_FILE="app/docs/release-notes/${GITHUB_REF_NAME}.md"
           if [[ ! -f "$NOTES_FILE" ]]; then
-            NOTES_FILE="docs/release-notes/default.md"
+            NOTES_FILE="app/docs/release-notes/default.md"
           fi
           {
             echo 'body<<EOF'
@@ -95,6 +95,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install frontend deps
+        working-directory: app
         run: pnpm install
 
       - name: Build Tauri app
@@ -111,6 +112,7 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
+          projectPath: app
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }}
 

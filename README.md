@@ -12,7 +12,7 @@
 
 | 상태 바 팝업 | 세부 대시보드 |
 |---|---|
-| ![Floating](docs/screenshots/floating.png) | ![Detail](docs/screenshots/detail.png) |
+| ![Floating](app/docs/screenshots/floating.png) | ![Detail](app/docs/screenshots/detail.png) |
 
 ---
 
@@ -34,7 +34,7 @@
 - 저렴한 2.8인치 터치스크린 디스플레이 보드(**ESP32 CYD**)를 책상 위에 거치하여 실시간 대시보드로 활용할 수 있습니다.
 - **Wi-Fi (LAN) & Bluetooth LE (BLE) 듀얼 모드**: 환경에 따라 로컬 네트워크 또는 블루투스 무선 연결을 선택하여 사용 가능
 - **종단간 암호화(E2EE)**: X25519 및 ChaCha20-Poly1305 기반의 안전한 6자리 코드 페어링 및 암호화 스트리밍 지원
-- [**👉 ESP32 CYD 설치 & 연결 가이드 보기**](docs/CYD_SETUP_GUIDE.md)
+- [**👉 ESP32 CYD 설치 & 연결 가이드 보기**](firmware/docs/CYD_SETUP_GUIDE.md)
 
 ---
 
@@ -98,7 +98,7 @@ graph TD
         CX[("~/.codex/sessions/**/rollout JSONL<br/>구버전: state_5.sqlite 인덱스")]
     end
     subgraph Proc["Tauri 2 프로세스"]
-        subgraph BE["Rust 백엔드 (src-tauri/src)"]
+        subgraph BE["Rust 백엔드 (app/src-tauri/src)"]
             Watch["수집<br/>watchers/claude.rs · codex.rs<br/>quota_proxy.rs (:4319)"]
             Agg["집계 aggregator/<br/>ring(10s EMA) + rotating(60×5분=5h)"]
             Emit["emitter.rs<br/>EmitGate (500ms · 해시 변경시만)"]
@@ -186,7 +186,7 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
-릴리즈 배포·코드 서명 상세: [docs/RELEASE.md](docs/RELEASE.md)
+릴리즈 배포·코드 서명 상세: [app/docs/RELEASE.md](app/docs/RELEASE.md)
 
 ---
 
@@ -201,6 +201,6 @@ pnpm tauri build
 
 ### Codex SQLite 스키마
 
-`CodexWatcher`는 최신 Codex에서는 날짜별 rollout 디렉터리를 직접 탐색하고, `threads` 테이블이 존재하는 구버전에서만 `state_5.sqlite`를 읽는다. 두 형식과 호환성 메모는 [`docs/codex-schema.md`](docs/codex-schema.md)에 기록한다.
+`CodexWatcher`는 최신 Codex에서는 날짜별 rollout 디렉터리를 직접 탐색하고, `threads` 테이블이 존재하는 구버전에서만 `state_5.sqlite`를 읽는다. 두 형식과 호환성 메모는 [`app/docs/codex-schema.md`](app/docs/codex-schema.md)에 기록한다.
 
-현재 아키텍처, 전송 경로와 보안 경계는 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/SECURITY.md`](docs/SECURITY.md)를 참고하세요. CYD 설치는 [`docs/CYD_SETUP_GUIDE.md`](docs/CYD_SETUP_GUIDE.md)에 정리되어 있습니다.
+현재 아키텍처, 전송 경로와 보안 경계는 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/SECURITY.md`](docs/SECURITY.md)를 참고하세요. CYD 설치는 [`firmware/docs/CYD_SETUP_GUIDE.md`](firmware/docs/CYD_SETUP_GUIDE.md)에 정리되어 있습니다.

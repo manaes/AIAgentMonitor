@@ -19,9 +19,9 @@ agentdb.rvf.lock
 
 # JSONL 로그/데이터 파일
 *.jsonl
-/dist
-/.svelte-kit
-/package
+/app/dist
+/app/.svelte-kit
+/app/package
 .env
 .env.*
 !.env.example
