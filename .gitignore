@@ -15,6 +15,7 @@ agentdb.rvf.lock
 **/.claude-flow/
 .superpowers/
 .claude/
+.unlazy/
 
 # JSONL 로그/데이터 파일
 *.jsonl
