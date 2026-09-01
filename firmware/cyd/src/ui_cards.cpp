@@ -326,6 +326,22 @@ void uiCardsUpdate(const Transport &transport) {
     }
 }
 
+void uiCardsUpdateRates(const Transport &transport) {
+    if (!transport.hasSnapshot()) {
+        return;
+    }
+    const Snapshot &snap = transport.latestSnapshot();
+    for (size_t i = 0; i < SNAPSHOT_MAX_AGENTS && i < snap.agentCount; i++) {
+        AgentCardWidgets &cw = g_cards[i];
+        if (lv_obj_has_flag(cw.card, LV_OBJ_FLAG_HIDDEN)) {
+            continue;
+        }
+        char rateBuf[32];
+        formatTokensPerSec(snap.agents[i].rateTokPerSec, rateBuf, sizeof(rateBuf));
+        lv_label_set_text(cw.rateLabel, rateBuf);
+    }
+}
+
 void uiCardsSetVisible(bool visible) {
     if (g_cardsRoot != nullptr) {
         if (visible) {

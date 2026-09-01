@@ -119,6 +119,30 @@ class BleClientCallbacks : public NimBLEClientCallbacks {
 static BleAdvertisedDeviceCallbacks g_scanCallbacks;
 static BleClientCallbacks g_clientCallbacks;
 
+// NimBLEClientCallbacks::onDisconnect() 에는 reason 코드가 없고, connect() 실패도
+// 타임아웃/즉시실패 구분 없이 bool 로만 반환된다. 진짜 원인(RF 문제 vs 앱단 거절 등)을
+// 보려면 raw GAP 이벤트를 직접 봐야 해서 커스텀 핸들러를 추가로 건다(기존 처리에는
+// 관여하지 않는 add-on 리스너라 안전하다).
+static int onRawGapEvent(ble_gap_event *event, void *arg) {
+    switch (event->type) {
+        case BLE_GAP_EVENT_DISCONNECT:
+            Serial.printf("BLE: GAP 끊김 reason=%d (%s)\n",
+                          event->disconnect.reason,
+                          NimBLEUtils::returnCodeToString(event->disconnect.reason));
+            break;
+        case BLE_GAP_EVENT_CONNECT:
+            if (event->connect.status != 0) {
+                Serial.printf("BLE: GAP 연결시도 실패 status=%d (%s)\n",
+                              event->connect.status,
+                              NimBLEUtils::returnCodeToString(event->connect.status));
+            }
+            break;
+        default:
+            break;
+    }
+    return 0;
+}
+
 static void onScanComplete(NimBLEScanResults results) {
     if (g_activeBleInstance != nullptr) {
         g_activeBleInstance->onScanEnded();
@@ -149,6 +173,7 @@ void TransportBle::begin(Config &config) {
         NimBLEDevice::init("CYD-Monitor");
         NimBLEDevice::setPower(ESP_PWR_LVL_P9);
         NimBLEDevice::setMTU(517);
+        NimBLEDevice::setCustomGapHandler(onRawGapEvent);
         s_bleInit = true;
     }
 
@@ -285,7 +310,14 @@ void TransportBle::loop() {
         if (client_ == nullptr) {
             client_ = NimBLEDevice::createClient();
             client_->setClientCallbacks(&g_clientCallbacks, false);
-            client_->setConnectionParams(12, 12, 0, 400); // 빠른 통신 파라미터
+            // 감독 타임아웃 400(4초) 은 화면 리드로우가 SPI 플러시로 loop() 를
+            // 100ms대 후반까지 막는 순간과 가끔 겹쳐 reason=520(Connection
+            // Timeout)으로 끊기는 원인 중 하나였다(2026-09-01 캡처로 확인).
+            // interval/latency 는 그대로 두고 타임아웃만 스펙 최댓값 3200(32초)
+            // 으로 늘려, 그 정도 순간 지연은 흡수하게 한다. 대가: 보드가 범위
+            // 밖으로 나가거나 Mac 이 완전히 꺼지는 등 "진짜" 연결 유실일 때도
+            // 최대 32초까지는 재연결 시도 없이 기다린다.
+            client_->setConnectionParams(12, 12, 0, 3200);
         }
 
         Serial.printf("BLE: %s 에 연결 시도 중...\n", targetDevice_->getAddress().toString().c_str());

@@ -18,5 +18,10 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent);
 /// 위젯을 재생성하지 않고 텍스트/바 값/색상만 변경하여 깜빡임을 방지한다.
 void uiCardsUpdate(const Transport &transport);
 
+/// tok/s 속도 라벨만 갱신한다(이름/쿼터%/바/리셋시간은 건드리지 않음).
+/// 라벨 3개(폭 좁고 텍스트만)만 dirty 해지므로 uiCardsUpdate() 보다 훨씬
+/// 가볍다 — 매 loop() 마다 스로틀 없이 불러도 안전하다.
+void uiCardsUpdateRates(const Transport &transport);
+
 /// 카드 화면의 표시 여부를 설정한다.
 void uiCardsSetVisible(bool visible);

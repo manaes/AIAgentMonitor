@@ -64,7 +64,18 @@ int g_modeShownCache = -1;        // -1=미적용, 0=WiFi, 1=Ble.
 /// (Failed) 경우다. SendAuth2/SendProof2(기존 토큰으로 조용히 재연결
 /// 중)와 Subscribed(인가됨)는 사람이 할 일이 없으므로 이 화면이 아니라
 /// `g_otherLabel` 이 대신 그린다.
-bool isPairingRelevant(AuthStep step, bool isConnected) {
+bool isPairingRelevant(AuthStep step, TransportMode mode, bool isConnected) {
+    // NeedsPairing + WiFi 는 예외다. `Transport::loop()`(transport.cpp:230
+    // 근처)는 사람이 코드를 입력하기(`pendingCode_`) 전에는 맥의 제한된
+    // 연결 슬롯을 아끼려고 소켓 자체를 안 연다 — 그런데 이 화면이
+    // `isConnected()` 를 요구하면 코드를 입력할 방법이 아예 없어 영영
+    // "Connecting via Wi-Fi..." 에 멈춘다(실기 재현 확인, 2026-09-01). BLE
+    // 는 코드 유무와 상관없이 항상 먼저 스캔·연결을 시도하는 별도 경로라
+    // 이 예외가 필요 없고, 오히려 부팅 직후(아직 미연결) 키패드를 조기
+    // 노출하면 안 되므로 그대로 isConnected() 를 요구한다.
+    if (step == AuthStep::NeedsPairing && mode == TransportMode::WiFi) {
+        return true;
+    }
     if (!isConnected) {
         return false; // Mac에 연결되기 전에는 Connecting... 화면을 유지한다.
     }
@@ -309,7 +320,7 @@ void uiPairingUpdate(Transport &transport) {
         g_codeWindowStartedAtMs = millis();
     }
 
-    const bool showPairing = !g_manualModeSelection && isPairingRelevant(step, transport.isConnected());
+    const bool showPairing = !g_manualModeSelection && isPairingRelevant(step, mode, transport.isConnected());
     if (!showPairing) {
         lv_obj_add_flag(g_root, LV_OBJ_FLAG_HIDDEN);
         if (!g_manualModeSelection && step == AuthStep::Subscribed && transport.isConnected()) {
