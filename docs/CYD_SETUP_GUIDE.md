@@ -14,6 +14,27 @@ AI Agent Monitor는 책상 위에 두고 Claude Code, OpenAI Codex, Antigravity�
 
 ## 2. STEP 1: 펌웨어 빌드 및 보드 업로드 (플래싱)
 
+### 0) PlatformIO CLI 설치 (VS Code 없이 터미널만 쓰는 경우)
+
+VS Code + PlatformIO IDE 확장 프로그램을 쓰지 않고 `pio` 명령만으로도 빌드/업로드/모니터링이 모두 가능합니다.
+
+* **macOS (Homebrew, 권장)**:
+  ```bash
+  brew install platformio
+  pio --version   # PlatformIO Core, version 6.x.x
+  ```
+* **macOS/Linux (pipx)**:
+  ```bash
+  pipx install platformio
+  ```
+* **Windows/Linux (공식 설치 스크립트)**:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/platformio/platformio-core-installer/master/get-platformio.py | python3
+  ```
+  설치 후 `~/.platformio/penv/bin`을 PATH에 추가해야 `pio` 명령을 바로 쓸 수 있습니다.
+
+> VS Code를 쓰지 않더라도 `firmware/cyd` 안에서 `pio run -e cyd`(빌드), `pio run -e cyd -t upload`(업로드), `pio device monitor`(로그)까지 전부 CLI만으로 처리됩니다. 이 문서의 나머지 명령어도 모두 순수 `pio`/`esptool` CLI 기준입니다.
+
 ### 1) 프로젝트 열기 및 포트 확인
 1. VS Code에서 본 프로젝트 루트(`AIAgentMonitor`)를 엽니다.
 2. CYD 보드를 USB 케이블로 Mac/PC에 연결합니다.
@@ -32,6 +53,48 @@ pio run -e cyd -t upload
 > `platformio.ini`의 커밋된 포트 이름은 개발 장비의 USB 허브 위치에 종속됩니다. 그대로 믿지 말고 `pio device list`로 현재 포트를 확인한 뒤 `pio run -e cyd -t upload --upload-port /dev/cu.usbserial-XXXX`처럼 명령행에서 지정하세요. 포트가 여러 개면 쓰기 전에 `esptool ... chip_id`로 실제 ESP32인지 확인합니다.
 
 > 다른 CYD 리비전은 디스플레이 컨트롤러와 터치 핀 배치가 다를 수 있습니다. 화면이 보인다는 이유만으로 `Rv3` 보드 정의가 완전히 호환된다고 가정하지 마세요.
+
+### 3) 연결 상태 체크
+
+보드가 USB로 인식되는지, ESP32 칩이 실제로 응답하는지는 아래 두 단계로 확인합니다.
+
+1. **포트가 잡히는지 확인** (macOS는 CH340 계열 칩이면 `1A86:7523`으로 보입니다):
+   ```bash
+   pio device list
+   ```
+   ```text
+   /dev/cu.usbserial-1120
+   ----------------------
+   Hardware ID: USB VID:PID=1A86:7523 LOCATION=1-1.2
+   Description: USB Serial
+   ```
+   포트 자체가 안 뜨면 케이블(데이터 지원 여부), USB 허브, macOS 권한(개인정보 보호 및 보안 → 액세서리) 순서로 의심합니다.
+
+2. **칩이 실제로 응답하는지 확인** (포트는 보여도 보드가 멈춰 있을 수 있습니다):
+   ```bash
+   cd firmware/cyd
+   pio pkg exec -- esptool.py --port /dev/cu.usbserial-1120 chip_id
+   ```
+   `Chip is ESP32-D0WD-V3 ...`, `MAC: xx:xx:xx:xx:xx:xx`가 출력되면 MCU는 정상입니다. 여기서 응답이 없거나 타임아웃되면 보드 전원/부트 모드 문제이고, 응답은 되는데 화면만 까맣다면 아래 "로그 보기"로 넘어가서 실제로 어떤 펌웨어가 올라가 있는지 확인하세요.
+
+### 4) 로그(시리얼 모니터) 보기
+
+앱 펌웨어는 부팅 로그, BLE/WiFi 연결 상태, 터치 이벤트, 주기적 `alive` 하트비트를 115200 baud로 시리얼에 출력합니다.
+
+```bash
+cd firmware/cyd
+pio device monitor -p /dev/cu.usbserial-1120 -b 115200
+```
+
+* 종료는 `Ctrl+C`.
+* 정상 동작 중이면 아래처럼 몇 초 간격으로 하트비트가 찍힙니다:
+  ```text
+  alive  heap=97616 mode=BLE isConn=yes authStep=4 auth=yes snap=yes lvglMaxUs=134173
+  ```
+* 화면이 검은데 로그에 `test/test_authfsm/...:PASS`, `N Tests 0 Failures`만 찍힌다면 **앱 펌웨어가 아니라 유닛테스트 바이너리가 올라가 있는 상태**입니다. `pio test`를 실행했던 흔적이니 `pio run -e cyd -t upload`로 앱 펌웨어를 다시 올리면 해결됩니다.
+* 터치가 안 먹으면 화면을 눌렀을 때 `touch: x=... y=...` 로그가 찍히는지부터 확인합니다(§6 "버튼은 보이는데 아무것도 눌리지 않습니다" 참고).
+
+> `pio device monitor` 대신 `screen /dev/cu.usbserial-1120 115200` 같은 일반 터미널 시리얼 도구를 써도 되지만, `pio device monitor`는 재연결·필터 옵션이 내장되어 있어 더 편합니다.
 
 ---
 
