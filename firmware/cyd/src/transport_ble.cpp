@@ -174,6 +174,11 @@ void TransportBle::resetAuth() {
     const bool hasCode = (pendingCode_.length() == 6);
     authStep_ = authInitialStep(hasStoredToken, hasCode);
     hasSnapshot_ = false;
+    lastSnapshotAtMs_ = millis();
+    authReassemblyBuf_.clear();
+    authReassemblyAborted_ = false;
+    authExpectedChunkIdx_ = 0;
+    authTotalChunks_ = 0;
 }
 
 void TransportBle::startScan() {
@@ -293,7 +298,60 @@ void TransportBle::loop() {
         return;
     }
 
-    // 메인 루프에서 Notify 처리 (NVS/Flash 충돌 방지)
+    // 메인 루프에서 Auth Notify 처리. 콜백 쪽과는 mutex로만 바이트를 넘긴다.
+    std::vector<std::vector<uint8_t>> authNotifications;
+    {
+        std::lock_guard<std::mutex> lock(notifyMutex_);
+        authNotifications = std::move(pendingNotifyQueue_);
+        pendingNotifyQueue_.clear();
+    }
+    // Auth 요청은 직렬화돼 있으므로 한 루프에 하나씩 처리한다. 남은 패킷은 다음
+    // 루프에서 처리해 상태 전이를 건너뛰지 않는다.
+    if (!authNotifications.empty()) {
+        const auto &packet = authNotifications.front();
+        if (!packet.empty() && packet[0] == '{') {
+            // 레거시/정상 MTU: 완전한 JSON 한 장.
+            pendingNotifyText_.concat((const char *)packet.data(), packet.size());
+            pendingNotifyText_.trim();
+            hasPendingNotify_ = true;
+        } else if (packet.size() >= 3 && packet[0] == 0xFF) {
+            const uint8_t idx = packet[1];
+            const uint8_t count = packet[2];
+            if (count == 0) {
+                authReassemblyAborted_ = true;
+            } else if (idx == 0) {
+                authFrameId_ = packet[0];
+                authExpectedChunkIdx_ = 0;
+                authTotalChunks_ = count;
+                authReassemblyBuf_.clear();
+                authReassemblyAborted_ = false;
+            }
+            if (!authReassemblyAborted_ && idx == authExpectedChunkIdx_ && count == authTotalChunks_) {
+                authReassemblyBuf_.insert(authReassemblyBuf_.end(), packet.begin() + 3, packet.end());
+                authExpectedChunkIdx_++;
+                if (authExpectedChunkIdx_ == authTotalChunks_) {
+                    pendingNotifyText_.concat((const char *)authReassemblyBuf_.data(), authReassemblyBuf_.size());
+                    pendingNotifyText_.trim();
+                    hasPendingNotify_ = true;
+                    authReassemblyBuf_.clear();
+                    authReassemblyAborted_ = false;
+                }
+            } else {
+                authReassemblyAborted_ = true;
+            }
+        } else {
+            Serial.println("BLE: 잘못된 Auth Notify 프레임을 버린다");
+        }
+        if (authNotifications.size() > 1) {
+            std::lock_guard<std::mutex> lock(notifyMutex_);
+            pendingNotifyQueue_.insert(
+                pendingNotifyQueue_.begin(),
+                std::make_move_iterator(authNotifications.begin() + 1),
+                std::make_move_iterator(authNotifications.end())
+            );
+        }
+    }
+
     if (hasPendingNotify_) {
         hasPendingNotify_ = false;
         String text = pendingNotifyText_;
@@ -369,7 +427,7 @@ void TransportBle::loop() {
 
     // 45초 스냅샷 타임아웃 감지
     if (authStep_ == AuthStep::Subscribed && isConnected()) {
-        if (hasSnapshot_ && (millis() - lastSnapshotAtMs_ > BLE_SNAPSHOT_TIMEOUT_MS)) {
+        if (millis() - lastSnapshotAtMs_ > BLE_SNAPSHOT_TIMEOUT_MS) {
             Serial.println("BLE: 45초 동안 스냅샷 수신 없음 -> 재연결 유도");
             hasSnapshot_ = false;
             if (client_ != nullptr) {
@@ -430,11 +488,13 @@ void TransportBle::sendVerb(const char *prefix, const uint8_t *data, size_t len)
 }
 
 void TransportBle::handleAuthNotify(const uint8_t *data, size_t length) {
-    String text;
-    text.concat((const char *)data, length);
-    text.trim();
-    pendingNotifyText_ = text;
-    hasPendingNotify_ = true;
+    std::vector<uint8_t> packet(data, data + length);
+    std::lock_guard<std::mutex> lock(notifyMutex_);
+    // 가장 큰 v2 Auth 응답도 최소 허용 MTU에서 10개 미만 청크다. 한 응답을
+    // 자르지 않으면서 큐가 무한히 늘지 않게 상한을 32개로 둔다.
+    if (pendingNotifyQueue_.size() < 32) {
+        pendingNotifyQueue_.push_back(std::move(packet));
+    }
 }
 
 void TransportBle::sendCode2(const ReplyView &reply) {
@@ -572,6 +632,8 @@ void TransportBle::finishHandshake(const ReplyView &reply) {
     }
 
     authStep_ = AuthStep::Subscribed;
+    hasSnapshot_ = false;
+    lastSnapshotAtMs_ = millis();
     Serial.println("BLE: E2EE 인가 완료! (Subscribed)");
 }
 

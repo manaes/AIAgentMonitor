@@ -105,14 +105,22 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use axum::body::Body;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto::Builder as HyperBuilder;
+use hyper_util::service::TowerToHyperService;
+use hyper::body::Incoming;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio::sync::watch;
+use tower::Service;
+use tower::util::ServiceExt;
 
 /// quota 프록시(4319) 바로 옆.
 pub const PORT: u16 = 4320;
@@ -206,6 +214,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// 줄이고 싶어지면 `CODE_TTL` 을 먼저 보라 — 둘의 관계는
 /// `the_auth_deadline_outlives_the_code_a_human_is_typing` 이 못박아 둔다.
 const AUTH_DEADLINE: Duration = Duration::from_secs(150);
+/// HTTP 헤더를 끝내지 않는 TCP peer가 FD를 오래 붙잡지 못하게 하는 상한.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 하트비트와 인증 시한의 타이밍. 상수를 그대로 쓰지 않고 값으로 들고 다니는
 /// 이유는 90초·150초를 실제로 기다리지 않고도 "조용해진 피어를 정말 놓는가",
@@ -599,9 +609,38 @@ async fn run(
         }
     });
 
-    let _ = axum::serve(listener, app)
-        .with_graceful_shutdown(wait_shutdown(shutdown))
-        .await;
+    // `axum::serve`는 HTTP 요청이 완성된 뒤에만 Router/upgrade에 제어를 넘긴다.
+    // 그래서 raw TCP Slowloris에는 slot과 AUTH_DEADLINE이 닿지 않는다. 여기서
+    // accept부터 permit을 보유하고 Hyper의 header timeout을 설정한다.
+    let pre_http_slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let mut make_service = app.into_make_service();
+    loop {
+        tokio::select! {
+            _ = wait_shutdown(shutdown.clone()) => break,
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { continue; };
+                let Ok(permit) = pre_http_slots.clone().try_acquire_owned() else {
+                    tracing::warn!(max = MAX_CONNECTIONS, "LAN pre-HTTP 연결 상한 — TCP 연결 거절");
+                    continue;
+                };
+                let service = match make_service.call(()).await {
+                    Ok(service) => service.map_request(|request: axum::http::Request<Incoming>| request.map(Body::new)),
+                    Err(never) => match never {},
+                };
+                tokio::spawn(async move {
+                    let mut builder = HyperBuilder::new(TokioExecutor::new());
+                    builder
+                        .http1()
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(Some(HEADER_READ_TIMEOUT));
+                    let _ = builder
+                        .serve_connection_with_upgrades(TokioIo::new(stream), TowerToHyperService::new(service))
+                        .await;
+                    drop(permit);
+                });
+            }
+        }
+    }
     pump.abort();
     tracing::info!(port, "LAN 미러 서버 종료");
 }

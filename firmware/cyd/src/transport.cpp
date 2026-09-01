@@ -156,6 +156,13 @@ void Transport::setMode(TransportMode mode) {
         if (mode_ == TransportMode::Ble) {
             ble_.begin(*config_);
         } else {
+            // BLE 모드로 부팅하면 setup()에서 Wi-Fi를 의도적으로 건너뛴다. 따라서
+            // 런타임 전환에서는 여기서 STA 연결/설정 포털을 직접 시작해야 한다.
+            // 이 호출 없이 WebSocket만 시작하면 연결할 네트워크 자체가 없다.
+            if (!wifiConnectOrPortal(*config_)) {
+                Serial.println("transport: Wi-Fi 전환 후 연결 실패 — 재시도/포털 대기");
+                return;
+            }
             if (!mdnsStarted_) {
                 mdnsStarted_ = MDNS.begin(MDNS_HOSTNAME);
             }
@@ -228,7 +235,7 @@ void Transport::loop() {
     if (webSocket_.isConnected()) {
         webSocket_.loop();
         // 스냅샷 수신 타임아웃 검사: 인가 완료 후 45초 동안 스냅샷이 오지 않으면 재연결 유도
-        if (authStep_ == AuthStep::Subscribed && hasSnapshot_ && (millis() - lastSnapshotAtMs_ > SNAPSHOT_TIMEOUT_MS)) {
+        if (authStep_ == AuthStep::Subscribed && (millis() - lastSnapshotAtMs_ > SNAPSHOT_TIMEOUT_MS)) {
             Serial.println("transport: 스냅샷 수신 타임아웃 (45초) — 소켓을 재연결한다");
             hasSnapshot_ = false;
             webSocket_.disconnect();
@@ -453,6 +460,10 @@ void Transport::handleReply(const String &text) {
             break;
         case AuthStep::Subscribed:
             finishHandshake(reply);
+            // 첫 스냅샷도 liveness 계약의 일부다. 수신 후에만 타이머를 시작하면
+            // broadcaster가 시작하지 못한 세션이 영구히 "Waiting for data"에 남는다.
+            hasSnapshot_ = false;
+            lastSnapshotAtMs_ = millis();
             break;
         case AuthStep::NeedsPairing:
         case AuthStep::Failed:

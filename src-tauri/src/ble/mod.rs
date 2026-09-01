@@ -17,6 +17,10 @@ use wire::MirrorSnapshot;
 
 /// 스냅샷 송출 상한. 기존 EmitGate(500ms)보다 느슨하게 잡아 BLE 대역을 아낀다.
 const BLE_THROTTLE: Duration = Duration::from_millis(1000);
+/// Auth 응답 청크의 식별자. JSON은 `{`로 시작하므로 0xFF 프레임은 레거시 한-패킷
+/// 응답과 충돌하지 않는다. Snapshot과 재조립 규칙은 같되, 채널은 분리한다.
+const AUTH_FRAME_ID: u8 = 0xFF;
+const DEFAULT_AUTH_NOTIFY_LEN: usize = 185;
 
 pub struct BleBridge {
     peripheral: Arc<dyn BlePeripheral>,
@@ -188,7 +192,31 @@ impl BleBridge {
         // 기기의 토큰이 디스크에 남지 않아 맥을 껐다 켜는 순간 사라진다.
         // 그 판정은 이제 `AuthReply` 옆에 한 벌만 있다(`ReplySignals` 의 doc).
         let granted = reply.signals().granted;
-        self.peripheral.notify_auth(central, reply.to_json_bytes());
+        let payload = reply.to_json_bytes();
+        // Auth 특성도 MTU보다 긴 notify 하나에 담을 수 없다. 기존 클라이언트와의
+        // 호환을 위해 한 패킷에 들어갈 때는 JSON을 그대로 보내고, 초과할 때만
+        // 명시적 프레임으로 쪼갠다.
+        let max_notify_len = self
+            .peripheral
+            .subscribers()
+            .into_iter()
+            .find(|sub| sub.id == *central)
+            .map(|sub| usize::min(sub.max_notify_len, 240))
+            .unwrap_or(DEFAULT_AUTH_NOTIFY_LEN);
+        let packets = if payload.len() <= max_notify_len {
+            vec![payload]
+        } else {
+            match framing::chunk(AUTH_FRAME_ID, &payload, max_notify_len) {
+                Ok(packets) => packets,
+                Err(error) => {
+                    tracing::error!(central = %central.0, ?error, "Auth 응답 청킹 실패");
+                    return granted;
+                }
+            }
+        };
+        for packet in packets {
+            self.peripheral.notify_auth(central, packet);
+        }
         granted
     }
 
@@ -281,12 +309,25 @@ mod tests {
     /// 내놓기 때문이고, 그게 실기기에서 클라이언트가 보는 것과 같다.
     fn last_auth_reply(fake: &FakePeripheral, central: &str) -> serde_json::Value {
         let replies = fake.taken_auth_replies();
-        let (_, bytes) = replies
+        let packets: Vec<&Vec<u8>> = replies
             .iter()
-            .rev()
-            .find(|(id, _)| id.0 == central)
-            .expect("그 central 에게 간 Auth 응답이 있어야 한다");
-        serde_json::from_slice(bytes).expect("응답은 JSON 이다")
+            .filter(|(id, _)| id.0 == central)
+            .map(|(_, bytes)| bytes)
+            .collect();
+        let first_chunk = packets
+            .iter()
+            .rposition(|packet| packet.first() == Some(&AUTH_FRAME_ID) && packet.get(1) == Some(&0))
+            .unwrap_or(packets.len());
+        let bytes = if first_chunk < packets.len() {
+            let mut reassembler = framing::Reassembler::new();
+            packets[first_chunk..]
+                .iter()
+                .find_map(|packet| reassembler.push(packet))
+                .expect("Auth 청크는 완성돼야 한다")
+        } else {
+            (*packets.last().expect("그 central 에게 간 Auth 응답이 있어야 한다")).clone()
+        };
+        serde_json::from_slice(&bytes).expect("응답은 JSON 이다")
     }
 
     fn field(v: &serde_json::Value, key: &str) -> String {
@@ -451,6 +492,40 @@ mod tests {
         b.set_enabled(true).unwrap();
         b.on_snapshot(&snap(1.0, 1000), UNIX_EPOCH + Duration::from_secs(1000), &mut p);
         assert!(fake.taken_frames().is_empty(), "구독자가 없으면 직렬화도 하지 않는다");
+    }
+
+    #[test]
+    fn chunks_oversized_auth_reply_for_a_small_mtu() {
+        let (mut b, fake, mut p) = bridge();
+        b.set_enabled(true).unwrap();
+        fake.set_subscribers(vec![Subscriber {
+            id: CentralId("tiny".into()),
+            max_notify_len: 20,
+        }]);
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        p.begin_pairing(now);
+        let client = V2Client::new();
+        b.handle_auth(
+            &CentralId("tiny".into()),
+            format!("HELLO2:{}", hex_encode(&client.public)).as_bytes(),
+            now,
+            &mut p,
+        );
+
+        let replies = fake.taken_auth_replies();
+        let packets: Vec<_> = replies
+            .iter()
+            .filter(|(id, _)| id.0 == "tiny")
+            .map(|(_, packet)| packet)
+            .collect();
+        assert!(packets.len() > 1, "작은 MTU에서는 Auth 응답을 청킹해야 한다");
+        assert!(packets.iter().all(|packet| packet.first() == Some(&AUTH_FRAME_ID)));
+        let mut reassembler = framing::Reassembler::new();
+        let reply = packets
+            .iter()
+            .find_map(|packet| reassembler.push(packet))
+            .expect("Auth 청크를 재조립할 수 있어야 한다");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&reply).unwrap()["v"], 2);
     }
 
     #[test]

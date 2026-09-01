@@ -1085,6 +1085,14 @@ pub fn run() {
                                         Ok(s) => s,
                                         Err(_) => break,
                                     };
+                                    // accept 시점의 검사만으로는 충분하지 않다. 공유를
+                                    // 끈 뒤에도 이미 열린 QUIC 연결은 control stream을
+                                    // 새로 열 수 있으므로, 인증을 처리하기 직전에 다시
+                                    // 확인하고 연결 자체를 폐기한다.
+                                    if !h.bridge.lock().await.is_enabled() {
+                                        conn.close(0u32.into(), b"sharing disabled");
+                                        break;
+                                    }
                                     let req = match recv.read_to_end(4096).await {
                                         Ok(r) => r,
                                         Err(_) => break,
@@ -1104,6 +1112,7 @@ pub fn run() {
                                         }
                                     }
                                     if outcome.now_authorized
+                                        && h.bridge.lock().await.is_enabled()
                                         && !h.bridge.lock().await.has_snapshot_sender(&central)
                                     {
                                         if let Ok(snap_send) = conn.open_uni().await {

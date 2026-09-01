@@ -85,11 +85,22 @@ class TransportBle {
     String pendingCode_;
     SealedChannel *channel_ = nullptr;
 
-    // BLE 이벤트 안전 큐 (메인 루프에서 처리하기 위함)
+    // NimBLE Notify 콜백은 별도 호스트 태스크에서 올 수 있다. Arduino String을
+    // 콜백과 loop()가 동시에 만지면 힙이 손상될 수 있으므로 바이트 큐로 넘긴다.
+    std::vector<std::vector<uint8_t>> pendingNotifyQueue_;
+    // 아래 두 값은 loop()만 접근한다. Notify 콜백은 pendingNotifyQueue_에만 쓴다.
     String pendingNotifyText_;
     bool hasPendingNotify_ = false;
     std::vector<std::vector<uint8_t>> pendingChunkQueue_;
+    std::mutex notifyMutex_;
     std::mutex chunkMutex_;
+
+    // Auth notify는 기존 한 패킷 JSON 또는 [0xFF, idx, count, payload…] 청크다.
+    uint8_t authFrameId_ = 0;
+    uint8_t authExpectedChunkIdx_ = 0;
+    uint8_t authTotalChunks_ = 0;
+    std::vector<uint8_t> authReassemblyBuf_;
+    bool authReassemblyAborted_ = false;
 
     Snapshot latestSnapshot_;
     bool hasSnapshot_ = false;

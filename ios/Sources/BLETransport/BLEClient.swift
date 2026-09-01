@@ -12,6 +12,10 @@ public final class BLEClient: NSObject {
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
     private var reassembler = FrameReassembler()
+    /// Auth 응답은 정상 MTU에서는 레거시 JSON 한 장이고, 작은 MTU에서는
+    /// [0xFF, idx, count, payload…]로 청킹된다. Snapshot 재조립기와 분리해
+    /// 두 특성의 패킷이 서로 상태를 오염시키지 않게 한다.
+    private var authReassembler = FrameReassembler()
     /// 인가 후에야 구독한다 — 그 전에 구독하면 미인가 상태에서도 데이터가 요청되는
     /// 모양이 되어 스펙 5.1 의 "인가된 central 에만 notify" 전제와 어긋난다.
     private var snapshotCharacteristic: CBCharacteristic?
@@ -127,6 +131,7 @@ public final class BLEClient: NSObject {
         // 임시 키도 세션 카운터도 연결 하나에 매인 값이다. 다음 연결로 넘기면
         // 봉인 채널의 카운터가 맥과 어긋나 스냅샷이 한 장도 안 열린다.
         resetV2State()
+        authReassembler = FrameReassembler()
         stateSubject.send(.scanning)
         central.scanForPeripherals(withServices: [MirrorUUIDs.service])
     }
@@ -343,7 +348,14 @@ extension BLEClient: @preconcurrency CBPeripheralDelegate {
         // 뒤늦게 도착해도 재조립/디코딩을 다시 돌리지 않는다.
         guard stateSubject.value != .versionMismatch else { return }
         if characteristic.uuid == MirrorUUIDs.auth {
-            handleAuthReply(characteristic.value ?? Data())
+            let data = characteristic.value ?? Data()
+            // 기존 Mac은 완전한 JSON을 한 notify로 보낸다. 새 Mac은 MTU보다 큰
+            // 응답만 0xFF 프레임으로 청킹하므로 두 형식을 모두 안전하게 받는다.
+            if data.first == UInt8(ascii: "{") {
+                handleAuthReply(data)
+            } else if let complete = authReassembler.push(data) {
+                handleAuthReply(complete)
+            }
             return
         }
         guard characteristic.uuid == MirrorUUIDs.snapshot, let data = characteristic.value else { return }
