@@ -2444,7 +2444,7 @@ mod tests {
         let proof = compute_proof(token, nonce);
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../docs/ble-protocol/golden/hmac-sample.json");
+            .join("../../docs/ble-protocol/golden/hmac-sample.json");
         let actual = serde_json::json!({
             "token": token,
             "nonce": nonce,

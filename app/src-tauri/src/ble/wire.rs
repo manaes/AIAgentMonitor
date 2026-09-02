@@ -140,6 +140,8 @@ mod tests {
                     rate_tok_per_sec: 98.25,
                     last_event_at: UNIX_EPOCH + Duration::from_secs(1_755_499_987),
                     status: ActivityStatus::Active,
+                    session_id: "test-session".to_string(),
+                    prompt_preview: String::new(),
                 }],
             }],
         }
@@ -218,7 +220,7 @@ mod tests {
     fn golden_snapshot_matches() {
         use std::path::PathBuf;
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../docs/ble-protocol/golden/snapshot-sample.json");
+            .join("../../docs/ble-protocol/golden/snapshot-sample.json");
         let actual = serde_json::to_value(MirrorSnapshot::from(&sample_snapshot())).unwrap();
 
         if std::env::var("UPDATE_GOLDEN").is_ok() {
@@ -241,7 +243,7 @@ mod tests {
     fn golden_snapshot_with_weekly_matches() {
         use std::path::PathBuf;
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../docs/ble-protocol/golden/snapshot-weekly-sample.json");
+            .join("../../docs/ble-protocol/golden/snapshot-weekly-sample.json");
         let dto = MirrorSnapshot::from(&sample_snapshot_with_weekly());
         assert_eq!(dto.a[0].pw, Some(41.5));
         assert_eq!(dto.a[0].rw, Some(1_755_900_000));

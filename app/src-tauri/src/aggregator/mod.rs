@@ -24,15 +24,22 @@ pub struct Aggregator {
 struct AgentBucket {
     ring: EventRing,
     rotating: RotatingBucket,
-    projects: HashMap<PathBuf, ProjectState>,
+    // 2026-09-02: 프로젝트 경로가 아니라 session_id 로 키를 바꿨다. 같은
+    // 폴더에서 세션 두 개가 동시에 돌면(예: 같은 리포에서 Claude Code 두
+    // 창) 예전엔 경로 하나로 묶여 나중 이벤트가 이전 세션을 덮어썼다 —
+    // 실기로 재현 확인(2개 작업 중인데 1개만 보임). 세션 단위로 바꾸면
+    // 같은 폴더라도 각자 따로 잡힌다.
+    projects: HashMap<String, ProjectState>,
     /// 윈도우 anchor 계산용 이벤트 타임스탬프 (정렬+갭세그먼트로 현재 5h 윈도우 시작점 산출)
     event_times: Vec<SystemTime>,
 }
 
 struct ProjectState {
+    project_path: PathBuf,
     model: String,
     last_event_at: SystemTime,
     rate_ring: EventRing,
+    last_prompt_preview: String,
 }
 
 impl Default for AgentBucket {
@@ -54,13 +61,31 @@ impl Aggregator {
 
     pub fn push(&mut self, ev: TokenEvent) {
         let bucket = self.by_agent.entry(ev.agent).or_default();
+
+        // 프롬프트 미리보기 전용 이벤트(types.rs 문서 참고) — 실제 사용량이
+        // 아니므로(counts 는 항상 0) 5h/주간 합계·anchor(event_times)·rate
+        // 계산에 절대 관여시키지 않는다. 순수 메타데이터 갱신으로 끝낸다.
+        if let Some(preview) = ev.prompt_preview.clone() {
+            let proj = bucket.projects.entry(ev.session_id.clone()).or_insert_with(|| ProjectState {
+                project_path: ev.project_path.clone(),
+                model: "claude-3.7-sonnet".into(),
+                last_event_at: ev.ts,
+                rate_ring: EventRing::new(),
+                last_prompt_preview: String::new(),
+            });
+            proj.last_prompt_preview = preview;
+            return;
+        }
+
         bucket.rotating.add(ev.ts, &ev.counts);
         bucket.event_times.push(ev.ts);
         let is_valid_model = !ev.model.is_empty() && !ev.model.starts_with('<');
-        let proj = bucket.projects.entry(ev.project_path.clone()).or_insert_with(|| ProjectState {
+        let proj = bucket.projects.entry(ev.session_id.clone()).or_insert_with(|| ProjectState {
+            project_path: ev.project_path.clone(),
             model: if is_valid_model { ev.model.clone() } else { "claude-3.7-sonnet".into() },
             last_event_at: ev.ts,
             rate_ring: EventRing::new(),
+            last_prompt_preview: String::new(),
         });
         if is_valid_model {
             proj.model = ev.model.clone();
@@ -88,19 +113,21 @@ impl Aggregator {
                 None
             };
 
-            let mut projects: Vec<ProjectActivity> = bucket.projects.iter_mut().map(|(path, ps)| {
+            let mut projects: Vec<ProjectActivity> = bucket.projects.iter_mut().map(|(session_id, ps)| {
                 let elapsed = now.duration_since(ps.last_event_at).unwrap_or_default();
                 let status = if elapsed <= Duration::from_secs(60) { ActivityStatus::Active }
                     else if elapsed <= Duration::from_secs(300) { ActivityStatus::Idle }
                     else { ActivityStatus::Dormant };
-                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+                let name = ps.project_path.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string();
                 ProjectActivity {
-                    path: path.clone(),
+                    path: ps.project_path.clone(),
                     name,
                     model: ps.model.clone(),
                     rate_tok_per_sec: ps.rate_ring.rate_tok_per_sec(clock),
                     last_event_at: ps.last_event_at,
                     status,
+                    session_id: session_id.clone(),
+                    prompt_preview: ps.last_prompt_preview.clone(),
                 }
             }).collect();
             projects.sort_by_key(|p| std::cmp::Reverse(p.last_event_at));
@@ -149,13 +176,36 @@ mod tests {
     use std::time::Duration;
 
     fn ev(agent: AgentKind, ts: std::time::SystemTime, proj: &str, model: &str, total_in: u32) -> TokenEvent {
+        ev_with_session(agent, ts, proj, "s1", model, total_in)
+    }
+
+    fn ev_with_session(
+        agent: AgentKind, ts: std::time::SystemTime, proj: &str, session_id: &str, model: &str, total_in: u32,
+    ) -> TokenEvent {
         TokenEvent {
             agent, ts,
             project_path: PathBuf::from(proj),
-            session_id: "s1".into(),
+            session_id: session_id.into(),
             model: model.into(),
             counts: TokenCounts { tokens_in: total_in, ..Default::default() },
+            prompt_preview: None,
         }
+    }
+
+    #[test]
+    fn two_sessions_in_the_same_project_folder_both_appear() {
+        // 실기 재현(2026-09-02): 같은 폴더에서 세션 두 개가 동시에 돌 때
+        // 예전엔 project_path 로 묶여서 나중 이벤트가 이전 세션을 지웠다.
+        let clock = MockClock::new(1_000_000);
+        let mut agg = Aggregator::new();
+        agg.push(ev_with_session(AgentKind::Claude, clock.now(), "/tmp/p1", "session-a", "x", 100));
+        agg.push(ev_with_session(AgentKind::Claude, clock.now(), "/tmp/p1", "session-b", "x", 200));
+        let snap = agg.snapshot(&clock);
+        let claude = snap.agents.iter().find(|a| a.kind == AgentKind::Claude).unwrap();
+        assert_eq!(claude.projects.len(), 2, "두 세션이 각자 다른 행으로 보여야 한다");
+        let ids: Vec<&str> = claude.projects.iter().map(|p| p.session_id.as_str()).collect();
+        assert!(ids.contains(&"session-a"));
+        assert!(ids.contains(&"session-b"));
     }
 
     #[test]

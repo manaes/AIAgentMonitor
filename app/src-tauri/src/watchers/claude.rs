@@ -22,6 +22,7 @@ struct Outer<'a> {
 struct Message<'a> {
     #[serde(default)] model: Option<&'a str>,
     #[serde(default)] usage: Option<Usage>,
+    #[serde(default)] content: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -32,9 +33,51 @@ struct Usage {
     #[serde(default)] cache_read_input_tokens: u32,
 }
 
+/// 사람이 실제로 물어본 텍스트만 추린다. 단순 문자열(`content: "hi"`)과
+/// 블록 배열(`content: [{"type":"text","text":"hi"}, ...]`) 둘 다 온다 —
+/// 툴 실행 결과가 role=user 로 되돌아오는 라인(`tool_result` 블록)은 사람이
+/// 쓴 질문이 아니므로 여기서 걸러진다(text 블록이 없으면 None).
+fn extract_user_preview(content: &serde_json::Value) -> Option<String> {
+    match content {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(blocks) => blocks.iter().find_map(|b| {
+            if b.get("type").and_then(|t| t.as_str()) != Some("text") {
+                return None;
+            }
+            b.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+        }),
+        _ => None,
+    }
+}
+
+const PROMPT_PREVIEW_MAX_CHARS: usize = 60;
+
 pub fn parse_line(line: &str, project_path: &Path, fallback_session: &str) -> Result<Option<TokenEvent>> {
     if line.trim().is_empty() { return Ok(None); }
     let outer: Outer = serde_json::from_str(line).map_err(|e| anyhow!("json: {e}"))?;
+
+    if outer.kind == "user" {
+        // "무슨 작업 중인지" 탐색용 미리보기(2026-09-02). counts 는 항상 0
+        // 이고 aggregator 가 별도 분기에서 5h/주간 집계와 완전히 분리해
+        // 처리한다(aggregator/mod.rs 문서 참고) — 진짜 사용량 이벤트가 아니다.
+        let msg = outer.message.ok_or_else(|| anyhow!("no message"))?;
+        let Some(content) = msg.content else { return Ok(None) };
+        let Some(text) = extract_user_preview(&content) else { return Ok(None) };
+        let preview: String = text.chars().take(PROMPT_PREVIEW_MAX_CHARS).collect();
+        if preview.trim().is_empty() { return Ok(None); }
+        let session_id = outer.session_id.unwrap_or(fallback_session).to_string();
+        let ts = outer.timestamp.and_then(parse_iso8601).unwrap_or_else(SystemTime::now);
+        return Ok(Some(TokenEvent {
+            agent: AgentKind::Claude,
+            project_path: project_path.to_path_buf(),
+            session_id,
+            model: String::new(),
+            ts,
+            counts: TokenCounts::default(),
+            prompt_preview: Some(preview),
+        }));
+    }
+
     if outer.kind != "assistant" { return Ok(None); }
     let msg = outer.message.ok_or_else(|| anyhow!("no message"))?;
     let usage = match msg.usage { Some(u) => u, None => return Ok(None) };
@@ -58,6 +101,7 @@ pub fn parse_line(line: &str, project_path: &Path, fallback_session: &str) -> Re
             tokens_cache_read: usage.cache_read_input_tokens,
             tokens_cache_create: usage.cache_creation_input_tokens,
         },
+        prompt_preview: None,
     }))
 }
 
@@ -230,8 +274,26 @@ mod tests {
     }
 
     #[test]
-    fn user_line_returns_none() {
+    fn user_line_with_plain_string_content_yields_preview_event() {
         let line = r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-05-28T08:30:00.000Z","sessionId":"s"}"#;
+        let project = PathBuf::from("/tmp/p");
+        let ev = parse_line(line, &project, "s").expect("should parse").expect("should be Some");
+        assert_eq!(ev.prompt_preview.as_deref(), Some("hi"));
+        assert_eq!(ev.counts, TokenCounts::default());
+    }
+
+    #[test]
+    fn user_line_with_text_block_yields_preview_event() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"두 번째 질문"}]},"timestamp":"2026-05-28T08:30:00.000Z","sessionId":"s"}"#;
+        let project = PathBuf::from("/tmp/p");
+        let ev = parse_line(line, &project, "s").expect("should parse").expect("should be Some");
+        assert_eq!(ev.prompt_preview.as_deref(), Some("두 번째 질문"));
+    }
+
+    #[test]
+    fn user_line_with_only_tool_result_returns_none() {
+        // 툴 실행 결과가 role=user 로 되돌아오는 경우 — 사람이 쓴 질문이 아니다.
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]},"timestamp":"2026-05-28T08:30:00.000Z","sessionId":"s"}"#;
         let project = PathBuf::from("/tmp/p");
         let r = parse_line(line, &project, "s").unwrap();
         assert!(r.is_none());
@@ -259,14 +321,20 @@ mod tests {
     }
 
     #[test]
-    fn fixture_file_yields_two_events() {
+    fn fixture_file_yields_two_usage_events_and_two_preview_events() {
+        // 2026-09-02: user 라인도 이제 미리보기 이벤트(counts=0)를 낸다 —
+        // 픽스처엔 평문 문자열 content 를 가진 user 라인이 2개 있다("hello"/"ok").
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude/sample.jsonl");
         let lines = std::fs::read_to_string(&path).unwrap();
         let project = PathBuf::from("/tmp/p");
-        let mut count = 0;
+        let mut usage_count = 0;
+        let mut preview_count = 0;
         for line in lines.lines() {
-            if let Ok(Some(_)) = parse_line(line, &project, "abc") { count += 1; }
+            if let Ok(Some(ev)) = parse_line(line, &project, "abc") {
+                if ev.prompt_preview.is_some() { preview_count += 1; } else { usage_count += 1; }
+            }
         }
-        assert_eq!(count, 2);
+        assert_eq!(usage_count, 2);
+        assert_eq!(preview_count, 2);
     }
 }

@@ -69,6 +69,7 @@ mod tests {
             model: "claude".into(),
             ts: clock.now(),
             counts: TokenCounts { tokens_in: total, tokens_out: 0, tokens_cache_read: 0, tokens_cache_create: 0 },
+            prompt_preview: None,
         }
     }
 

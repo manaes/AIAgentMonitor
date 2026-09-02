@@ -310,14 +310,18 @@ void TransportBle::loop() {
         if (client_ == nullptr) {
             client_ = NimBLEDevice::createClient();
             client_->setClientCallbacks(&g_clientCallbacks, false);
-            // 감독 타임아웃 400(4초) 은 화면 리드로우가 SPI 플러시로 loop() 를
-            // 100ms대 후반까지 막는 순간과 가끔 겹쳐 reason=520(Connection
-            // Timeout)으로 끊기는 원인 중 하나였다(2026-09-01 캡처로 확인).
-            // interval/latency 는 그대로 두고 타임아웃만 스펙 최댓값 3200(32초)
-            // 으로 늘려, 그 정도 순간 지연은 흡수하게 한다. 대가: 보드가 범위
-            // 밖으로 나가거나 Mac 이 완전히 꺼지는 등 "진짜" 연결 유실일 때도
-            // 최대 32초까지는 재연결 시도 없이 기다린다.
-            client_->setConnectionParams(12, 12, 0, 3200);
+            // 감독 타임아웃 이력(2026-09-01~02 캡처로 확인):
+            //   400(4초)  — 화면 리드로우가 SPI 플러시로 loop() 를 100ms대
+            //               후반까지 막는 순간과 겹쳐 reason=520 으로 자주 끊김
+            //   3200(32초) — 위 문제는 흡수했지만, 진짜 연결이 죽은 순간에도
+            //               32초 동안 소프트웨어가 몰라 오래된 스냅샷(tok/s 등)을
+            //               그대로 띄우고 있는 부작용을 실기로 확인(09-02 09:15:35
+            //               마지막 스냅샷 → 09:16:07 에야 reason=520 감지).
+            // 근본 원인(카드 3개 동시 갱신 → dirty 영역 합쳐짐)을 ui_nav.cpp/
+            // ui_cards.cpp 에서 고쳐 lvglMaxUs 가 135ms대→57ms대로 내려간
+            // 뒤라, 4초보다는 넉넉하되 오래된 값 노출은 짧게 끝나는 600(6초)
+            // 로 재조정한다. interval/latency 는 그대로 유지.
+            client_->setConnectionParams(12, 12, 0, 600);
         }
 
         Serial.printf("BLE: %s 에 연결 시도 중...\n", targetDevice_->getAddress().toString().c_str());

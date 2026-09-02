@@ -1,6 +1,6 @@
 [package]
 name = "ai-agent-monitor"
-version = "1.7.2"
+version = "1.7.3"
 description = "AI Agent Monitor"
 authors = ["you"]
 edition = "2021"

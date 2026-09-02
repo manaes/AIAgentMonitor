@@ -311,7 +311,7 @@ mod tests {
         });
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../docs/ble-protocol/golden/e2ee-v2-sample.json");
+            .join("../../docs/ble-protocol/golden/e2ee-v2-sample.json");
         if std::env::var("UPDATE_GOLDEN").is_ok() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, serde_json::to_string_pretty(&actual).unwrap() + "\n").unwrap();

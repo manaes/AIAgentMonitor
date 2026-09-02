@@ -298,6 +298,7 @@ fn tail_rollout(
             model: t.model.clone(),
             ts,
             counts,
+            prompt_preview: None,
         });
     }
     new_off

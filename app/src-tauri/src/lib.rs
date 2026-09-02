@@ -232,6 +232,30 @@ fn lan_address(listening: bool, ip: Option<String>, port: u16) -> Option<String>
     Some(format!("{}:{}", ip?, port))
 }
 
+/// Claude/Codex/Antigravity 쿼터 %는 실시간 계산이 아니라 마지막으로
+/// **관측된**(프록시 헤더, rollout rate_limits, gen_metadata) 값의 캐시다 —
+/// 그 창이 리셋된 뒤에도 다음 실제 API 응답이 관측될 때까지는 옛 값이 그대로
+/// 남는다(2026-09-02, 리셋 후 한참 지나도 100%가 안 내려가는 것을 실사용으로
+/// 확인). `reset_at` 이 이미 지났으면 그건 만료된 창의 값이니 0%로 보여준다
+/// (새 창을 "이미 다 썼다"고 보여주는 것보다 "아직 안 썼다"고 보여주는 쪽이
+/// 훨씬 덜 위험하다).
+///
+/// `reset_at` 자체는 캐시가 여전히 옛 창을 가리키고 있을 수 있으므로 여기서
+/// 덮어쓰지 않는다 — 아그리게이터의 실시간 anchor 추정(`current_window_anchor`)
+/// 이 새 창을 이미 더 정확히 잡고 있어, 호출부가 `None` 을 받으면 그 추정치를
+/// 그대로 둔다.
+fn quota_pct_for_tick(
+    cached_pct: Option<f32>,
+    cached_reset_at: Option<std::time::SystemTime>,
+    now: std::time::SystemTime,
+) -> (Option<f32>, Option<std::time::SystemTime>) {
+    match cached_reset_at {
+        Some(r) if r > now => (cached_pct, Some(r)),
+        Some(_) => (Some(0.0), None),
+        None => (cached_pct, None),
+    }
+}
+
 #[tauri::command]
 async fn lan_status(state: tauri::State<'_, Arc<LanHandle>>) -> Result<LanStatus, String> {
     let bridge = state.bridge.lock().await;
@@ -1383,54 +1407,62 @@ pub fn run() {
                             let enabled = settings_for_tick.lock().await;
                             snap.agents.retain(|ag| enabled.enabled_agents.contains(&ag.kind));
                         }
-                        // 실제 quota 주입(있을 때만): Claude=프록시 헤더, Codex=rollout rate_limits, Antigravity=gen_metadata 버킷
+                        let now = std::time::SystemTime::now();
+                        // 실제 quota 주입(있을 때만): Claude=프록시 헤더, Codex=rollout rate_limits, Antigravity=gen_metadata 버킷.
+                        // 캐시된 reset_at 이 이미 지났으면 만료된 창의 %이므로 0%로 보여주고
+                        // reset_at 자체는 안 덮어쓴다(quota_pct_for_tick 문서 참고).
                         if let Some(c) =
                             snap.agents.iter_mut().find(|a| a.kind == AgentKind::Claude)
                         {
-                            if let Some(u) = *quota_for_tick.used_pct.lock().unwrap() {
-                                c.quota_used_pct = Some(u);
-                            }
-                            if let Some(r) = *quota_for_tick.reset_at.lock().unwrap() {
-                                c.quota_reset_at = Some(r);
-                            }
-                            if let Some(u) = *quota_for_tick.used_pct_weekly.lock().unwrap() {
-                                c.quota_used_pct_weekly = Some(u);
-                            }
-                            if let Some(r) = *quota_for_tick.reset_weekly.lock().unwrap() {
-                                c.quota_reset_at_weekly = Some(r);
-                            }
+                            let (pct, reset) = quota_pct_for_tick(
+                                *quota_for_tick.used_pct.lock().unwrap(),
+                                *quota_for_tick.reset_at.lock().unwrap(),
+                                now,
+                            );
+                            if let Some(p) = pct { c.quota_used_pct = Some(p); }
+                            if let Some(r) = reset { c.quota_reset_at = Some(r); }
+                            let (pct_wk, reset_wk) = quota_pct_for_tick(
+                                *quota_for_tick.used_pct_weekly.lock().unwrap(),
+                                *quota_for_tick.reset_weekly.lock().unwrap(),
+                                now,
+                            );
+                            if let Some(p) = pct_wk { c.quota_used_pct_weekly = Some(p); }
+                            if let Some(r) = reset_wk { c.quota_reset_at_weekly = Some(r); }
                         }
                         if let Some(c) = snap.agents.iter_mut().find(|a| a.kind == AgentKind::Codex)
                         {
-                            if let Some(u) = *codex_for_tick.used_pct_5h.lock().unwrap() {
-                                c.quota_used_pct = Some(u);
-                            }
-                            if let Some(r) = *codex_for_tick.reset_5h.lock().unwrap() {
-                                c.quota_reset_at = Some(r);
-                            }
-                            if let Some(u) = *codex_for_tick.used_pct_weekly.lock().unwrap() {
-                                c.quota_used_pct_weekly = Some(u);
-                            }
-                            if let Some(r) = *codex_for_tick.reset_weekly.lock().unwrap() {
-                                c.quota_reset_at_weekly = Some(r);
-                            }
+                            let (pct, reset) = quota_pct_for_tick(
+                                *codex_for_tick.used_pct_5h.lock().unwrap(),
+                                *codex_for_tick.reset_5h.lock().unwrap(),
+                                now,
+                            );
+                            if let Some(p) = pct { c.quota_used_pct = Some(p); }
+                            if let Some(r) = reset { c.quota_reset_at = Some(r); }
+                            let (pct_wk, reset_wk) = quota_pct_for_tick(
+                                *codex_for_tick.used_pct_weekly.lock().unwrap(),
+                                *codex_for_tick.reset_weekly.lock().unwrap(),
+                                now,
+                            );
+                            if let Some(p) = pct_wk { c.quota_used_pct_weekly = Some(p); }
+                            if let Some(r) = reset_wk { c.quota_reset_at_weekly = Some(r); }
                         }
                         if let Some(c) = snap.agents.iter_mut().find(|a| a.kind == AgentKind::Antigravity)
                         {
-                            if let Some(u) = *antigravity_for_tick.used_pct_5h.lock().unwrap() {
-                                c.quota_used_pct = Some(u);
-                            }
-                            if let Some(r) = *antigravity_for_tick.reset_5h.lock().unwrap() {
-                                c.quota_reset_at = Some(r);
-                            }
-                            if let Some(u) = *antigravity_for_tick.used_pct_weekly.lock().unwrap() {
-                                c.quota_used_pct_weekly = Some(u);
-                            }
-                            if let Some(r) = *antigravity_for_tick.reset_weekly.lock().unwrap() {
-                                c.quota_reset_at_weekly = Some(r);
-                            }
+                            let (pct, reset) = quota_pct_for_tick(
+                                *antigravity_for_tick.used_pct_5h.lock().unwrap(),
+                                *antigravity_for_tick.reset_5h.lock().unwrap(),
+                                now,
+                            );
+                            if let Some(p) = pct { c.quota_used_pct = Some(p); }
+                            if let Some(r) = reset { c.quota_reset_at = Some(r); }
+                            let (pct_wk, reset_wk) = quota_pct_for_tick(
+                                *antigravity_for_tick.used_pct_weekly.lock().unwrap(),
+                                *antigravity_for_tick.reset_weekly.lock().unwrap(),
+                                now,
+                            );
+                            if let Some(p) = pct_wk { c.quota_used_pct_weekly = Some(p); }
+                            if let Some(r) = reset_wk { c.quota_reset_at_weekly = Some(r); }
                         }
-                        let now = std::time::SystemTime::now();
                         let mut g = gate_for_tick.lock().await;
                         if g.should_emit(&snap, now) {
                             let _ = app_handle.emit("snapshot", &snap);
@@ -1527,5 +1559,46 @@ mod tests {
     #[test]
     fn lan_address_is_none_without_a_routable_ip() {
         assert_eq!(lan_address(true, None, lan::server::PORT), None);
+    }
+
+    /// 리셋 시각이 아직 안 지났으면 캐시된 값을 그대로 믿는다 — 지금 이
+    /// 창의 진짜 최신 관측이니까.
+    #[test]
+    fn quota_pct_keeps_cached_value_before_reset() {
+        let now = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let reset_at = now + Duration::from_secs(60);
+        assert_eq!(
+            quota_pct_for_tick(Some(87.0), Some(reset_at), now),
+            (Some(87.0), Some(reset_at))
+        );
+    }
+
+    /// 리셋 시각이 이미 지났으면 캐시된 %는 만료된 창의 값이다 — 새 창은
+    /// 아직 관측된 게 없으니 0%로 보여준다(2026-09-01 실사용 중 100%가
+    /// 리셋 후에도 계속 남아있던 것을 확인해 추가).
+    #[test]
+    fn quota_pct_resets_to_zero_after_window_passes() {
+        let now = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let reset_at = now - Duration::from_secs(1);
+        assert_eq!(quota_pct_for_tick(Some(100.0), Some(reset_at), now), (Some(0.0), None));
+    }
+
+    /// reset_at 이 아예 없으면(아직 한 번도 관측 못 함) 손대지 않는다 —
+    /// 판단할 기준 자체가 없다.
+    #[test]
+    fn quota_pct_leaves_unknown_reset_untouched() {
+        let now = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        assert_eq!(quota_pct_for_tick(Some(42.0), None, now), (Some(42.0), None));
+    }
+
+    /// reset_at 이 지났을 때 **되돌려주는 reset_at 은 None** 이어야 한다 — 그래야
+    /// 호출부가 만료된 옛 reset_at 으로 덮어쓰지 않고 아그리게이터의 실시간
+    /// anchor 추정을 그대로 둔다.
+    #[test]
+    fn quota_pct_does_not_resurrect_the_expired_reset_at() {
+        let now = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let reset_at = now - Duration::from_secs(1);
+        let (_, reset) = quota_pct_for_tick(Some(100.0), Some(reset_at), now);
+        assert_eq!(reset, None);
     }
 }

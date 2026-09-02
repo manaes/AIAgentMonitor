@@ -518,6 +518,7 @@ fn tail_conversation_db(
                             tokens_cache_read: turn.tokens_cache_read,
                             tokens_cache_create: 0,
                         },
+                        prompt_preview: None,
                     };
                     let _ = tx.send(ev);
                 }

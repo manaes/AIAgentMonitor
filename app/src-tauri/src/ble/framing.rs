@@ -220,7 +220,7 @@ mod tests {
     fn golden_vectors_match() {
         use std::path::PathBuf;
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../docs/ble-protocol/golden/frames-sample.json");
+            .join("../../docs/ble-protocol/golden/frames-sample.json");
 
         let message = "AI Agent Monitor BLE 미러 골든 벡터 — 한글 멀티바이트 포함";
         let chunk_size = 20usize;

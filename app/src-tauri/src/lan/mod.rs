@@ -1759,6 +1759,8 @@ mod tests {
                     rate_tok_per_sec: 98.25,
                     last_event_at: UNIX_EPOCH + Duration::from_secs(1_755_499_987),
                     status: ActivityStatus::Active,
+                    session_id: "test-session".to_string(),
+                    prompt_preview: String::new(),
                 }],
             }],
         }
@@ -2042,6 +2044,8 @@ mod tests {
                         rate_tok_per_sec: 12.5,
                         last_event_at: UNIX_EPOCH + Duration::from_secs(1_755_499_987),
                         status: ActivityStatus::Active,
+                        session_id: format!("test-session-{i}"),
+                        prompt_preview: String::new(),
                     })
                     .collect();
                 a

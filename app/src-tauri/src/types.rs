@@ -33,11 +33,18 @@ impl TokenCounts {
 pub struct TokenEvent {
     pub agent: AgentKind,
     pub project_path: PathBuf,
-    #[allow(dead_code)]
     pub session_id: String,
     pub model: String,
     pub ts: SystemTime,
     pub counts: TokenCounts,
+    // 사람이 방금 뭘 물어봤는지 짧게 미리보기(2026-09-02, "무슨 작업 중인지"
+    // 탐색용). 실제 사용량 이벤트(assistant usage)에는 None — 이 필드가
+    // Some 인 이벤트는 counts 가 전부 0인 "미리보기 전용" 이벤트이고,
+    // Aggregator::push() 가 5h/주간 합계·anchor·rate 계산에서 완전히 제외
+    // 한다(별도 분기, types.rs 문서 참고). 데스크톱 화면에만 쓰고 BLE/LAN
+    // 미러(MirrorProject)로는 내보내지 않는다 — 대화 내용이라 프라이버시
+    // 상 별도 취급이 필요하다.
+    pub prompt_preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +59,12 @@ pub struct ProjectActivity {
     pub rate_tok_per_sec: f32,
     pub last_event_at: SystemTime,
     pub status: ActivityStatus,
+    /// 같은 폴더에서 세션이 여러 개 동시에 돌 때 구분하는 키(2026-09-02).
+    /// 화면엔 안 보이고 프론트엔드 each-키로만 쓴다.
+    pub session_id: String,
+    /// 최근 사용자 메시지 미리보기(짧게 잘림). 데스크톱 화면 전용 —
+    /// BLE/LAN 미러(MirrorProject)로는 나가지 않는다(프라이버시).
+    pub prompt_preview: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

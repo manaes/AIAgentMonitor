@@ -7,6 +7,26 @@
 #include <stdio.h>
 #include "snapshot.h"
 
+// CPU 프로파일링용 스위치 — 빌드 플래그로만 켠다(코드 수정 없이
+// `PLATFORMIO_BUILD_FLAGS="-D PROFILE_SKIP_BARS=1" pio run -e cyd -t upload`
+// 식으로 변형마다 재빌드해서 lvglMaxUs 변화를 비교하려는 목적, 기본값은
+// 전부 0(끄기)이라 아무 플래그 없이 빌드하면 원래 동작과 동일하다).
+// 2026-09-01, CYD 간헐적 BLE 끊김 조사 — 더블버퍼링/SPI 클럭 다 효과
+// 없어서 렌더링 자체(블렌딩/스타일 계산)가 병목이라는 가설을 검증하려고
+// 위젯 종류별로 갱신을 하나씩 꺼서 lvglMaxUs 기여도를 측정한다.
+#ifndef PROFILE_SKIP_BARS
+#define PROFILE_SKIP_BARS 0
+#endif
+#ifndef PROFILE_SKIP_PCT_LABELS
+#define PROFILE_SKIP_PCT_LABELS 0
+#endif
+#ifndef PROFILE_SKIP_RATE_LABEL
+#define PROFILE_SKIP_RATE_LABEL 0
+#endif
+#ifndef PROFILE_SKIP_COUNTDOWN
+#define PROFILE_SKIP_COUNTDOWN 0
+#endif
+
 namespace {
 
 // 에이전트 카드 UI 위젯 묶음
@@ -226,7 +246,7 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
     return g_cardsRoot;
 }
 
-void uiCardsUpdate(const Transport &transport) {
+void uiCardsUpdate(const Transport &transport, size_t agentIndexToUpdate) {
     if (!transport.hasSnapshot()) {
         lv_obj_clear_flag(g_noDataLabel, LV_OBJ_FLAG_HIDDEN);
         for (size_t i = 0; i < SNAPSHOT_MAX_AGENTS; i++) {
@@ -239,23 +259,34 @@ void uiCardsUpdate(const Transport &transport) {
     const Snapshot &snap = transport.latestSnapshot();
     uint64_t currentEpochSec = snap.emittedAtEpochSec;
 
+    // 카드 표시/숨김은 매번 전부 훑는다 — 값이 그대로면 LVGL이 무시해서
+    // 싸다(실측 확인, PROFILE_SKIP_* 프로파일링 때 남은 바닥값 ~19ms에
+    // 이미 포함돼 있던 비용). 실제로 무거운 아래 본문(이름/퍼센트/바/
+    // 카운트다운)만 카드 하나씩 순환하며 갱신한다 — 3카드를 한 loop()
+    // 에서 동시에 건드리면 LVGL이 dirty 영역을 화면 세로 전체로 합쳐
+    // 풀스크린급 플러시(~130ms대)를 유발한다는 게 2026-09-01 프로파일링
+    // (PROFILE_SKIP_BARS/PCT_LABELS/RATE_LABEL/COUNTDOWN)으로 확인됐다.
     for (size_t i = 0; i < SNAPSHOT_MAX_AGENTS; i++) {
-        AgentCardWidgets &cw = g_cards[i];
         if (i >= snap.agentCount) {
-            lv_obj_add_flag(cw.card, LV_OBJ_FLAG_HIDDEN);
-            continue;
+            lv_obj_add_flag(g_cards[i].card, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(g_cards[i].card, LV_OBJ_FLAG_HIDDEN);
         }
+    }
 
-        lv_obj_clear_flag(cw.card, LV_OBJ_FLAG_HIDDEN);
-        const SnapshotAgent &ag = snap.agents[i];
+    if (agentIndexToUpdate < snap.agentCount) {
+        AgentCardWidgets &cw = g_cards[agentIndexToUpdate];
+        const SnapshotAgent &ag = snap.agents[agentIndexToUpdate];
 
         // 이름
         lv_label_set_text(cw.nameLabel, getAgentName(ag.kind));
 
+#if !PROFILE_SKIP_RATE_LABEL
         // tok/s 속도 (k/M 단축 표기 적용)
         char rateBuf[32];
         formatTokensPerSec(ag.rateTokPerSec, rateBuf, sizeof(rateBuf));
         lv_label_set_text(cw.rateLabel, rateBuf);
+#endif
 
         // 5시간 쿼터 (사용량 표시)
         float pct5h = ag.has5hUsagePct ? ag.usage5hPct : 0.0f;
@@ -273,13 +304,18 @@ void uiCardsUpdate(const Transport &transport) {
         } else {
             snprintf(info5hBuf, sizeof(info5hBuf), "5h");
         }
+#if !PROFILE_SKIP_COUNTDOWN
         lv_label_set_text(cw.info5hLabel, info5hBuf);
+#endif
 
+#if !PROFILE_SKIP_PCT_LABELS
         char pct5hBuf[32];
         snprintf(pct5hBuf, sizeof(pct5hBuf), "%.0f%%", pct5h);
         lv_label_set_text(cw.pct5hLabel, pct5hBuf);
         lv_obj_set_style_text_color(cw.pct5hLabel, getPctColor(pct5h), 0);
+#endif
 
+#if !PROFILE_SKIP_BARS
         // 0%여도 그래프(바)는 최소 1%로 항상 표시
         int32_t bar5hVal = (int32_t)pct5h;
         if (bar5hVal < 1) bar5hVal = 1;
@@ -287,6 +323,7 @@ void uiCardsUpdate(const Transport &transport) {
         lv_obj_set_style_bg_color(cw.bar5h, getPctColor(pct5h), LV_PART_INDICATOR);
         lv_obj_clear_flag(cw.row5h, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(cw.bar5h, LV_OBJ_FLAG_HIDDEN);
+#endif
 
         // 주간 쿼터 (사용량 표시, Week)
         if (ag.hasWeeklyUsagePct) {
@@ -305,13 +342,18 @@ void uiCardsUpdate(const Transport &transport) {
             } else {
                 snprintf(infoWkBuf, sizeof(infoWkBuf), "Week");
             }
+#if !PROFILE_SKIP_COUNTDOWN
             lv_label_set_text(cw.infoWkLabel, infoWkBuf);
+#endif
 
+#if !PROFILE_SKIP_PCT_LABELS
             char pctWkBuf[32];
             snprintf(pctWkBuf, sizeof(pctWkBuf), "%.0f%%", pctWk);
             lv_label_set_text(cw.pctWkLabel, pctWkBuf);
             lv_obj_set_style_text_color(cw.pctWkLabel, getPctColor(pctWk), 0);
+#endif
 
+#if !PROFILE_SKIP_BARS
             // 주간 쿼터 바 항상 노출 (최소 1%)
             int32_t barWkVal = (int32_t)pctWk;
             if (barWkVal < 1) barWkVal = 1;
@@ -319,6 +361,7 @@ void uiCardsUpdate(const Transport &transport) {
             lv_obj_set_style_bg_color(cw.barWk, getPctColor(pctWk), LV_PART_INDICATOR);
             lv_obj_clear_flag(cw.rowWk, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(cw.barWk, LV_OBJ_FLAG_HIDDEN);
+#endif
         } else {
             lv_obj_add_flag(cw.rowWk, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(cw.barWk, LV_OBJ_FLAG_HIDDEN);
@@ -327,6 +370,10 @@ void uiCardsUpdate(const Transport &transport) {
 }
 
 void uiCardsUpdateRates(const Transport &transport) {
+#if PROFILE_SKIP_RATE_LABEL
+    (void)transport;
+    return;
+#else
     if (!transport.hasSnapshot()) {
         return;
     }
@@ -340,6 +387,7 @@ void uiCardsUpdateRates(const Transport &transport) {
         formatTokensPerSec(snap.agents[i].rateTokPerSec, rateBuf, sizeof(rateBuf));
         lv_label_set_text(cw.rateLabel, rateBuf);
     }
+#endif
 }
 
 void uiCardsSetVisible(bool visible) {

@@ -23,6 +23,12 @@ export type ProjectActivity = {
   rate_tok_per_sec: number;
   last_event_at: { secs_since_epoch: number };
   status: ActivityStatus;
+  // 같은 폴더에서 세션이 여러 개 동시에 돌 때 행을 구분하는 키(2026-09-02,
+  // 화면엔 안 보임 — SessionList.svelte의 each-키로만 쓴다).
+  session_id: string;
+  // 최근 사용자 메시지 미리보기(짧게 잘림, 없으면 빈 문자열). 데스크톱
+  // 화면 전용 — BLE/LAN 미러로는 나가지 않는다.
+  prompt_preview: string;
 };
 
 export type AgentState = {
