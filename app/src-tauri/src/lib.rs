@@ -576,7 +576,7 @@ fn hide_console_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     dirs_next::home_dir().expect("home dir")
 }
 

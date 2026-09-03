@@ -232,6 +232,11 @@ fn tail_file(path: &Path, offset: u64, project: &Path, session_id: &str, tx: &mp
     let mut reader = BufReader::new(&f);
     let mut new_offset = effective_offset;
     let mut buf = Vec::new();
+    // lib.rs의 spawn_quota_ping()은 quota 헤더를 얻으려고 홈 디렉터리에서 `claude -p ping`을
+    // 돌린다 — 실제 작업이 아니라 세션 목록에 "ping" 이라는 가짜 항목으로 뜨는 부작용이
+    // 있었다(2026-09-03 사용자 보고). quota % 는 이 워처가 아니라 프록시가 응답 헤더에서
+    // 직접 캡처하므로, 여기서 걸러내도 quota 정확도에는 영향이 없다.
+    let is_quota_ping_session = project == crate::home();
     // read_until으로 실제 소비된 바이트(개행·\r 포함)만큼만 offset을 전진시킨다.
     // 개행으로 끝나지 않은 마지막(부분) 줄은 처리하지 않고 다음 이벤트에서 다시 읽는다.
     // (이전 구현은 line.len()+1로 개행 1바이트를 가정해, 부분 줄/CRLF에서 offset이 어긋났다)
@@ -244,6 +249,7 @@ fn tail_file(path: &Path, offset: u64, project: &Path, session_id: &str, tx: &mp
         };
         if !buf.ends_with(b"\n") { break; } // 부분(미완) 줄 — 다음 읽기까지 보류
         new_offset += n as u64;
+        if is_quota_ping_session { continue; }
         let line = String::from_utf8_lossy(&buf);
         match parse_line(line.trim_end(), project, session_id) {
             Ok(Some(ev)) => { let _ = tx.send(ev); }
@@ -297,6 +303,33 @@ mod tests {
         let project = PathBuf::from("/tmp/p");
         let r = parse_line(line, &project, "s").unwrap();
         assert!(r.is_none());
+    }
+
+    #[test]
+    fn tail_file_skips_quota_ping_sessions_rooted_at_home() {
+        // spawn_quota_ping() 이 홈 디렉터리에서 돌리는 합성 "ping" 세션은
+        // 세션 목록에 노출되면 안 된다(2026-09-03 사용자 보고).
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let line = r#"{"type":"user","message":{"role":"user","content":"ping"},"timestamp":"2026-05-28T08:30:00.000Z","sessionId":"s"}"#;
+        std::fs::write(&file, format!("{line}\n")).unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<TokenEvent>();
+        let end = tail_file(&file, 0, &crate::home(), "s", &tx);
+        assert!(end > 0, "오프셋은 정상적으로 전진해야 한다");
+        assert!(rx.try_recv().is_err(), "홈 디렉터리 세션은 이벤트를 내면 안 된다");
+    }
+
+    #[test]
+    fn tail_file_still_emits_for_a_real_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let line = r#"{"type":"user","message":{"role":"user","content":"ping"},"timestamp":"2026-05-28T08:30:00.000Z","sessionId":"s"}"#;
+        std::fs::write(&file, format!("{line}\n")).unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<TokenEvent>();
+        tail_file(&file, 0, &PathBuf::from("/tmp/real-project"), "s", &tx);
+        assert!(rx.try_recv().is_ok(), "실제 프로젝트 세션은 그대로 나가야 한다");
     }
 
     #[test]
