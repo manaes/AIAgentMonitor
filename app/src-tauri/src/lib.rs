@@ -904,19 +904,24 @@ pub fn run() {
         });
     }
 
-    // 주기적 자동 동기화: 10분마다 /usage로 사용량을 보정. 계정 한도 조회 전용이라
-    // quota를 갉아먹지 않으므로(위 run_claude_usage_ping 문서), Codex/Antigravity와
-    // 마찬가지로 활동 여부와 무관하게 상시 돈다 — 완전히 손 놓고 있어도 다른
-    // 기기·claude.ai 사용량이 반영된다.
+    // 주기적 자동 동기화: /usage는 어디까지나 보험용 안전망이다 — 실사용 중이면
+    // 프록시가 실제 헤더로 이미 훨씬 자주 갱신해주므로, 매번 새로 프로세스를 띄울
+    // 필요가 없다(2026-09-03: 문자열 파싱이라 신뢰도도 헤더보다 낮다). 그래서 60초
+    // 마다 깨어나 "마지막 갱신 이후 10분이 지났는지"만 확인하고, 그때만 /usage를
+    // 부른다 — 완전히 손 놓고 있을 때만 실제로 실행된다.
+    const QUOTA_STALE_AFTER: Duration = Duration::from_secs(600);
     {
         let quota = quota_state.clone();
         let running = claude_quota_ping_running.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_secs(8)).await; // 시작 시 startup replay 완료 대기
-            let mut ticker = tokio::time::interval(Duration::from_secs(600)); // 10분
+            let mut ticker = tokio::time::interval(Duration::from_secs(60));
             loop {
                 ticker.tick().await;
-                tracing::info!("주기 자동 동기화 핑");
+                if !quota.is_stale(std::time::SystemTime::now(), QUOTA_STALE_AFTER) {
+                    continue;
+                }
+                tracing::info!("10분간 갱신 없음 — 안전망 quota 핑");
                 run_claude_usage_ping(quota.clone(), running.clone()).await;
             }
         });

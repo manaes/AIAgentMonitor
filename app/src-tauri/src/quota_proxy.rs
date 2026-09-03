@@ -35,6 +35,10 @@ pub struct QuotaState {
     pub used_pct_weekly: Mutex<Option<f32>>, // 0..100 (7d)
     pub reset_weekly: Mutex<Option<SystemTime>>,
     pub active: Mutex<bool>, // 프록시를 통한 트래픽을 본 적 있는지
+    /// 5h/주간 %가 (프록시 헤더든 `/usage` 파싱이든) 마지막으로 갱신된 시각.
+    /// lib.rs의 주기 자동 동기화가 "안전망으로 /usage 를 부를지"를
+    /// 판단하는 기준이다 — `is_stale` 문서 참고.
+    last_updated: Mutex<Option<SystemTime>>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -88,7 +92,25 @@ impl QuotaState {
         }
         if session_pct.is_some() || week_pct.is_some() {
             *self.active.lock().unwrap() = true;
+            self.mark_updated();
             self.save_persisted();
+        }
+    }
+
+    fn mark_updated(&self) {
+        *self.last_updated.lock().unwrap() = Some(SystemTime::now());
+    }
+
+    /// 마지막 갱신(프록시 헤더든 `/usage` 파싱이든) 이후 `after` 이상 지났으면
+    /// true. 한 번도 갱신된 적 없으면(앱을 막 띄웠는데 persisted 캐시도 없는
+    /// 경우) 무조건 true — 최대한 빨리 첫 값을 받아야 하니 안전망 쪽으로
+    /// 기운다. lib.rs의 주기 자동 동기화가 이걸로 "/usage 를 부를지"
+    /// 판단한다: 실사용 중이라 프록시가 이미 자주 갱신해주면 매번 새로
+    /// 프로세스를 띄울 필요가 없다.
+    pub fn is_stale(&self, now: SystemTime, after: Duration) -> bool {
+        match *self.last_updated.lock().unwrap() {
+            Some(t) => now.duration_since(t).unwrap_or_default() >= after,
+            None => true,
         }
     }
 
@@ -206,6 +228,7 @@ fn observe(headers: &HeaderMap, quota: &Arc<QuotaState>) {
 
     if saw_any {
         *quota.active.lock().unwrap() = true;
+        quota.mark_updated();
         quota.save_persisted();
     }
 }
@@ -302,6 +325,39 @@ impl QuotaProxy {
 mod tests {
     use super::*;
     use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn never_updated_state_is_always_stale() {
+        let quota = QuotaState::default();
+        assert!(quota.is_stale(SystemTime::now(), Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn freshly_updated_state_is_not_stale() {
+        let quota = QuotaState::default();
+        quota.apply_usage_pct(Some(10.0), None);
+        assert!(!quota.is_stale(SystemTime::now(), Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn state_becomes_stale_after_the_threshold() {
+        let quota = QuotaState::default();
+        quota.apply_usage_pct(Some(10.0), None);
+        let later = SystemTime::now() + Duration::from_secs(601);
+        assert!(quota.is_stale(later, Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn observing_real_headers_also_marks_it_fresh() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "anthropic-ratelimit-unified-5h-utilization",
+            HeaderValue::from_static("0.5"),
+        );
+        let quota = Arc::new(QuotaState::default());
+        observe(&headers, &quota);
+        assert!(!quota.is_stale(SystemTime::now(), Duration::from_secs(600)));
+    }
 
     #[test]
     fn utilization_over_one_is_treated_as_ratio() {
