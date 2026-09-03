@@ -607,10 +607,25 @@ async fn open_detail_window(app: tauri::AppHandle) -> Result<(), String> {
 // 사용률을 읽어온다. 이전엔 -p ping(실제 채팅 완성, 진짜 토큰 소모)으로 프록시
 // 트래픽을 만들어 응답 헤더를 훔쳐봤지만, /usage 는 계정 한도 조회 전용 커맨드라
 // 연속 호출해도 quota %가 안 움직인다(2026-09-03 확인) — 활동 여부와 무관하게
-// 상시 돌려도 quota를 갉아먹지 않는다. ANTHROPIC_BASE_URL은 이 자식 프로세스에만
-// 설정되므로 사용자의 일반 Claude Code 세션은 프록시를 거치지 않는다(상시 경유
-// footgun 회피). GUI 앱 PATH 대비 절대경로 우선.
-async fn run_claude_usage_ping(quota: Arc<quota_proxy::QuotaState>) {
+// 상시 돌려도 quota를 갉아먹지 않는다.
+//
+// 2026-09-03 리뷰 반영: 이 커맨드는 stdout 텍스트를 직접 파싱하지, 응답 헤더를
+// 훔쳐보는 게 아니므로 ANTHROPIC_BASE_URL(로컬 프록시)을 거칠 이유가 없다 —
+// 오히려 그러면 유휴 시 상시 갱신이라는 이 함수의 존재 이유 자체가 프록시
+// 가용성에 묶여버린다(프록시가 안 떠 있으면 /usage 도 실패). 그래서 이 호출은
+// 프록시를 거치지 않고 실제 Anthropic 엔드포인트로 바로 나간다.
+async fn run_claude_usage_ping(quota: Arc<quota_proxy::QuotaState>, running: Arc<AtomicBool>) {
+    // 수동 동기화 버튼과 10분 주기 자동 동기화가 겹치면 claude 프로세스가
+    // 중복 실행될 수 있어(2026-09-03 리뷰), Codex 쪽과 같은 in-flight 가드를 쓴다.
+    if running.swap(true, Ordering::SeqCst) {
+        tracing::debug!("quota 동기화(/usage) 이미 진행 중 — 건너뜀");
+        return;
+    }
+    run_claude_usage_ping_inner(quota).await;
+    running.store(false, Ordering::SeqCst);
+}
+
+async fn run_claude_usage_ping_inner(quota: Arc<quota_proxy::QuotaState>) {
     // Windows: claude는 .cmd 래퍼이므로 cmd /C 경유 필요
     // macOS/Linux: 절대경로 우선, 없으면 PATH에서 검색
     #[cfg(target_os = "windows")]
@@ -634,7 +649,6 @@ async fn run_claude_usage_ping(quota: Arc<quota_proxy::QuotaState>) {
         c
     };
     cmd.current_dir(home())
-        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:4319")
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     hide_console_window(&mut cmd);
@@ -657,7 +671,9 @@ async fn run_claude_usage_ping(quota: Arc<quota_proxy::QuotaState>) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let (session_pct, week_pct) = quota_proxy::parse_usage_pct(&stdout);
     if session_pct.is_none() && week_pct.is_none() {
-        tracing::warn!("quota 동기화(/usage) 출력 파싱 실패");
+        // CLI 출력 포맷이 바뀌면 여기서 조용히 계속 실패할 수 있다 — 매번 로그를
+        // 남겨 무음 회귀를 감지할 수 있게 한다(2026-09-03 리뷰).
+        tracing::warn!(%stdout, "quota 동기화(/usage) 출력 파싱 실패 — CLI 출력 포맷이 바뀌었을 수 있다");
         return;
     }
     quota.apply_usage_pct(session_pct, week_pct);
@@ -719,10 +735,14 @@ fn spawn_codex_quota_ping(running: Arc<AtomicBool>) {
     });
 }
 
-// 수동 동기화 (UI 버튼)
+// 수동 동기화 (UI 버튼). 10분 주기 자동 동기화와 같은 in-flight 가드를 공유해
+// 겹쳐 눌러도 claude 프로세스가 중복 실행되지 않는다.
 #[tauri::command]
-async fn sync_quota(quota: tauri::State<'_, Arc<quota_proxy::QuotaState>>) -> Result<(), String> {
-    run_claude_usage_ping(quota.inner().clone()).await;
+async fn sync_quota(
+    quota: tauri::State<'_, Arc<quota_proxy::QuotaState>>,
+    running: tauri::State<'_, Arc<AtomicBool>>,
+) -> Result<(), String> {
+    run_claude_usage_ping(quota.inner().clone(), running.inner().clone()).await;
     Ok(())
 }
 
@@ -814,6 +834,7 @@ pub fn run() {
     // quota 상태 — Claude: anthropic-ratelimit 헤더(프록시), Codex: rollout rate_limits
     let quota_state = Arc::new(quota_proxy::QuotaState::default());
     quota_state.load_persisted();
+    let claude_quota_ping_running = Arc::new(AtomicBool::new(false));
     let codex_quota = Arc::new(watchers::codex::CodexQuota::default());
     let codex_quota_ping_running = Arc::new(AtomicBool::new(false));
     let antigravity_quota = Arc::new(watchers::antigravity::AntigravityQuota::default());
@@ -875,10 +896,11 @@ pub fn run() {
     // 앱 시작 시 즉시 한 번 핑 (persisted 캐시가 낡았을 수 있으므로)
     {
         let quota = quota_state.clone();
+        let running = claude_quota_ping_running.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_secs(5)).await; // startup replay 완료 대기
             tracing::info!("시작 시 quota 초기 핑");
-            run_claude_usage_ping(quota).await;
+            run_claude_usage_ping(quota, running).await;
         });
     }
 
@@ -888,13 +910,14 @@ pub fn run() {
     // 기기·claude.ai 사용량이 반영된다.
     {
         let quota = quota_state.clone();
+        let running = claude_quota_ping_running.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_secs(8)).await; // 시작 시 startup replay 완료 대기
             let mut ticker = tokio::time::interval(Duration::from_secs(600)); // 10분
             loop {
                 ticker.tick().await;
                 tracing::info!("주기 자동 동기화 핑");
-                run_claude_usage_ping(quota.clone()).await;
+                run_claude_usage_ping(quota.clone(), running.clone()).await;
             }
         });
     }
@@ -963,6 +986,7 @@ pub fn run() {
             let aggregator = aggregator.clone();
             let gate = gate.clone();
             let quota_state = quota_state.clone();
+            let claude_quota_ping_running = claude_quota_ping_running.clone();
             let codex_quota = codex_quota.clone();
             let antigravity_quota = antigravity_quota.clone();
             let antigravity_poll_interval = antigravity_poll_interval.clone();
@@ -971,6 +995,7 @@ pub fn run() {
             move |app| {
                 use tauri::Manager;
                 app.manage(quota_state.clone());
+                app.manage(claude_quota_ping_running.clone());
                 app.manage(settings_state.clone());
                 app.manage(antigravity_quota.clone());
                 app.manage(antigravity_poll_interval.clone());
