@@ -603,25 +603,24 @@ async fn open_detail_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-// claude를 프록시(:4319) 경유로 1회 핑 → 응답 ratelimit 헤더에서 5h 사용률/리셋을 캡처.
-// ANTHROPIC_BASE_URL은 이 자식 프로세스에만 설정되므로 사용자의 일반 Claude Code 세션은
-// 프록시를 거치지 않는다(상시 경유 footgun 회피). GUI 앱 PATH 대비 절대경로 우선.
-fn spawn_quota_ping() {
+// claude -p "/usage" 로 계정 전체(다른 기기·claude.ai 사용량까지 포함) 5h/주간
+// 사용률을 읽어온다. 이전엔 -p ping(실제 채팅 완성, 진짜 토큰 소모)으로 프록시
+// 트래픽을 만들어 응답 헤더를 훔쳐봤지만, /usage 는 계정 한도 조회 전용 커맨드라
+// 연속 호출해도 quota %가 안 움직인다(2026-09-03 확인) — 활동 여부와 무관하게
+// 상시 돌려도 quota를 갉아먹지 않는다. ANTHROPIC_BASE_URL은 이 자식 프로세스에만
+// 설정되므로 사용자의 일반 Claude Code 세션은 프록시를 거치지 않는다(상시 경유
+// footgun 회피). GUI 앱 PATH 대비 절대경로 우선.
+async fn run_claude_usage_ping(quota: Arc<quota_proxy::QuotaState>) {
     // Windows: claude는 .cmd 래퍼이므로 cmd /C 경유 필요
     // macOS/Linux: 절대경로 우선, 없으면 PATH에서 검색
     #[cfg(target_os = "windows")]
-    let r = {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "claude", "-p", "ping"])
-            .current_dir(home())
-            .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:4319")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        hide_console_window(&mut cmd).spawn()
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "claude", "-p", "/usage"]);
+        c
     };
     #[cfg(not(target_os = "windows"))]
-    let r = {
+    let mut cmd = {
         let bin = find_binary(
             "claude",
             &[
@@ -630,18 +629,39 @@ fn spawn_quota_ping() {
                 PathBuf::from("/usr/local/bin/claude"),
             ],
         );
-        let mut cmd = Command::new(bin);
-        cmd.args(["-p", "ping"])
-            .current_dir(home())
-            .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:4319")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        hide_console_window(&mut cmd).spawn()
+        let mut c = Command::new(bin);
+        c.args(["-p", "/usage"]);
+        c
     };
-    if let Err(e) = r {
-        tracing::warn!(%e, "quota 동기화 핑 실행 실패 (claude 미발견?)");
+    cmd.current_dir(home())
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:4319")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    hide_console_window(&mut cmd);
+
+    let output = match tokio::time::timeout(Duration::from_secs(60), cmd.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => {
+            tracing::warn!(%e, "quota 동기화(/usage) 실행 실패 (claude 미발견?)");
+            return;
+        }
+        Err(_) => {
+            tracing::warn!("quota 동기화(/usage) timeout");
+            return;
+        }
+    };
+    if !output.status.success() {
+        tracing::warn!(status = ?output.status, "quota 동기화(/usage) 실패");
+        return;
     }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (session_pct, week_pct) = quota_proxy::parse_usage_pct(&stdout);
+    if session_pct.is_none() && week_pct.is_none() {
+        tracing::warn!("quota 동기화(/usage) 출력 파싱 실패");
+        return;
+    }
+    quota.apply_usage_pct(session_pct, week_pct);
+    tracing::info!(?session_pct, ?week_pct, "quota 동기화(/usage) 완료");
 }
 
 // Codex quota는 rollout의 token_count.rate_limits에서만 갱신된다. 사용자가 유휴 상태면
@@ -701,8 +721,8 @@ fn spawn_codex_quota_ping(running: Arc<AtomicBool>) {
 
 // 수동 동기화 (UI 버튼)
 #[tauri::command]
-async fn sync_quota() -> Result<(), String> {
-    spawn_quota_ping();
+async fn sync_quota(quota: tauri::State<'_, Arc<quota_proxy::QuotaState>>) -> Result<(), String> {
+    run_claude_usage_ping(quota.inner().clone()).await;
     Ok(())
 }
 
@@ -853,30 +873,28 @@ pub fn run() {
     let shared_pairing: SharedPairing = Arc::new(Mutex::new(ble::pairing::PairingManager::new()));
 
     // 앱 시작 시 즉시 한 번 핑 (persisted 캐시가 낡았을 수 있으므로)
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(5)).await; // startup replay 완료 대기
-        tracing::info!("시작 시 quota 초기 핑");
-        spawn_quota_ping();
-    });
-
-    // 주기적 자동 동기화: 최근(15분 내) 활동이 있으면 10분마다 프록시 핑으로 사용량을 보정.
-    // 핑만 프록시를 거치므로 일반 세션엔 영향 없고, 유휴 시엔 quota 낭비를 막기 위해 생략한다.
     {
-        let agg = aggregator.clone();
+        let quota = quota_state.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await; // startup replay 완료 대기
+            tracing::info!("시작 시 quota 초기 핑");
+            run_claude_usage_ping(quota).await;
+        });
+    }
+
+    // 주기적 자동 동기화: 10분마다 /usage로 사용량을 보정. 계정 한도 조회 전용이라
+    // quota를 갉아먹지 않으므로(위 run_claude_usage_ping 문서), Codex/Antigravity와
+    // 마찬가지로 활동 여부와 무관하게 상시 돈다 — 완전히 손 놓고 있어도 다른
+    // 기기·claude.ai 사용량이 반영된다.
+    {
+        let quota = quota_state.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_secs(8)).await; // 시작 시 startup replay 완료 대기
             let mut ticker = tokio::time::interval(Duration::from_secs(600)); // 10분
             loop {
                 ticker.tick().await;
-                let recent = { agg.lock().await.last_event_at() };
-                let active = recent
-                    .and_then(|t| t.elapsed().ok())
-                    .map(|e| e < Duration::from_secs(900))
-                    .unwrap_or(false);
-                if active {
-                    tracing::info!("주기 자동 동기화 핑");
-                    spawn_quota_ping();
-                }
+                tracing::info!("주기 자동 동기화 핑");
+                run_claude_usage_ping(quota.clone()).await;
             }
         });
     }
@@ -952,6 +970,7 @@ pub fn run() {
             let shared_pairing = shared_pairing.clone();
             move |app| {
                 use tauri::Manager;
+                app.manage(quota_state.clone());
                 app.manage(settings_state.clone());
                 app.manage(antigravity_quota.clone());
                 app.manage(antigravity_poll_interval.clone());

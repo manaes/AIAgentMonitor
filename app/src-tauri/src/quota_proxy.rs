@@ -76,6 +76,22 @@ impl QuotaState {
         tracing::info!(?path, "Claude quota 캐시 로드");
     }
 
+    /// `claude -p "/usage"` 텍스트 파싱 결과를 반영한다. 실 트래픽 헤더(`observe`)와
+    /// 달리 reset 시각은 여기서 다루지 않는다(파일 하단 `parse_usage_pct` 문서 참고) —
+    /// 값이 있는 쪽만 갱신하고, 기존 reset_at 은 그대로 둔다.
+    pub fn apply_usage_pct(&self, session_pct: Option<f32>, week_pct: Option<f32>) {
+        if let Some(p) = session_pct {
+            *self.used_pct.lock().unwrap() = Some(p.clamp(0.0, 100.0));
+        }
+        if let Some(p) = week_pct {
+            *self.used_pct_weekly.lock().unwrap() = Some(p.clamp(0.0, 100.0));
+        }
+        if session_pct.is_some() || week_pct.is_some() {
+            *self.active.lock().unwrap() = true;
+            self.save_persisted();
+        }
+    }
+
     fn save_persisted(&self) {
         let path = persist_path();
         if let Some(parent) = path.parent() {
@@ -116,6 +132,35 @@ fn parse_f64(h: &HeaderMap, name: &str) -> Option<f64> {
 
 fn ratio_to_pct(u: f64) -> f32 {
     (u * 100.0) as f32
+}
+
+/// `claude -p "/usage"` 표준출력에서 세션(5h)/전체 모델 주간 사용률만 뽑는다.
+/// `(Fable)` 같은 모델별 하위 항목은 이 앱이 표시하는 값과 무관하므로 무시한다.
+///
+/// reset 시각은 일부러 파싱하지 않는다 — 여기 찍히는 시각은
+/// "Sep 3 at 6:59pm (Asia/Seoul)" 처럼 로캘 지역명이 붙은 텍스트라, 타임존
+/// 데이터베이스 없이는 정확한 UTC로 되돌릴 수 없다(DST 있는 지역이면 특히).
+/// reset_at 은 그대로 `observe()`(실제 응답 헤더)에 맡긴다 — 실제로 리셋되기
+/// 전까진 값이 안 바뀌므로, 이 폴링에서 못 얻어도 정확도에 문제가 없다.
+///
+/// 2026-09-03 확인: 이 커맨드는 실제 채팅 완성이 아니라 계정 한도 조회
+/// 전용이라 연속으로 여러 번 불러도 %가 안 움직였다(연결 request 카운터만
+/// 오름) — 활동 여부와 무관하게 상시 폴링해도 quota 를 갉아먹지 않는다.
+pub fn parse_usage_pct(output: &str) -> (Option<f32>, Option<f32>) {
+    let mut session_pct = None;
+    let mut week_pct = None;
+    for line in output.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("Current session:") {
+            session_pct = session_pct.or_else(|| extract_leading_pct(rest));
+        } else if let Some(rest) = line.strip_prefix("Current week (all models):") {
+            week_pct = week_pct.or_else(|| extract_leading_pct(rest));
+        }
+    }
+    (session_pct, week_pct)
+}
+
+fn extract_leading_pct(s: &str) -> Option<f32> {
+    s.trim().split('%').next()?.trim().parse::<f32>().ok()
 }
 
 /// 응답 헤더에서 5h 사용률/리셋을 추출. 헤더명 후보를 방어적으로 시도하고 전체를 로깅한다.
@@ -270,6 +315,42 @@ mod tests {
         observe(&headers, &quota);
 
         assert_eq!(*quota.used_pct.lock().unwrap(), Some(100.0));
+    }
+
+    #[test]
+    fn parses_session_and_weekly_pct_from_usage_output() {
+        // 실제 `claude -p "/usage"` 출력(2026-09-03 사용자 제공).
+        let output = "\
+You are currently using your subscription to power your Claude Code usage
+
+Current session: 21% used · resets Sep 3 at 6:59pm (Asia/Seoul)
+Current week (all models): 64% used · resets Sep 6 at 6:59pm (Asia/Seoul)
+Current week (Fable): 98% used · resets Sep 6 at 6:59pm (Asia/Seoul)
+
+What's contributing to your limits usage?
+";
+        let (session, week) = parse_usage_pct(output);
+        assert_eq!(session, Some(21.0), "Current session 값을 읽어야 한다");
+        assert_eq!(week, Some(64.0), "(all models) 주간 값을 읽어야 한다 — (Fable) 이 아니라");
+    }
+
+    #[test]
+    fn missing_lines_yield_none_without_panicking() {
+        let (session, week) = parse_usage_pct("무관한 출력\n");
+        assert_eq!(session, None);
+        assert_eq!(week, None);
+    }
+
+    #[test]
+    fn apply_usage_pct_only_touches_fields_with_a_value() {
+        let quota = QuotaState::default();
+        *quota.used_pct.lock().unwrap() = Some(10.0);
+        *quota.used_pct_weekly.lock().unwrap() = Some(20.0);
+
+        quota.apply_usage_pct(Some(30.0), None);
+
+        assert_eq!(*quota.used_pct.lock().unwrap(), Some(30.0), "값이 있으면 갱신");
+        assert_eq!(*quota.used_pct_weekly.lock().unwrap(), Some(20.0), "None 이면 기존 값 유지");
     }
 
     #[test]
