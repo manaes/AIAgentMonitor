@@ -16,7 +16,7 @@
     if (status === "idle") return "#ff9f0a";
     if (agent === "claude") return "#30d158";
     if (agent === "antigravity") return "#388bfd";
-    return "#ff9f0a";
+    return "#bf5af2"; // codex — idle(주황)과 혼동되지 않도록 전용 색 배정
   }
 
   function statusLabel(status: string): string {

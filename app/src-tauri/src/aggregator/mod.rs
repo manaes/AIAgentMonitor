@@ -17,10 +17,15 @@ const QUOTA_WINDOW: Duration = Duration::from_secs(5 * 3600);
 const ANCHOR_LOOKBACK: Duration = Duration::from_secs(24 * 3600);
 // 2026-09-03: session_id 로 키를 바꾼 뒤(위 AgentBucket.projects 주석) 세션 맵이
 // 영원히 자라기만 했다 — 같은 폴더를 새 세션으로 열 때마다 예전엔 경로 하나로
-// 재사용되던 자리가 이제는 별도 항목으로 계속 쌓인다. 오래 방치된(Dormant보다도
-// 훨씬 지난) 세션은 맵에서 완전히 지워, 스냅샷(=BLE/LAN 미러 페이로드)이 앱
-// 가동 시간에 비례해 무한정 커지지 않게 한다.
-const PROJECT_PRUNE_AFTER: Duration = Duration::from_secs(6 * 3600);
+// 재사용되던 자리가 이제는 별도 항목으로 계속 쌓인다. 세션 맵이 무한정 커지지
+// 않게 정리(prune)해야 한다(스냅샷 = BLE/LAN 미러 페이로드에 그대로 실린다).
+//
+// 처음엔 6시간을 줬지만(2026-09-03 커밋 f166aab), 사용자 피드백: "휴면(회색)
+// 상태는 볼 필요 없다, 유휴(주황)까지만 있으면 된다" — 즉 목록에 남아 있는
+// 이유가 애초에 "아직 활동 중/막 쉬는 중"인 세션을 보여주기 위해서지, 몇 시간
+// 지난 세션까지 붙잡아 둘 이유가 없다. 그래서 idle→dormant 경계(아래 status
+// 계산의 300초)와 정확히 맞춰, Dormant 로 넘어가는 순간 목록에서 완전히 지운다.
+const PROJECT_PRUNE_AFTER: Duration = Duration::from_secs(300);
 
 #[derive(Default)]
 pub struct Aggregator {
@@ -249,39 +254,28 @@ mod tests {
     }
 
     #[test]
-    fn project_becomes_dormant_after_5min() {
+    fn dormant_session_is_pruned_instead_of_shown() {
+        // 2026-09-03 사용자 피드백: 휴면(회색) 상태는 볼 필요 없다 — idle→dormant
+        // 경계를 넘는 순간 목록에서 완전히 지운다(Dormant 는 더 이상 관측되지 않는다).
         let clock = MockClock::new(1_000_000);
         let mut agg = Aggregator::new();
         agg.push(ev(AgentKind::Claude, clock.now(), "/tmp/p1", "x", 100));
         clock.advance(Duration::from_secs(301));
         let snap = agg.snapshot(&clock);
         let claude = snap.agents.iter().find(|a| a.kind == AgentKind::Claude).unwrap();
-        assert_eq!(claude.projects[0].status, ActivityStatus::Dormant);
+        assert_eq!(claude.projects.len(), 0, "휴면으로 넘어간 세션은 지워져야 한다");
     }
 
     #[test]
-    fn dormant_session_older_than_prune_window_is_dropped() {
-        // 실기 재현 가설(2026-09-03): session_id 키가 영원히 쌓여 BLE 스냅샷이
-        // 가동 시간에 비례해 커지고, CYD 보드가 45초 안에 프레임을 다 못 받아
-        // 연결이 반복적으로 끊긴다. 오래된 세션은 맵에서 아예 사라져야 한다.
+    fn session_just_under_the_idle_window_is_still_kept() {
         let clock = MockClock::new(1_000_000);
         let mut agg = Aggregator::new();
         agg.push(ev(AgentKind::Claude, clock.now(), "/tmp/old", "x", 100));
-        clock.advance(Duration::from_secs(6 * 3600) + Duration::from_secs(1));
-        let snap = agg.snapshot(&clock);
-        let claude = snap.agents.iter().find(|a| a.kind == AgentKind::Claude).unwrap();
-        assert_eq!(claude.projects.len(), 0, "6시간 넘게 방치된 세션은 지워져야 한다");
-    }
-
-    #[test]
-    fn dormant_session_just_under_prune_window_is_kept() {
-        let clock = MockClock::new(1_000_000);
-        let mut agg = Aggregator::new();
-        agg.push(ev(AgentKind::Claude, clock.now(), "/tmp/old", "x", 100));
-        clock.advance(Duration::from_secs(6 * 3600) - Duration::from_secs(1));
+        clock.advance(Duration::from_secs(300) - Duration::from_secs(1));
         let snap = agg.snapshot(&clock);
         let claude = snap.agents.iter().find(|a| a.kind == AgentKind::Claude).unwrap();
         assert_eq!(claude.projects.len(), 1, "경계 직전이면 아직 남아있어야 한다");
+        assert_eq!(claude.projects[0].status, ActivityStatus::Idle);
     }
 
     #[test]
