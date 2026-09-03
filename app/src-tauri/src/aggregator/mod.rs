@@ -15,6 +15,12 @@ use rotating::RotatingBucket;
 const QUOTA_WINDOW: Duration = Duration::from_secs(5 * 3600);
 // 윈도우 anchor 재구성을 위해 보관하는 이벤트 타임스탬프 최대 기간
 const ANCHOR_LOOKBACK: Duration = Duration::from_secs(24 * 3600);
+// 2026-09-03: session_id 로 키를 바꾼 뒤(위 AgentBucket.projects 주석) 세션 맵이
+// 영원히 자라기만 했다 — 같은 폴더를 새 세션으로 열 때마다 예전엔 경로 하나로
+// 재사용되던 자리가 이제는 별도 항목으로 계속 쌓인다. 오래 방치된(Dormant보다도
+// 훨씬 지난) 세션은 맵에서 완전히 지워, 스냅샷(=BLE/LAN 미러 페이로드)이 앱
+// 가동 시간에 비례해 무한정 커지지 않게 한다.
+const PROJECT_PRUNE_AFTER: Duration = Duration::from_secs(6 * 3600);
 
 #[derive(Default)]
 pub struct Aggregator {
@@ -100,6 +106,9 @@ impl Aggregator {
         let mut agents = Vec::with_capacity(3);
         for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity] {
             let bucket = self.by_agent.entry(kind).or_default();
+            bucket
+                .projects
+                .retain(|_, ps| now.duration_since(ps.last_event_at).unwrap_or_default() < PROJECT_PRUNE_AFTER);
             let rate = bucket.ring.rate_tok_per_sec(clock);
             let tokens_5h = bucket.rotating.sum_5h(clock);
             // Anthropic 5h 롤링 윈도우 시작점(anchor) + 5h. trailing cutoff가 아니라 실제 윈도우
@@ -248,6 +257,31 @@ mod tests {
         let snap = agg.snapshot(&clock);
         let claude = snap.agents.iter().find(|a| a.kind == AgentKind::Claude).unwrap();
         assert_eq!(claude.projects[0].status, ActivityStatus::Dormant);
+    }
+
+    #[test]
+    fn dormant_session_older_than_prune_window_is_dropped() {
+        // 실기 재현 가설(2026-09-03): session_id 키가 영원히 쌓여 BLE 스냅샷이
+        // 가동 시간에 비례해 커지고, CYD 보드가 45초 안에 프레임을 다 못 받아
+        // 연결이 반복적으로 끊긴다. 오래된 세션은 맵에서 아예 사라져야 한다.
+        let clock = MockClock::new(1_000_000);
+        let mut agg = Aggregator::new();
+        agg.push(ev(AgentKind::Claude, clock.now(), "/tmp/old", "x", 100));
+        clock.advance(Duration::from_secs(6 * 3600) + Duration::from_secs(1));
+        let snap = agg.snapshot(&clock);
+        let claude = snap.agents.iter().find(|a| a.kind == AgentKind::Claude).unwrap();
+        assert_eq!(claude.projects.len(), 0, "6시간 넘게 방치된 세션은 지워져야 한다");
+    }
+
+    #[test]
+    fn dormant_session_just_under_prune_window_is_kept() {
+        let clock = MockClock::new(1_000_000);
+        let mut agg = Aggregator::new();
+        agg.push(ev(AgentKind::Claude, clock.now(), "/tmp/old", "x", 100));
+        clock.advance(Duration::from_secs(6 * 3600) - Duration::from_secs(1));
+        let snap = agg.snapshot(&clock);
+        let claude = snap.agents.iter().find(|a| a.kind == AgentKind::Claude).unwrap();
+        assert_eq!(claude.projects.len(), 1, "경계 직전이면 아직 남아있어야 한다");
     }
 
     #[test]
