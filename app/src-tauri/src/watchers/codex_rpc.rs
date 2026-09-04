@@ -35,6 +35,8 @@ pub(crate) async fn poll_rate_limits(bin: &str, cwd: &Path, quota: &CodexQuota) 
     match read_rate_limits(bin, cwd).await {
         Ok(rl) => {
             apply_rate_limits(&rl, quota);
+            // 방금 조회가 실제로 성공했다 — 이제서야 이전 실패 문구를 지울 자격이 있다.
+            *quota.last_error.lock().unwrap() = None;
             tracing::info!(
                 pct_5h = ?quota.used_pct_5h.lock().unwrap(),
                 pct_weekly = ?quota.used_pct_weekly.lock().unwrap(),
@@ -251,16 +253,20 @@ mod tests {
         assert!(quota.reset_weekly.lock().unwrap().is_some());
     }
 
-    /// 성공 응답은 이전 실패 메시지를 지워야 한다 — 안 그러면 로그인한 뒤에도
-    /// "로그인 필요" 가 카드에 남는다.
+    /// rollout 이 남긴 과거 rate_limits 는 **에러를 지우면 안 된다.** 지우면 방금
+    /// 실패한 조회의 "로그인 필요" 가 낡은 로그 한 줄에 덮여 카드에서 사라진다.
     #[test]
-    fn success_clears_previous_error() {
+    fn rollout_apply_does_not_clear_error() {
         let quota = CodexQuota::default();
         *quota.last_error.lock().unwrap() = Some("Codex 로그인 필요".to_string());
         let line = r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":12}}}}"#;
         let rl = parse_response(line, RATE_LIMITS_ID).unwrap().unwrap();
         apply_rate_limits(&rl, &quota);
-        assert_eq!(*quota.last_error.lock().unwrap(), None);
+        assert_eq!(
+            *quota.last_error.lock().unwrap(),
+            Some("Codex 로그인 필요".to_string())
+        );
+        assert_eq!(*quota.used_pct_5h.lock().unwrap(), Some(12.0));
     }
 
     /// 실제로 로그인 안 된 머신에서 받은 응답(2026-09-04).

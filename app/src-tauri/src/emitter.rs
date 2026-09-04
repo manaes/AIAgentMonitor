@@ -49,6 +49,9 @@ fn hash_snapshot(s: &Snapshot) -> u64 {
         a.quota_limit.hash(&mut h);
         a.quota_used_pct.map(|p| p.to_bits()).hash(&mut h);
         a.quota_used_pct_weekly.map(|p| p.to_bits()).hash(&mut h);
+        // 사용량 조회가 막 실패했다는 사실도 "바뀐 것"이다. 여기 빠뜨리면 %가
+        // 그대로인 동안 에러 배지가 최대 5초(unchanged 억제 창)까지 늦게 뜬다.
+        a.quota_error.hash(&mut h);
         a.projects.len().hash(&mut h);
         for p in &a.projects {
             p.path.hash(&mut h);
@@ -112,6 +115,22 @@ mod tests {
         assert!(e.should_emit(&snap1, now));
         let snap2 = Snapshot { emitted_at: now + Duration::from_millis(600), agents: vec![agent(2.0)] };
         assert!(e.should_emit(&snap2, now + Duration::from_millis(600)));
+    }
+
+    /// %는 그대로인데 조회만 실패한 순간 — 배지를 곧바로 띄우려면 이게 변화로
+    /// 잡혀야 한다(안 잡히면 unchanged 로 최대 5초 억제된다).
+    #[test]
+    fn quota_error_appearing_counts_as_a_change() {
+        let mut e = EmitGate::new(Duration::from_millis(500));
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let snap1 = Snapshot { emitted_at: now, agents: vec![agent(1.0)] };
+        assert!(e.should_emit(&snap1, now));
+
+        let mut failing = agent(1.0);
+        failing.quota_error = Some("Codex 로그인 필요".to_string());
+        let later = now + Duration::from_millis(600);
+        let snap2 = Snapshot { emitted_at: later, agents: vec![failing] };
+        assert!(e.should_emit(&snap2, later));
     }
 
     #[test]

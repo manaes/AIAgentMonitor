@@ -234,11 +234,11 @@ pub(crate) fn apply_rate_limits(rl: &RateLimits, quota: &CodexQuota) {
     if let Some(s) = &rl.secondary {
         apply_window(s, quota, true);
     }
-    // 서버가 보고한 한도를 실제로 받았다는 건 인증·연결이 멀쩡하다는 뜻이다.
-    // 이전 조회 실패 메시지가 카드에 남아 있으면 여기서 지운다.
-    if rl.primary.is_some() || rl.secondary.is_some() {
-        *quota.last_error.lock().unwrap() = None;
-    }
+    // **last_error 는 여기서 건드리지 않는다.** 이 함수는 rollout tail 도 부르는데,
+    // rollout 의 rate_limits 는 과거 턴이 남긴 값이라 "지금 조회가 되는지"에 대해
+    // 아무것도 증명하지 못한다. 그걸로 에러를 지우면 방금 실패한 능동 조회의
+    // 메시지가 낡은 로그 한 줄에 덮여 사라진다. 지우는 건 조회 성공뿐이다
+    // (codex_rpc::poll_rate_limits).
 }
 
 /// rollout을 offset부터 tail. replay_window=true(파일 최초 인지)면 5h 이내 token_count만
