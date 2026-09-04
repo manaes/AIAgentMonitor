@@ -310,6 +310,25 @@ mod tests {
         }
     }
 
+    /// 반대 방향: 조회가 **성공하면** 이전 실패 문구가 사라져야 한다. 안 그러면
+    /// `codex login` 을 마친 뒤에도 "로그인 필요" 가 카드에 계속 붙어 있다.
+    /// (rollout 이 지우면 안 되는 것과 짝이 되는 테스트 —
+    /// `rollout_apply_does_not_clear_error` 참고.)
+    #[tokio::test]
+    #[ignore = "진짜 codex app-server 를 띄운다 — 로그인된 상태에서 손으로만"]
+    async fn live_poll_clears_previous_error() {
+        let quota = CodexQuota::default();
+        *quota.last_error.lock().unwrap() = Some("이전 실패 문구".to_string());
+        let home = dirs_next::home_dir().unwrap();
+        poll_rate_limits("codex", &home, &quota).await;
+        assert_eq!(
+            *quota.last_error.lock().unwrap(),
+            None,
+            "조회 성공했는데 이전 에러가 남아 있다"
+        );
+        assert!(quota.used_pct_5h.lock().unwrap().is_some());
+    }
+
     /// 한도 자체가 안 오는 계정(API 키 등)은 조용히 성공한 척하면 안 된다.
     #[test]
     fn missing_windows_is_an_error() {
