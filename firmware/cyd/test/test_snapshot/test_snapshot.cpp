@@ -123,6 +123,22 @@ void test_wrong_type_nested_field_fails_cleanly() {
 /// `quota_error_travels_as_a_code_not_a_message`(wire.rs)와 짝이다.
 /// 맥은 실패 중에도 %를 함께 보내므로 그 값도 그대로 파싱돼야 한다
 /// (가리는 것은 파서가 아니라 화면의 몫이다 — ui_cards.cpp).
+/// `RUN_TEST` 목록에는 있었는데 **정의가 없어서 이 스위트 전체가 컴파일조차
+/// 되지 않고 있었다**(2026-09-04 발견 — 보드에 올려 돌려본 적이 없어 드러나지
+/// 않았다). 이름이 말하는 내용 그대로 채운다: antigravity 는 2, 모르는 코드는
+/// dormant 나 claude 로 뭉뚱그리지 않고 Unknown 이어야 한다.
+void test_antigravity_and_unknown_agent_kind() {
+    const char *json =
+        "{\"v\":1,\"t\":1,\"a\":["
+        "{\"k\":2,\"r\":10.5,\"t5\":1000,\"pj\":[]},"
+        "{\"k\":9,\"r\":0,\"t5\":0,\"pj\":[]}]}";
+    Snapshot snap;
+    TEST_ASSERT_TRUE(snapshotParse((const uint8_t *)json, strlen(json), snap));
+    TEST_ASSERT_EQUAL_size_t(2, snap.agentCount);
+    TEST_ASSERT_EQUAL_INT((int)SnapshotAgentKind::Antigravity, (int)snap.agents[0].kind);
+    TEST_ASSERT_EQUAL_INT((int)SnapshotAgentKind::Unknown, (int)snap.agents[1].kind);
+}
+
 void test_parses_quota_error_code() {
     const char *json =
         "{\"v\":1,\"t\":1,\"a\":[{\"k\":1,\"r\":0,\"t5\":0,\"p5\":8.0,\"pw\":35.0,\"e\":1,\"pj\":[]}]}";
