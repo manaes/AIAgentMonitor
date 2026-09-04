@@ -43,6 +43,16 @@ pub struct MirrorAgent {
     pub pw: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rw: Option<u64>,
+    /// 사용량을 못 읽고 있는 이유의 **분류 코드**(`QuotaErrorKind::code`).
+    /// 없으면 정상이라 키 자체를 생략한다 — 순수 추가 필드라 이 키를 모르는
+    /// 구버전 클라이언트는 그냥 무시하고 예전처럼 동작한다(프로토콜 버전 유지).
+    ///
+    /// %(`p5`/`pw`)는 실패 중에도 **그대로 함께 보낸다.** 여기서 빼버리면
+    /// 구버전 CYD 가 "값 없음 → 0%"로 그려(ui_cards.cpp) 낡은 값보다 더
+    /// 그럴듯하게 틀린 화면이 된다. 숨길지 말지는 이 코드를 아는 클라이언트가
+    /// 판단한다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub e: Option<u8>,
     pub pj: Vec<MirrorProject>,
 }
 
@@ -92,6 +102,7 @@ impl From<&AgentState> for MirrorAgent {
             r5: a.quota_reset_at.map(epoch_secs),
             pw: a.quota_used_pct_weekly,
             rw: a.quota_reset_at_weekly.map(epoch_secs),
+            e: a.quota_error.as_ref().map(|q| q.kind.code()),
             pj: a.projects.iter().map(MirrorProject::from).collect(),
         }
     }
@@ -157,6 +168,14 @@ mod tests {
         s
     }
 
+    /// 조회 실패 중인 스냅샷. `e` 는 값이 있을 때만 직렬화되므로, 실린 골든
+    /// 벡터가 없으면 키 이름 변경·삭제를 아무도 잡지 못한다(pw/rw 와 같은 이유).
+    fn sample_snapshot_with_quota_error() -> Snapshot {
+        let mut s = sample_snapshot();
+        s.agents[0].quota_error = Some(crate::types::QuotaError::auth("로그인 필요"));
+        s
+    }
+
     #[test]
     fn fnv1a_matches_known_vector() {
         // FNV-1a 32bit 표준 테스트 벡터
@@ -196,6 +215,38 @@ mod tests {
         assert!(json.contains("\"p5\":62"), "값이 있으면 포함: {json}");
         assert!(!json.contains("\"pw\""), "None 이면 키 자체를 생략: {json}");
         assert!(!json.contains("path"), "전체 경로는 절대 나가지 않는다: {json}");
+    }
+
+    /// 미러로는 문장이 아니라 코드만 나간다 — 한국어 문구가 BLE 프레임에
+    /// 실리기 시작하면 CYD 의 DRAM 예산과 MTU 청킹이 같이 흔들린다.
+    #[test]
+    fn quota_error_travels_as_a_code_not_a_message() {
+        let m = MirrorSnapshot::from(&sample_snapshot_with_quota_error());
+        assert_eq!(m.a[0].e, Some(1), "auth 는 1");
+
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"e\":1"), "코드가 실려야 한다: {json}");
+        assert!(!json.contains("로그인 필요"), "문장은 절대 나가지 않는다: {json}");
+        assert!(
+            json.contains("\"p5\":62"),
+            "실패 중에도 %는 함께 보낸다 — 구버전 CYD 가 값 없음을 0%로 그린다: {json}"
+        );
+    }
+
+    /// 정상일 때는 키 자체가 없어야 한다. 있으면 구버전 클라이언트가 모르는
+    /// 키를 매 프레임 받아 대역만 쓴다.
+    #[test]
+    fn omits_quota_error_key_when_healthy() {
+        let json = serde_json::to_string(&MirrorSnapshot::from(&sample_snapshot())).unwrap();
+        assert!(!json.contains("\"e\""), "정상이면 키 생략: {json}");
+    }
+
+    /// 코드값은 계약이다 — 배포된 iOS·CYD 가 이 숫자로 문구를 고르므로
+    /// 바뀌면 조용히 엉뚱한 문구가 뜬다.
+    #[test]
+    fn error_kind_codes_are_frozen() {
+        use crate::types::QuotaErrorKind::*;
+        assert_eq!((Auth.code(), Launch.code(), Timeout.code(), Other.code()), (1, 2, 3, 4));
     }
 
     #[test]

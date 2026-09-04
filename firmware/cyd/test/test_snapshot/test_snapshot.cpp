@@ -119,6 +119,38 @@ void test_wrong_type_nested_field_fails_cleanly() {
 
 // ── 에이전트 개수가 상한을 넘으면 잘라내고 truncated 를 세운다 ────────────
 
+/// 조회 실패 코드는 문장이 아니라 숫자로 온다 — 맥의
+/// `quota_error_travels_as_a_code_not_a_message`(wire.rs)와 짝이다.
+/// 맥은 실패 중에도 %를 함께 보내므로 그 값도 그대로 파싱돼야 한다
+/// (가리는 것은 파서가 아니라 화면의 몫이다 — ui_cards.cpp).
+void test_parses_quota_error_code() {
+    const char *json =
+        "{\"v\":1,\"t\":1,\"a\":[{\"k\":1,\"r\":0,\"t5\":0,\"p5\":8.0,\"pw\":35.0,\"e\":1,\"pj\":[]}]}";
+    Snapshot snap;
+    TEST_ASSERT_TRUE(snapshotParse((const uint8_t *)json, strlen(json), snap));
+    TEST_ASSERT_TRUE(snap.agents[0].hasQuotaError);
+    TEST_ASSERT_EQUAL_UINT8(1, snap.agents[0].quotaErrorCode);
+    TEST_ASSERT_EQUAL_FLOAT(8.0f, snap.agents[0].usage5hPct);
+}
+
+/// 정상이면 맥이 키를 생략한다 — 여기가 깨지면 멀쩡한 카드에 경고가 뜬다.
+void test_healthy_snapshot_has_no_quota_error() {
+    const char *json = "{\"v\":1,\"t\":1,\"a\":[{\"k\":0,\"r\":0,\"t5\":0,\"p5\":10.0,\"pj\":[]}]}";
+    Snapshot snap;
+    TEST_ASSERT_TRUE(snapshotParse((const uint8_t *)json, strlen(json), snap));
+    TEST_ASSERT_FALSE(snap.agents[0].hasQuotaError);
+}
+
+/// 코드↔문구 대응은 맥(`error_kind_codes_are_frozen`)·iOS 와 같은 계약이다.
+/// 모르는 코드도 "정상" 으로 되돌아가지 않는다.
+void test_quota_error_text_mapping() {
+    TEST_ASSERT_EQUAL_STRING("LOGIN REQUIRED", snapshotQuotaErrorText(1));
+    TEST_ASSERT_EQUAL_STRING("CLI ERROR", snapshotQuotaErrorText(2));
+    TEST_ASSERT_EQUAL_STRING("TIMEOUT", snapshotQuotaErrorText(3));
+    TEST_ASSERT_EQUAL_STRING("QUOTA ERROR", snapshotQuotaErrorText(4));
+    TEST_ASSERT_EQUAL_STRING("QUOTA ERROR", snapshotQuotaErrorText(99));
+}
+
 void test_agents_beyond_cap_are_truncated_not_failed() {
     String json = "{\"v\":1,\"t\":1,\"a\":[";
     for (size_t i = 0; i < SNAPSHOT_MAX_AGENTS + 2; i++) {
@@ -143,6 +175,9 @@ void setup() {
     RUN_TEST(test_wrong_type_nested_field_fails_cleanly);
     RUN_TEST(test_antigravity_and_unknown_agent_kind);
     RUN_TEST(test_agents_beyond_cap_are_truncated_not_failed);
+    RUN_TEST(test_parses_quota_error_code);
+    RUN_TEST(test_healthy_snapshot_has_no_quota_error);
+    RUN_TEST(test_quota_error_text_mapping);
     UNITY_END();
 }
 

@@ -99,7 +99,28 @@ struct SnapshotAgent {
 
     bool hasWeeklyResetAt = false;      // wire.rs `rw`
     uint64_t resetWeeklyEpochSec = 0;   // epoch 초
+
+    /// wire.rs `e` — 맥이 사용량을 **지금 못 읽고 있는** 이유의 분류 코드.
+    ///
+    /// 맥은 문장이 아니라 코드만 보낸다. 이 구조체는 전역 `Transport` 안에
+    /// **값으로** 들어가 DRAM(.bss)에 고정으로 잡히므로(이 파일 상단의
+    /// `dram0_0_seg overflowed` 실측 주석 참고) `String` 을 여기 두면 그 예산을
+    /// 다시 건드린다 — 2바이트로 끝낸다. 문구는 `ui_cards.cpp` 가 고른다.
+    ///
+    /// **중요**: 이 값이 서 있으면 `usage5hPct`/`usageWeeklyPct` 는 마지막으로
+    /// 받아둔 낡은 값이다. 맥이 실패 중에도 %를 함께 보내주는 것은 이 키를
+    /// 모르는 **구버전 펌웨어**가 "값 없음 → 0%" 로 그리는 것보다는 낫기
+    /// 때문이지(ui_cards.cpp), 그 숫자가 지금 유효해서가 아니다.
+    bool hasQuotaError = false;
+    uint8_t quotaErrorCode = 0;         // 1=인증, 2=실행 실패, 3=타임아웃, 4=기타
 };
+
+/// `SnapshotAgent::quotaErrorCode` → 카드에 띄울 짧은 **영문** 문구.
+/// (이 펌웨어에는 한글 글리프 폰트가 없다 — .cpp 의 구현 주석 참고.)
+/// 코드값은 맥의 `QuotaErrorKind::code`(types.rs)와 묶인 계약이라 바뀌지 않는다.
+/// 모르는 코드도 "정상" 으로 되돌리지 않는다 — 맥이 새 종류를 추가했을 뿐이지
+/// 못 읽고 있다는 사실은 그대로다.
+const char *snapshotQuotaErrorText(uint8_t code);
 
 /// `MirrorSnapshot`(wire.rs) 전체 (초경량 카드 전용 모델, 약 180바이트).
 struct Snapshot {

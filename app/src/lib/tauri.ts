@@ -31,6 +31,8 @@ export type ProjectActivity = {
   prompt_preview: string;
 };
 
+export type QuotaErrorKind = "auth" | "launch" | "timeout" | "other";
+
 export type AgentState = {
   kind: AgentKind;
   rate_tok_per_sec: number;
@@ -41,7 +43,8 @@ export type AgentState = {
   quota_reset_at_weekly: { secs_since_epoch: number } | null;
   quota_used_pct_weekly: number | null;
   // 사용량을 못 읽고 있는 이유(로그인 안 됨, CLI 없음 등). null 이면 정상.
-  quota_error: string | null;
+  // kind 는 미러(iOS/CYD)로 나가는 분류, message 는 데스크톱에 띄우는 문장이다.
+  quota_error: { kind: QuotaErrorKind; message: string } | null;
   projects: ProjectActivity[];
 };
 

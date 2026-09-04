@@ -39,9 +39,9 @@ pub struct QuotaState {
     /// lib.rs의 주기 자동 동기화가 "안전망으로 /usage 를 부를지"를
     /// 판단하는 기준이다 — `is_stale` 문서 참고.
     last_updated: Mutex<Option<SystemTime>>,
-    /// 마지막 `/usage` 조회가 실패한 이유. 성공하면 지운다 — 카드의 프로젝트 줄
-    /// 아래에 그대로 표시된다(2026-09-04).
-    pub last_error: Mutex<Option<String>>,
+    /// 마지막 `/usage` 조회가 실패한 이유. 성공하면 지운다.
+    /// 데스크톱 카드에는 문장이, 미러에는 `kind` 코드가 나간다(2026-09-04).
+    pub last_error: Mutex<Option<crate::types::QuotaError>>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

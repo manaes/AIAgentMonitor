@@ -71,4 +71,40 @@ final class MirrorSnapshotTests: XCTestCase {
         )
         XCTAssertEqual(ActivityStatusCode(code: 2), .dormant, "2 는 여전히 dormant 다")
     }
+
+    /// 조회 실패 코드는 문장이 아니라 숫자로 온다 — Rust 쪽
+    /// `quota_error_travels_as_a_code_not_a_message` 와 짝이다.
+    func testDecodesQuotaErrorCode() throws {
+        let json = #"{"v":1,"t":1,"a":[{"k":1,"r":0,"t5":0,"p5":8.0,"pw":35.0,"e":1,"pj":[]}]}"#
+        let snap = try JSONDecoder().decode(MirrorSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snap.a[0].quotaError, .auth)
+        XCTAssertEqual(snap.a[0].quotaError?.displayText, "로그인 필요")
+        // 맥은 실패 중에도 %를 함께 보낸다(구버전 CYD 호환) — 숨길지는 화면이 정한다.
+        XCTAssertEqual(snap.a[0].usedPct5h, 8.0)
+    }
+
+    /// 정상일 때 맥이 키를 생략하므로 nil 이어야 한다. 여기가 깨지면
+    /// 멀쩡한 카드에 경고가 뜬다.
+    func testHealthyAgentHasNoQuotaError() throws {
+        let json = #"{"v":1,"t":1,"a":[{"k":0,"r":0,"t5":0,"p5":10.0,"pj":[]}]}"#
+        let snap = try JSONDecoder().decode(MirrorSnapshot.self, from: Data(json.utf8))
+        XCTAssertNil(snap.a[0].quotaError)
+    }
+
+    /// 맥이 새 종류를 추가해도 "정상"으로 되돌아가면 안 된다 — 모르는 코드도
+    /// "읽을 수 없다"는 사실만은 그대로 보여준다.
+    func testUnknownQuotaErrorCodeStillShowsFailure() throws {
+        let json = #"{"v":1,"t":1,"a":[{"k":0,"r":0,"t5":0,"e":99,"pj":[]}]}"#
+        let snap = try JSONDecoder().decode(MirrorSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snap.a[0].quotaError, .unknown)
+        XCTAssertEqual(snap.a[0].quotaError?.displayText, "한도 조회 실패")
+    }
+
+    /// 코드↔의미 대응은 Rust 의 `error_kind_codes_are_frozen` 과 같은 계약이다.
+    func testQuotaErrorCodeMappingIsFrozen() {
+        XCTAssertEqual(QuotaErrorKindCode(code: 1), .auth)
+        XCTAssertEqual(QuotaErrorKindCode(code: 2), .launch)
+        XCTAssertEqual(QuotaErrorKindCode(code: 3), .timeout)
+        XCTAssertEqual(QuotaErrorKindCode(code: 4), .other)
+    }
 }

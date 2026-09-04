@@ -67,6 +67,10 @@ bool parseAgent(JsonObjectConst obj, SnapshotAgent &out) {
     out.hasWeeklyResetAt = obj["rw"].is<uint64_t>();
     out.resetWeeklyEpochSec = out.hasWeeklyResetAt ? obj["rw"].as<uint64_t>() : 0;
 
+    // 정상이면 맥이 키 자체를 생략한다(wire.rs 의 skip_serializing_if).
+    out.hasQuotaError = obj["e"].is<uint8_t>();
+    out.quotaErrorCode = out.hasQuotaError ? obj["e"].as<uint8_t>() : 0;
+
     return true;
 }
 
@@ -103,4 +107,17 @@ bool snapshotParse(const uint8_t *json, size_t len, Snapshot &out) {
 
     out = result;
     return true;
+}
+
+// **영문만 쓴다.** 이 화면의 라벨은 전부 `lv_font_montserrat_14/16`
+// (ui_cards.cpp)이고 이 펌웨어에는 한글 글리프가 들어 있는 폰트가 없다 —
+// 한국어를 넣으면 렌더가 안 되고 네모로 깨진다. 맥·iOS 는 각자 한국어 문구를
+// 고르고(코드만 공유한다), 여기서는 짧은 영문으로 320px 카드 폭에 맞춘다.
+const char *snapshotQuotaErrorText(uint8_t code) {
+    switch (code) {
+        case 1: return "LOGIN REQUIRED";
+        case 2: return "CLI ERROR";
+        case 3: return "TIMEOUT";
+        default: return "QUOTA ERROR";  // 4(기타) 및 이 펌웨어가 모르는 코드
+    }
 }

@@ -2,10 +2,11 @@ import MirrorFormat
 import SnapKit
 import UIKit
 
-/// `QuotaBar.svelte` 이식. 세 가지 표시 상태를 가진다.
+/// `QuotaBar.svelte` 이식. 네 가지 표시 상태를 가진다.
 /// 1) 동기화 후: 5h 바 (+ 주간 값이 있으면 주간 바)
 /// 2) 리셋 직후: 5h 를 0% 로
 /// 3) 동기화 전: 바 대신 "5h 토큰: N · 동기화 전"
+/// 4) 조회 실패(unreadable): 바 대신 "5h 토큰: N · 한도 조회 실패"
 public final class QuotaBarView: UIView {
 
     private let fiveRow = PercentRow(title: "5h")
@@ -44,8 +45,19 @@ public final class QuotaBarView: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) 는 쓰지 않는다") }
 
-    public func configure(tokens5h: UInt32, autoPct: Float?, weeklyPct: Float?, isReset5h: Bool) {
-        let pct = QuotaDisplay.displayPercent(autoPct: autoPct, isReset: isReset5h)
+    /// - Parameter unreadable: 사용량 조회가 실패 중이면 true → %와 막대를 숨긴다.
+    ///   맥은 실패 중에도 마지막 %를 함께 보내주지만(구버전 CYD 호환), 그 숫자는
+    ///   지금 상태를 말해주지 못하므로 낡은 값을 멀쩡한 척 보여주지 않는다.
+    ///   로컬 토큰 수는 서버 한도가 아니라 계속 유효하므로 그건 남긴다.
+    public func configure(
+        tokens5h: UInt32,
+        autoPct: Float?,
+        weeklyPct: Float?,
+        isReset5h: Bool,
+        unreadable: Bool = false
+    ) {
+        let pct = unreadable ? nil : QuotaDisplay.displayPercent(autoPct: autoPct, isReset: isReset5h)
+        let weeklyPct = unreadable ? nil : weeklyPct
 
         if pct != nil || weeklyPct != nil {
             fallbackLabel.isHidden = true
@@ -67,7 +79,8 @@ public final class QuotaBarView: UIView {
             weeklyRow.isHidden = true
             fallbackLabel.isHidden = false
             // 원본은 tokens_in + tokens_out 을 합쳐 보여주는데, 전송 DTO 의 t5 가 이미 그 합이다.
-            fallbackLabel.text = "5h 토큰: \(MirrorFormat.tokensTotal(tokens5h)) · 동기화 전"
+            let suffix = unreadable ? "한도 조회 실패" : "동기화 전"
+            fallbackLabel.text = "5h 토큰: \(MirrorFormat.tokensTotal(tokens5h)) · \(suffix)"
         }
     }
 }

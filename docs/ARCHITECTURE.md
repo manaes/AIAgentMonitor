@@ -10,6 +10,7 @@
 | Claude quota | Anthropic 응답 헤더 | 로컬 프록시 `127.0.0.1:4319`를 경유한 자동/수동 ping |
 | Codex | `~/.codex/sessions/**/rollout-*.jsonl` | 최신 rollout을 2초마다 탐색·tail |
 | Codex quota | `codex app-server` 의 `account/rateLimits/read` | 유휴 시에도 10분마다 조회(토큰 소모 없음) |
+| 한도 조회 실패 | 각 조회 경로의 실패 사유 | 데스크톱은 문장, 미러(iOS·CYD)는 1바이트 코드(`MirrorAgent.e`) |
 | Codex 구버전 | `~/.codex/state_5.sqlite` | `threads.rollout_path`를 읽는 호환 폴백 |
 | Antigravity | 로컬 대화 DB와 `agy -p /usage` | 파일 감시 및 설정 가능한 주기 polling |
 

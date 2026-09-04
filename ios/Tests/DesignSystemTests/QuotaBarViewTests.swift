@@ -70,4 +70,22 @@ final class QuotaBarViewTests: XCTestCase {
         v.layoutIfNeeded()
         XCTAssertEqual(v.fiveFillRatio ?? -1, 1.0, accuracy: 0.02)
     }
+
+    /// 조회 실패 중에는 값이 있어도 %·막대를 숨기고 로컬 토큰 수만 남긴다.
+    /// 로컬 토큰은 서버 한도가 아니라 직접 센 값이라 계속 유효하다.
+    func testUnreadableHidesBarsAndSaysWhy() {
+        let v = QuotaBarView()
+        v.configure(tokens5h: 48210, autoPct: 62.4, weeklyPct: 31.5, isReset5h: false, unreadable: true)
+        XCTAssertNil(v.fivePercentText)
+        XCTAssertNil(v.weeklyPercentText)
+        XCTAssertEqual(v.fallbackText, "5h 토큰: 48.2k · 한도 조회 실패")
+    }
+
+    /// unreadable 기본값이 false 라 기존 호출부는 그대로 동작해야 한다.
+    func testUnreadableDefaultsToFalse() {
+        let v = QuotaBarView()
+        v.configure(tokens5h: 48210, autoPct: 62.4, weeklyPct: nil, isReset5h: false)
+        XCTAssertEqual(v.fivePercentText, "62%")
+        XCTAssertNil(v.fallbackText)
+    }
 }

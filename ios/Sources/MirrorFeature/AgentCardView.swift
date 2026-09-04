@@ -15,6 +15,7 @@ public final class AgentCardView: UIView {
     private let unitLabel = UILabel()
     private let projectLabel = UILabel()
     private let countdownLabel = UILabel()
+    private let quotaErrorLabel = UILabel()
     private let quotaBarView = QuotaBarView()
 
     public var nameText: String? { nameLabel.text }
@@ -22,6 +23,8 @@ public final class AgentCardView: UIView {
     public var rateText: String? { rateLabel.text }
     public var projectText: String? { projectLabel.text }
     public var countdownText: String? { countdownLabel.isHidden ? nil : countdownLabel.text }
+    /// 사용량을 못 읽는 중일 때 뜨는 한 줄. 정상이면 nil.
+    public var quotaErrorText: String? { quotaErrorLabel.isHidden ? nil : quotaErrorLabel.text }
     public var dotColor: UIColor? { dot.color }
     /// autoPct/weeklyPct 전달이 뒤바뀌어도 컴파일은 되므로(둘 다 Float?), 실제 표시값을
     /// 검증할 수 있도록 다른 테스트 창구와 같은 스타일(읽기 전용 String?)로 노출한다.
@@ -56,9 +59,16 @@ public final class AgentCardView: UIView {
         countdownLabel.font = Typography.countdown
         countdownLabel.textColor = Palette.countdown
         countdownLabel.textAlignment = .right
+        // 맥 카드의 `.quota-error` 배지와 같은 자리·같은 색(주황). 폭이 좁은
+        // 폰이라 줄바꿈 대신 잘라낸다 — 코드가 고른 문구는 원래 짧다.
+        quotaErrorLabel.font = Typography.label
+        quotaErrorLabel.textColor = Palette.countdown
+        quotaErrorLabel.numberOfLines = 1
+        quotaErrorLabel.lineBreakMode = .byTruncatingTail
+        quotaErrorLabel.isHidden = true
 
         [dot, nameLabel, modelLabel, rateLabel, unitLabel,
-         projectLabel, countdownLabel, quotaBarView].forEach(addSubview)
+         projectLabel, countdownLabel, quotaErrorLabel, quotaBarView].forEach(addSubview)
 
         dot.snp.makeConstraints { make in
             make.leading.equalToSuperview().offset(12)
@@ -99,10 +109,27 @@ public final class AgentCardView: UIView {
             make.centerY.equalTo(projectLabel)
             make.leading.greaterThanOrEqualTo(projectLabel.snp.trailing).offset(8)
         }
+        quotaErrorLabel.snp.makeConstraints { make in
+            make.leading.equalToSuperview().offset(12)
+            make.trailing.equalToSuperview().offset(-12)
+            make.top.equalTo(projectLabel.snp.bottom).offset(6)
+        }
+        // 기본(정상) 배치. 에러가 있을 때만 configure() 에서 배지 아래로 옮긴다 —
+        // 숨긴 라벨은 자리를 비켜주지 않으므로(스택뷰가 아니다) 앵커를 바꾼다.
         quotaBarView.snp.makeConstraints { make in
             make.leading.equalToSuperview().offset(12)
             make.trailing.equalToSuperview().offset(-12)
             make.top.equalTo(projectLabel.snp.bottom).offset(6)
+            make.bottom.equalToSuperview().offset(-10)
+        }
+    }
+
+    /// 배지 유무에 따라 사용량 바의 위쪽 앵커를 갈아끼운다.
+    private func relayoutQuotaBar(below errorBadge: Bool) {
+        quotaBarView.snp.remakeConstraints { make in
+            make.leading.equalToSuperview().offset(12)
+            make.trailing.equalToSuperview().offset(-12)
+            make.top.equalTo(errorBadge ? quotaErrorLabel.snp.bottom : projectLabel.snp.bottom).offset(6)
             make.bottom.equalToSuperview().offset(-10)
         }
     }
@@ -132,7 +159,22 @@ public final class AgentCardView: UIView {
         projectLabel.text = primary?.name ?? "no active session"
         rateLabel.text = MirrorFormat.tokensPerSec(agent.ratePerSec)
 
-        if let resetAt = agent.r5 {
+        let quotaError = agent.quotaError
+        if let quotaError {
+            quotaErrorLabel.isHidden = false
+            quotaErrorLabel.text = "⚠ \(quotaError.displayText)"
+        } else {
+            quotaErrorLabel.isHidden = true
+            quotaErrorLabel.text = nil
+        }
+        relayoutQuotaBar(below: quotaError != nil)
+
+        // 카운트다운도 %와 같은 (낡은) 스냅샷에서 나온다 — %만 가리고 이걸
+        // 남기면 앞뒤가 안 맞으므로 함께 숨긴다(맥 AgentCard.svelte 와 동일).
+        if quotaError != nil {
+            countdownLabel.isHidden = true
+            countdownLabel.text = nil
+        } else if let resetAt = agent.r5 {
             countdownLabel.isHidden = false
             countdownLabel.text = MirrorFormat.countdown(resetAt: resetAt, now: now)
         } else if let resetWeeklyAt = agent.rw {
@@ -147,7 +189,8 @@ public final class AgentCardView: UIView {
             tokens5h: agent.tokens5h,
             autoPct: agent.usedPct5h,
             weeklyPct: agent.usedPctWeekly,
-            isReset5h: QuotaDisplay.isReset5h(resetAt: agent.r5, now: now)
+            isReset5h: QuotaDisplay.isReset5h(resetAt: agent.r5, now: now),
+            unreadable: quotaError != nil
         )
     }
 }

@@ -26,8 +26,8 @@ pub struct CodexQuota {
     pub used_pct_weekly: Mutex<Option<f32>>,
     pub reset_weekly: Mutex<Option<SystemTime>>,
     /// 마지막 능동 조회가 실패한 이유(로그인 안 됨 등). 성공하면 None으로 지운다.
-    /// 카드의 프로젝트 줄 아래에 그대로 표시된다.
-    pub last_error: Mutex<Option<String>>,
+    /// 데스크톱 카드에는 문장이, 미러에는 `kind` 코드가 나간다.
+    pub last_error: Mutex<Option<crate::types::QuotaError>>,
 }
 
 #[derive(Deserialize)]

@@ -15,6 +15,7 @@ enum Fixture {
         r5: UInt64? = nil,
         pw: Float? = nil,
         rw: UInt64? = nil,
+        e: UInt8? = nil,
         projects: [(id: UInt32, n: String, m: String, r: Float, t: UInt64, s: UInt8)] = []
     ) -> MirrorAgent {
         func opt<T: CustomStringConvertible>(_ key: String, _ v: T?) -> String {
@@ -25,7 +26,7 @@ enum Fixture {
         }.joined(separator: ",")
         let json = """
         {"v":1,"t":0,"a":[{"k":\(k),"r":\(r),"t5":\(t5)\
-        \(opt("p5", p5))\(opt("r5", r5))\(opt("pw", pw))\(opt("rw", rw))\
+        \(opt("p5", p5))\(opt("r5", r5))\(opt("pw", pw))\(opt("rw", rw))\(opt("e", e))\
         ,"pj":[\(pj)]}]}
         """
         // swiftlint:disable:next force_try
@@ -157,5 +158,30 @@ final class AgentCardViewTests: XCTestCase {
             v.rateToUnitGap, 8.72, accuracy: 0.34,
             "4pt 만 두면 맥보다 약 4.7pt 좁다 — 공백 하나가 렌더링된다는 사실이 빠진 것이다"
         )
+    }
+
+    /// 조회 실패 중이면 경고 한 줄이 뜨고, %·리셋 카운트다운은 사라져야 한다.
+    /// 맥이 실패 중에도 마지막 %를 함께 보내주므로(구버전 CYD 호환) 여기서
+    /// 가리지 않으면 낡은 숫자가 멀쩡한 척 남는다.
+    func testQuotaErrorHidesPercentsAndCountdown() {
+        let v = AgentCardView()
+        v.configure(agent: Fixture.agent(k: 1, p5: 8, r5: 4_000_000_000, pw: 35, e: 1), now: now)
+
+        XCTAssertEqual(v.quotaErrorText, "⚠ 로그인 필요")
+        XCTAssertNil(v.quotaFivePercentText, "못 읽는 한도의 %를 그대로 두면 거짓말이 된다")
+        XCTAssertNil(v.quotaWeeklyPercentText)
+        XCTAssertNil(v.countdownText, "카운트다운도 같은 낡은 스냅샷에서 나온다")
+        XCTAssertEqual(v.quotaFallbackText, "5h 토큰: 3.0k · 한도 조회 실패")
+    }
+
+    /// 정상이면 예전 그대로여야 한다 — 경고가 없고 %와 카운트다운이 보인다.
+    func testHealthyAgentKeepsPercentsAndCountdown() {
+        let v = AgentCardView()
+        v.configure(agent: Fixture.agent(k: 1, p5: 8, r5: 4_000_000_000, pw: 35), now: now)
+
+        XCTAssertNil(v.quotaErrorText)
+        XCTAssertEqual(v.quotaFivePercentText, "8%")
+        XCTAssertEqual(v.quotaWeeklyPercentText, "35%")
+        XCTAssertNotNil(v.countdownText)
     }
 }

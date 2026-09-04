@@ -103,7 +103,7 @@
   <!-- 사용량을 못 읽는 중이면 이유를 그대로 띄운다. 이게 없으면 "안 쓰는 중"과
        "로그인이 풀려서 못 읽는 중"이 둘 다 0%로 똑같이 보인다. -->
   {#if agent.quota_error}
-    <div class="quota-error" title={agent.quota_error}>⚠ {agent.quota_error}</div>
+    <div class="quota-error" title={agent.quota_error.message}>⚠ {agent.quota_error.message}</div>
   {/if}
 
   <QuotaBar tokens_5h={agent.tokens_5h} auto_pct={agent.quota_used_pct} weekly_pct={agent.quota_used_pct_weekly} reset_5h={isReset5h} unreadable={!!agent.quota_error} />

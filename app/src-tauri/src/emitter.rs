@@ -127,7 +127,7 @@ mod tests {
         assert!(e.should_emit(&snap1, now));
 
         let mut failing = agent(1.0);
-        failing.quota_error = Some("Codex 로그인 필요".to_string());
+        failing.quota_error = Some(crate::types::QuotaError::auth("Codex 로그인 필요"));
         let later = now + Duration::from_millis(600);
         let snap2 = Snapshot { emitted_at: later, agents: vec![failing] };
         assert!(e.should_emit(&snap2, later));

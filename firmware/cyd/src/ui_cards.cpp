@@ -288,6 +288,29 @@ void uiCardsUpdate(const Transport &transport, size_t agentIndexToUpdate) {
         lv_label_set_text(cw.rateLabel, rateBuf);
 #endif
 
+        // 사용량을 지금 못 읽고 있으면 %·막대를 통째로 감추고 이유만 남긴다.
+        //
+        // 맥은 실패 중에도 마지막 %를 함께 보내준다(wire.rs `e` 주석) — 이 키를
+        // 모르는 구버전 펌웨어가 "값 없음 → 0%"(아래 pct5h 폴백)로 그리는 것보다
+        // 낡은 값이라도 보이는 편이 덜 틀리기 때문이지, 그 숫자가 지금 유효해서가
+        // 아니다. 이 키를 아는 우리는 아예 가린다.
+        //
+        // 이 블록이 이 함수의 마지막이라 early return 이 안전하다 — 뒤에 정리할
+        // 코드가 없다.
+        if (ag.hasQuotaError) {
+            lv_label_set_text(cw.info5hLabel, snapshotQuotaErrorText(ag.quotaErrorCode));
+            lv_obj_set_style_text_color(cw.info5hLabel, lv_color_hex(0xff9f0a), 0);  // 주황
+            lv_obj_clear_flag(cw.row5h, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(cw.pct5hLabel, "");
+            lv_obj_add_flag(cw.bar5h, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(cw.rowWk, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(cw.barWk, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+        // 정상 복귀 시 위에서 바꾼 색을 되돌린다 — 안 그러면 한 번 실패한 카드의
+        // "5h (…)" 라벨이 계속 주황으로 남는다.
+        lv_obj_set_style_text_color(cw.info5hLabel, lv_color_hex(0x8e8e93), 0);
+
         // 5시간 쿼터 (사용량 표시)
         float pct5h = ag.has5hUsagePct ? ag.usage5hPct : 0.0f;
         if (pct5h > 100.0f) pct5h = 100.0f;

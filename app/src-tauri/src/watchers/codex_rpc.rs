@@ -14,6 +14,7 @@
 //! 실제 요청 순서를 지켜야 하고, 응답 사이사이에 서버 알림(`remoteControl/status/changed`
 //! 등)이 섞여 나오므로 **id 로 골라 읽어야** 한다.
 
+use crate::types::QuotaError;
 use crate::watchers::codex::{apply_rate_limits, CodexQuota, RateLimits, Window};
 use std::path::Path;
 use std::process::Stdio;
@@ -44,7 +45,7 @@ pub(crate) async fn poll_rate_limits(bin: &str, cwd: &Path, quota: &CodexQuota) 
             );
         }
         Err(e) => {
-            tracing::warn!(%e, "codex quota 동기화 실패");
+            tracing::warn!(message = %e.message, "codex quota 동기화 실패");
             *quota.last_error.lock().unwrap() = Some(e);
         }
     }
@@ -52,7 +53,7 @@ pub(crate) async fn poll_rate_limits(bin: &str, cwd: &Path, quota: &CodexQuota) 
 
 /// `codex app-server` 를 띄워 한도 스냅샷 한 번만 받아온다.
 /// Err 는 그대로 사용자에게 보여줄 한국어 문장이다.
-pub(crate) async fn read_rate_limits(bin: &str, cwd: &Path) -> Result<RateLimits, String> {
+pub(crate) async fn read_rate_limits(bin: &str, cwd: &Path) -> Result<RateLimits, QuotaError> {
     let mut cmd = Command::new(bin);
     cmd.args(["app-server", "--listen", "stdio://"])
         .current_dir(cwd)
@@ -62,11 +63,11 @@ pub(crate) async fn read_rate_limits(bin: &str, cwd: &Path) -> Result<RateLimits
 
     let mut child = crate::hide_console_window(&mut cmd)
         .spawn()
-        .map_err(|e| format!("codex 실행 실패 — 설치돼 있나요? ({e})"))?;
+        .map_err(|e| QuotaError::launch(format!("codex 실행 실패 — 설치돼 있나요? ({e})")))?;
 
     let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         let _ = child.kill().await;
-        return Err("codex app-server 파이프를 열지 못했습니다".to_string());
+        return Err(QuotaError::launch("codex app-server 파이프를 열지 못했습니다"));
     };
 
     let mut lines = BufReader::new(stdout).lines();
@@ -78,39 +79,39 @@ pub(crate) async fn read_rate_limits(bin: &str, cwd: &Path) -> Result<RateLimits
 
     match outcome {
         Ok(result) => result,
-        Err(_) => Err("codex app-server 응답 시간 초과".to_string()),
+        Err(_) => Err(QuotaError::timeout("codex app-server 응답 시간 초과")),
     }
 }
 
 async fn converse(
     stdin: &mut ChildStdin,
     lines: &mut tokio::io::Lines<BufReader<ChildStdout>>,
-) -> Result<RateLimits, String> {
+) -> Result<RateLimits, QuotaError> {
     for msg in [init_request(), initialized_notification(), rate_limits_request()] {
         stdin
             .write_all(msg.as_bytes())
             .await
-            .map_err(|e| format!("codex app-server 쓰기 실패: {e}"))?;
+            .map_err(|e| QuotaError::other(format!("codex app-server 쓰기 실패: {e}")))?;
         stdin
             .write_all(b"\n")
             .await
-            .map_err(|e| format!("codex app-server 쓰기 실패: {e}"))?;
+            .map_err(|e| QuotaError::other(format!("codex app-server 쓰기 실패: {e}")))?;
     }
     stdin
         .flush()
         .await
-        .map_err(|e| format!("codex app-server 쓰기 실패: {e}"))?;
+        .map_err(|e| QuotaError::other(format!("codex app-server 쓰기 실패: {e}")))?;
 
     while let Some(line) = lines
         .next_line()
         .await
-        .map_err(|e| format!("codex app-server 읽기 실패: {e}"))?
+        .map_err(|e| QuotaError::other(format!("codex app-server 읽기 실패: {e}")))?
     {
         if let Some(result) = parse_response(&line, RATE_LIMITS_ID) {
             return result;
         }
     }
-    Err("codex app-server 가 응답 없이 종료됐습니다".to_string())
+    Err(QuotaError::other("codex app-server 가 응답 없이 종료됐습니다"))
 }
 
 fn init_request() -> String {
@@ -145,7 +146,7 @@ fn rate_limits_request() -> String {
 
 /// 한 줄을 보고 **우리 id 의 응답이면** 결과를, 아니면(알림·다른 응답·파싱 불가)
 /// None 을 준다. None 이면 호출자는 계속 읽는다.
-fn parse_response(line: &str, id: u64) -> Option<Result<RateLimits, String>> {
+fn parse_response(line: &str, id: u64) -> Option<Result<RateLimits, QuotaError>> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     if v.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
         return None;
@@ -159,7 +160,7 @@ fn parse_response(line: &str, id: u64) -> Option<Result<RateLimits, String>> {
     }
     match v.get("result") {
         Some(result) => Some(parse_rate_limits(result)),
-        None => Some(Err("codex app-server 응답에 result 가 없습니다".to_string())),
+        None => Some(Err(QuotaError::other("codex app-server 응답에 result 가 없습니다"))),
     }
 }
 
@@ -167,7 +168,7 @@ fn parse_response(line: &str, id: u64) -> Option<Result<RateLimits, String>> {
 ///
 /// `rateLimits` 가 하위호환 단일 버킷 뷰이고, 비어 있으면 멀티버킷
 /// (`rateLimitsByLimitId`) 의 `codex` 버킷을 본다.
-fn parse_rate_limits(result: &serde_json::Value) -> Result<RateLimits, String> {
+fn parse_rate_limits(result: &serde_json::Value) -> Result<RateLimits, QuotaError> {
     let snapshot = result
         .get("rateLimits")
         .filter(|v| has_window(v))
@@ -180,7 +181,9 @@ fn parse_rate_limits(result: &serde_json::Value) -> Result<RateLimits, String> {
 
     let Some(snapshot) = snapshot else {
         // 로그인은 됐는데 한도 정보가 없는 경우(예: API 키 사용 — 플랜 한도가 아예 없음).
-        return Err("Codex 계정에 보고된 사용 한도가 없습니다 (ChatGPT 플랜 로그인인가요?)".to_string());
+        return Err(QuotaError::other(
+            "Codex 계정에 보고된 사용 한도가 없습니다 (ChatGPT 플랜 로그인인가요?)",
+        ));
     };
 
     Ok(RateLimits {
@@ -213,15 +216,15 @@ fn window_from(v: Option<&serde_json::Value>) -> Option<Window> {
 
 /// 백엔드 영문 오류를 카드에 띄울 한 줄로. 로그인 문제는 해결 방법까지 붙인다 —
 /// 카드만 보고 `codex login` 을 떠올릴 수 있어야 한다.
-fn friendly_error(msg: &str) -> String {
+fn friendly_error(msg: &str) -> QuotaError {
     let lowered = msg.to_ascii_lowercase();
     if lowered.contains("authentication required") || lowered.contains("not logged in") {
-        return "Codex 로그인 필요 — 터미널에서 `codex login`".to_string();
+        return QuotaError::auth("Codex 로그인 필요 — 터미널에서 `codex login`");
     }
     if lowered.contains("method not found") {
-        return "이 codex 버전은 한도 조회 RPC를 지원하지 않습니다 (codex update)".to_string();
+        return QuotaError::other("이 codex 버전은 한도 조회 RPC를 지원하지 않습니다 (codex update)");
     }
-    format!("Codex 한도 조회 실패: {msg}")
+    QuotaError::other(format!("Codex 한도 조회 실패: {msg}"))
 }
 
 #[cfg(test)]
@@ -258,12 +261,12 @@ mod tests {
     #[test]
     fn rollout_apply_does_not_clear_error() {
         let quota = CodexQuota::default();
-        *quota.last_error.lock().unwrap() = Some("Codex 로그인 필요".to_string());
+        *quota.last_error.lock().unwrap() = Some(QuotaError::auth("Codex 로그인 필요"));
         let line = r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":12}}}}"#;
         let rl = parse_response(line, RATE_LIMITS_ID).unwrap().unwrap();
         apply_rate_limits(&rl, &quota);
         assert_eq!(
-            *quota.last_error.lock().unwrap(),
+            quota.last_error.lock().unwrap().as_ref().map(|e| e.message.clone()),
             Some("Codex 로그인 필요".to_string())
         );
         assert_eq!(*quota.used_pct_5h.lock().unwrap(), Some(12.0));
@@ -274,7 +277,8 @@ mod tests {
     fn auth_error_becomes_actionable_message() {
         let line = r#"{"error":{"code":-32600,"message":"codex account authentication required to read rate limits"},"id":2}"#;
         let err = parse_response(line, RATE_LIMITS_ID).unwrap().unwrap_err();
-        assert_eq!(err, "Codex 로그인 필요 — 터미널에서 `codex login`");
+        assert_eq!(err.message, "Codex 로그인 필요 — 터미널에서 `codex login`");
+        assert_eq!(err.kind, crate::types::QuotaErrorKind::Auth, "미러로는 이 분류가 나간다");
     }
 
     #[test]
@@ -301,10 +305,11 @@ mod tests {
                 assert!(rl.primary.is_some() || rl.secondary.is_some());
             }
             Err(e) => {
-                println!("err={e}");
+                println!("err={}", e.message);
                 assert!(
-                    e.contains("로그인") || e.contains("사용 한도가 없습니다"),
-                    "프로토콜이 아니라 다른 데서 깨졌다: {e}"
+                    e.message.contains("로그인") || e.message.contains("사용 한도가 없습니다"),
+                    "프로토콜이 아니라 다른 데서 깨졌다: {}",
+                    e.message
                 );
             }
         }
@@ -318,7 +323,7 @@ mod tests {
     #[ignore = "진짜 codex app-server 를 띄운다 — 로그인된 상태에서 손으로만"]
     async fn live_poll_clears_previous_error() {
         let quota = CodexQuota::default();
-        *quota.last_error.lock().unwrap() = Some("이전 실패 문구".to_string());
+        *quota.last_error.lock().unwrap() = Some(QuotaError::other("이전 실패 문구"));
         let home = dirs_next::home_dir().unwrap();
         poll_rate_limits("codex", &home, &quota).await;
         assert_eq!(

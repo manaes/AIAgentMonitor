@@ -657,20 +657,23 @@ async fn run_claude_usage_ping_inner(quota: Arc<quota_proxy::QuotaState>) {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => {
             tracing::warn!(%e, "quota 동기화(/usage) 실행 실패 (claude 미발견?)");
-            *quota.last_error.lock().unwrap() =
-                Some(format!("claude 실행 실패 — 설치돼 있나요? ({e})"));
+            *quota.last_error.lock().unwrap() = Some(types::QuotaError::launch(format!(
+                "claude 실행 실패 — 설치돼 있나요? ({e})"
+            )));
             return;
         }
         Err(_) => {
             tracing::warn!("quota 동기화(/usage) timeout");
-            *quota.last_error.lock().unwrap() = Some("claude /usage 응답 시간 초과".to_string());
+            *quota.last_error.lock().unwrap() =
+                Some(types::QuotaError::timeout("claude /usage 응답 시간 초과"));
             return;
         }
     };
     if !output.status.success() {
         tracing::warn!(status = ?output.status, "quota 동기화(/usage) 실패");
-        *quota.last_error.lock().unwrap() =
-            Some("Claude 한도 조회 실패 — 로그인 상태를 확인하세요 (`claude /login`)".to_string());
+        *quota.last_error.lock().unwrap() = Some(types::QuotaError::auth(
+            "Claude 한도 조회 실패 — 로그인 상태를 확인하세요 (`claude /login`)",
+        ));
         return;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -679,8 +682,9 @@ async fn run_claude_usage_ping_inner(quota: Arc<quota_proxy::QuotaState>) {
         // CLI 출력 포맷이 바뀌면 여기서 조용히 계속 실패할 수 있다 — 매번 로그를
         // 남겨 무음 회귀를 감지할 수 있게 한다(2026-09-03 리뷰).
         tracing::warn!(%stdout, "quota 동기화(/usage) 출력 파싱 실패 — CLI 출력 포맷이 바뀌었을 수 있다");
-        *quota.last_error.lock().unwrap() =
-            Some("claude /usage 출력을 해석하지 못했습니다 (CLI 업데이트?)".to_string());
+        *quota.last_error.lock().unwrap() = Some(types::QuotaError::other(
+            "claude /usage 출력을 해석하지 못했습니다 (CLI 업데이트?)",
+        ));
         return;
     }
     quota.apply_usage_pct(session_pct, week_pct);
