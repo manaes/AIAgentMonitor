@@ -133,6 +133,7 @@ mod tests {
                 quota_used_pct: Some(62.0),
                 quota_reset_at_weekly: None,
                 quota_used_pct_weekly: None,
+                quota_error: None,
                 projects: vec![ProjectActivity {
                     path: PathBuf::from("/Users/me/dev/foo"),
                     name: "foo".to_string(),

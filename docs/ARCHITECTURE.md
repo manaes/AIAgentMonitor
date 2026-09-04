@@ -9,6 +9,7 @@
 | Claude Code | `~/.claude/projects/**/*.jsonl` | FSEvents 감시와 시작 시 기존 이벤트 재생 |
 | Claude quota | Anthropic 응답 헤더 | 로컬 프록시 `127.0.0.1:4319`를 경유한 자동/수동 ping |
 | Codex | `~/.codex/sessions/**/rollout-*.jsonl` | 최신 rollout을 2초마다 탐색·tail |
+| Codex quota | `codex app-server` 의 `account/rateLimits/read` | 유휴 시에도 10분마다 조회(토큰 소모 없음) |
 | Codex 구버전 | `~/.codex/state_5.sqlite` | `threads.rollout_path`를 읽는 호환 폴백 |
 | Antigravity | 로컬 대화 DB와 `agy -p /usage` | 파일 감시 및 설정 가능한 주기 polling |
 

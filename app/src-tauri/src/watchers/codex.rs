@@ -17,13 +17,17 @@ use tokio::sync::mpsc;
 
 const FIVE_H: Duration = Duration::from_secs(5 * 3600);
 
-/// 서버 보고 Codex 한도 (rollout payload.rate_limits에서 캡처). lib.rs 틱이 읽어 카드에 주입.
+/// 서버 보고 Codex 한도. 두 경로가 같은 슬롯에 쓴다 — rollout tail(payload.rate_limits)과
+/// 유휴 시 능동 조회(codex_rpc::read_rate_limits). lib.rs 틱이 읽어 카드에 주입.
 #[derive(Default)]
 pub struct CodexQuota {
     pub used_pct_5h: Mutex<Option<f32>>,
     pub reset_5h: Mutex<Option<SystemTime>>,
     pub used_pct_weekly: Mutex<Option<f32>>,
     pub reset_weekly: Mutex<Option<SystemTime>>,
+    /// 마지막 능동 조회가 실패한 이유(로그인 안 됨 등). 성공하면 None으로 지운다.
+    /// 카드의 프로젝트 줄 아래에 그대로 표시된다.
+    pub last_error: Mutex<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -56,21 +60,21 @@ struct Usage {
     #[serde(default)]
     output_tokens: i64,
 }
-#[derive(Deserialize, Default)]
-struct RateLimits {
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct RateLimits {
     #[serde(default)]
-    primary: Option<Window>,
+    pub(crate) primary: Option<Window>,
     #[serde(default)]
-    secondary: Option<Window>,
+    pub(crate) secondary: Option<Window>,
 }
-#[derive(Deserialize, Default)]
-struct Window {
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct Window {
     #[serde(default)]
-    used_percent: f64,
+    pub(crate) used_percent: f64,
     #[serde(default)]
-    window_minutes: Option<i64>,
+    pub(crate) window_minutes: Option<i64>,
     #[serde(default)]
-    resets_at: i64,
+    pub(crate) resets_at: i64,
 }
 
 fn epoch(secs: i64) -> Option<SystemTime> {
@@ -223,12 +227,17 @@ fn apply_window(w: &Window, quota: &CodexQuota, is_secondary: bool) {
     }
 }
 
-fn apply_rate_limits(rl: &RateLimits, quota: &CodexQuota) {
+pub(crate) fn apply_rate_limits(rl: &RateLimits, quota: &CodexQuota) {
     if let Some(p) = &rl.primary {
         apply_window(p, quota, false);
     }
     if let Some(s) = &rl.secondary {
         apply_window(s, quota, true);
+    }
+    // 서버가 보고한 한도를 실제로 받았다는 건 인증·연결이 멀쩡하다는 뜻이다.
+    // 이전 조회 실패 메시지가 카드에 남아 있으면 여기서 지운다.
+    if rl.primary.is_some() || rl.secondary.is_some() {
+        *quota.last_error.lock().unwrap() = None;
     }
 }
 

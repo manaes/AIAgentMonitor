@@ -52,12 +52,23 @@
     return null;
   });
 
-  // 수동 동기화: Claude는 프록시 핑, Antigravity는 `agy -p /usage`를 즉시 조회한다.
+  // 수동 동기화: Claude는 프록시 핑, Codex는 app-server 한도 조회 RPC,
+  // Antigravity는 `agy -p /usage`를 즉시 조회한다.
   let syncing = $state(false);
+  const SYNC_COMMAND: Record<string, string> = {
+    claude: "sync_quota",
+    codex: "sync_codex_quota",
+    antigravity: "sync_antigravity_quota",
+  };
+  const SYNC_HINT: Record<string, string> = {
+    claude: "프록시로 실제 5h 사용량 동기화 (claude를 1회 핑). 활동 중엔 10분마다 자동 보정.",
+    codex: "codex app-server의 한도 조회 RPC로 5시간·주간 사용량을 즉시 갱신합니다 (토큰 소모 없음).",
+    antigravity: "agy /usage로 Gemini 5시간·주간 사용량을 즉시 갱신합니다.",
+  };
   async function syncQuota() {
     if (syncing) return;
     syncing = true;
-    const command = agent.kind === "antigravity" ? "sync_antigravity_quota" : "sync_quota";
+    const command = SYNC_COMMAND[agent.kind] ?? "sync_quota";
     try { await invoke(command); } catch (e) { console.error(command, e); }
     setTimeout(() => { syncing = false; }, 6000);
   }
@@ -86,18 +97,19 @@
     {/if}
   </div>
 
+  <!-- 사용량을 못 읽는 중이면 이유를 그대로 띄운다. 이게 없으면 "안 쓰는 중"과
+       "로그인이 풀려서 못 읽는 중"이 둘 다 0%로 똑같이 보인다. -->
+  {#if agent.quota_error}
+    <div class="quota-error" title={agent.quota_error}>⚠ {agent.quota_error}</div>
+  {/if}
+
   <QuotaBar tokens_5h={agent.tokens_5h} auto_pct={agent.quota_used_pct} weekly_pct={agent.quota_used_pct_weekly} reset_5h={isReset5h} />
 
-  {#if agent.kind === "claude" || agent.kind === "antigravity"}
-    <div class="sync-row">
-      <button class="inline-btn" onclick={syncQuota} disabled={syncing}
-        title={agent.kind === "antigravity"
-          ? "agy /usage로 Gemini 5시간·주간 사용량을 즉시 갱신합니다."
-          : "프록시로 실제 5h 사용량 동기화 (claude를 1회 핑). 활동 중엔 10분마다 자동 보정."}>
-        {syncing ? "동기화 중…" : "🔄 동기화"}
-      </button>
-    </div>
-  {/if}
+  <div class="sync-row">
+    <button class="inline-btn" onclick={syncQuota} disabled={syncing} title={SYNC_HINT[agent.kind]}>
+      {syncing ? "동기화 중…" : "🔄 동기화"}
+    </button>
+  </div>
 </div>
 
 <style>
@@ -118,6 +130,12 @@
     color: #ff9f0a;
   }
   .subtle { color: #8e8e93; font-size: 11px; }
+  .quota-error {
+    font-size: 11px; line-height: 1.35; color: #ff9f0a;
+    background: rgba(255, 159, 10, 0.12);
+    border-radius: 6px; padding: 4px 6px; margin-bottom: 6px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   .sync-row { display: flex; justify-content: flex-end; margin-top: 6px; }
   .inline-btn {
     background: none; border: none; padding: 0;

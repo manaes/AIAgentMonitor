@@ -256,6 +256,7 @@ mod tests {
                 quota_used_pct: None,
                 quota_reset_at_weekly: None,
                 quota_used_pct_weekly: None,
+                quota_error: None,
                 projects: vec![],
             }],
         }
@@ -275,6 +276,7 @@ mod tests {
                     quota_used_pct: None,
                     quota_reset_at_weekly: None,
                     quota_used_pct_weekly: None,
+                    quota_error: None,
                     projects: vec![],
                 })
                 .collect(),

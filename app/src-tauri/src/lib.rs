@@ -564,7 +564,7 @@ async fn set_antigravity_poll_interval(
 }
 
 #[cfg(target_os = "windows")]
-fn hide_console_window(cmd: &mut Command) -> &mut Command {
+pub(crate) fn hide_console_window(cmd: &mut Command) -> &mut Command {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -572,7 +572,7 @@ fn hide_console_window(cmd: &mut Command) -> &mut Command {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn hide_console_window(cmd: &mut Command) -> &mut Command {
+pub(crate) fn hide_console_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
@@ -657,15 +657,20 @@ async fn run_claude_usage_ping_inner(quota: Arc<quota_proxy::QuotaState>) {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => {
             tracing::warn!(%e, "quota 동기화(/usage) 실행 실패 (claude 미발견?)");
+            *quota.last_error.lock().unwrap() =
+                Some(format!("claude 실행 실패 — 설치돼 있나요? ({e})"));
             return;
         }
         Err(_) => {
             tracing::warn!("quota 동기화(/usage) timeout");
+            *quota.last_error.lock().unwrap() = Some("claude /usage 응답 시간 초과".to_string());
             return;
         }
     };
     if !output.status.success() {
         tracing::warn!(status = ?output.status, "quota 동기화(/usage) 실패");
+        *quota.last_error.lock().unwrap() =
+            Some("Claude 한도 조회 실패 — 로그인 상태를 확인하세요 (`claude /login`)".to_string());
         return;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -674,65 +679,52 @@ async fn run_claude_usage_ping_inner(quota: Arc<quota_proxy::QuotaState>) {
         // CLI 출력 포맷이 바뀌면 여기서 조용히 계속 실패할 수 있다 — 매번 로그를
         // 남겨 무음 회귀를 감지할 수 있게 한다(2026-09-03 리뷰).
         tracing::warn!(%stdout, "quota 동기화(/usage) 출력 파싱 실패 — CLI 출력 포맷이 바뀌었을 수 있다");
+        *quota.last_error.lock().unwrap() =
+            Some("claude /usage 출력을 해석하지 못했습니다 (CLI 업데이트?)".to_string());
         return;
     }
     quota.apply_usage_pct(session_pct, week_pct);
     tracing::info!(?session_pct, ?week_pct, "quota 동기화(/usage) 완료");
 }
 
-// Codex quota는 rollout의 token_count.rate_limits에서만 갱신된다. 사용자가 유휴 상태면
-// 새 rollout 이벤트가 없으므로, 아주 가벼운 exec를 주기적으로 실행해 서버 보고값을 새로 받는다.
-fn spawn_codex_quota_ping(running: Arc<AtomicBool>) {
+// Codex quota는 rollout의 token_count.rate_limits에서만 갱신된다 — 사용자가 유휴
+// 상태면 새 rollout 이벤트가 없어 카드의 %가 계속 늙는다.
+//
+// 2026-09-04까지는 `codex exec "Reply exactly with the word ok"` 로 억지 턴을 만들어
+// 갱신했는데, 그건 **quota를 재려고 quota를 태우는** 짓이었다(게다가 rollout에 잡동사니
+// 세션이 쌓인다). 지금은 app-server의 조회 전용 RPC `account/rateLimits/read`로 토큰을
+// 쓰지 않고 같은 스냅샷을 받는다 — Claude `/usage` 안전망과 같은 자리지만 이쪽은
+// stdout 텍스트가 아니라 타입 있는 JSON이라 CLI 출력 포맷 변화에 조용히 깨지지 않는다.
+// 자세한 내용은 watchers/codex_rpc.rs 문서 참고.
+fn codex_binary() -> String {
+    find_binary(
+        "codex",
+        &[
+            home().join(".local/bin/codex"),
+            PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"),
+            PathBuf::from("/opt/homebrew/bin/codex"),
+            PathBuf::from("/usr/local/bin/codex"),
+        ],
+    )
+}
+
+/// Codex quota 조회 in-flight 가드를 tauri 상태로 넣기 위한 newtype.
+/// `Arc<AtomicBool>` 을 그대로 manage 하면 Claude 쪽 가드와 **타입이 같아 충돌**한다
+/// (tauri 상태는 타입으로 찾는다) — 두 번째 manage 는 조용히 무시된다.
+pub struct CodexPingGuard(pub Arc<AtomicBool>);
+
+// Claude 쪽과 같은 in-flight 가드 — 수동 버튼과 주기 동기화가 겹쳐도 app-server
+// 프로세스가 중복으로 뜨지 않는다.
+async fn run_codex_quota_ping(
+    quota: Arc<watchers::codex::CodexQuota>,
+    running: Arc<AtomicBool>,
+) {
     if running.swap(true, Ordering::SeqCst) {
+        tracing::debug!("codex quota 동기화 이미 진행 중 — 건너뜀");
         return;
     }
-
-    tauri::async_runtime::spawn(async move {
-        let bin = find_binary(
-            "codex",
-            &[
-                home().join(".local/bin/codex"),
-                PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"),
-                PathBuf::from("/opt/homebrew/bin/codex"),
-                PathBuf::from("/usr/local/bin/codex"),
-            ],
-        );
-        let home_dir = home();
-        let home_arg = home_dir.to_string_lossy().into_owned();
-
-        let mut cmd = Command::new(bin);
-        cmd.args([
-            "exec",
-            "--skip-git-repo-check",
-            "--sandbox",
-            "read-only",
-            "-C",
-            home_arg.as_str(),
-            "Reply exactly with the word ok and do not run commands.",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-        let mut child = match hide_console_window(&mut cmd).spawn() {
-            Ok(child) => child,
-            Err(e) => {
-                tracing::warn!(%e, "codex quota 동기화 실행 실패 (codex 미발견?)");
-                running.store(false, Ordering::SeqCst);
-                return;
-            }
-        };
-
-        match tokio::time::timeout(Duration::from_secs(120), child.wait()).await {
-            Ok(Ok(status)) => tracing::info!(?status, "codex quota 동기화 완료"),
-            Ok(Err(e)) => tracing::warn!(%e, "codex quota 동기화 대기 실패"),
-            Err(_) => {
-                let _ = child.kill().await;
-                tracing::warn!("codex quota 동기화 timeout");
-            }
-        }
-        running.store(false, Ordering::SeqCst);
-    });
+    watchers::codex_rpc::poll_rate_limits(&codex_binary(), &home(), &quota).await;
+    running.store(false, Ordering::SeqCst);
 }
 
 // 수동 동기화 (UI 버튼). 10분 주기 자동 동기화와 같은 in-flight 가드를 공유해
@@ -743,6 +735,15 @@ async fn sync_quota(
     running: tauri::State<'_, Arc<AtomicBool>>,
 ) -> Result<(), String> {
     run_claude_usage_ping(quota.inner().clone(), running.inner().clone()).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn sync_codex_quota(
+    quota: tauri::State<'_, Arc<watchers::codex::CodexQuota>>,
+    running: tauri::State<'_, CodexPingGuard>,
+) -> Result<(), String> {
+    run_codex_quota_ping(quota.inner().clone(), running.0.clone()).await;
     Ok(())
 }
 
@@ -928,7 +929,13 @@ pub fn run() {
     }
 
     // Codex는 사용자가 아무 입력을 하지 않으면 새 rate_limits 이벤트가 기록되지 않는다.
-    // 한 번이라도 Codex quota를 관측한 뒤에는 10분마다 가벼운 exec로 서버 상태를 새로 받아온다.
+    // 10분마다 조회 전용 RPC로 서버 상태를 새로 받아온다(interval 의 첫 틱이 곧
+    // 시작 시 1회 조회 역할을 한다).
+    //
+    // 예전엔 "한 번이라도 quota를 관측한 뒤에만" 핑했다 — exec 핑이 진짜 토큰을
+    // 태웠으니 아낄 이유가 있었다. 지금은 공짜 조회라 그 가드가 오히려 해롭다:
+    // 로그인이 안 돼 있으면 rollout 에 rate_limits 가 영영 안 찍히고, 그러면
+    // 가드 때문에 조회도 안 해서 "왜 안 보이는지"를 끝내 알 수 없다.
     {
         let quota = codex_quota.clone();
         let running = codex_quota_ping_running.clone();
@@ -937,14 +944,8 @@ pub fn run() {
             let mut ticker = tokio::time::interval(Duration::from_secs(600));
             loop {
                 ticker.tick().await;
-                let seen_codex_quota = quota.used_pct_5h.lock().unwrap().is_some()
-                    || quota.reset_5h.lock().unwrap().is_some()
-                    || quota.used_pct_weekly.lock().unwrap().is_some()
-                    || quota.reset_weekly.lock().unwrap().is_some();
-                if seen_codex_quota {
-                    tracing::info!("codex quota 주기 동기화 핑");
-                    spawn_codex_quota_ping(running.clone());
-                }
+                tracing::info!("codex quota 주기 동기화");
+                run_codex_quota_ping(quota.clone(), running.clone()).await;
             }
         });
     }
@@ -970,6 +971,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_detail_window,
             sync_quota,
+            sync_codex_quota,
             sync_antigravity_quota,
             ble_status,
             ble_set_enabled,
@@ -993,6 +995,7 @@ pub fn run() {
             let quota_state = quota_state.clone();
             let claude_quota_ping_running = claude_quota_ping_running.clone();
             let codex_quota = codex_quota.clone();
+            let codex_quota_ping_running = codex_quota_ping_running.clone();
             let antigravity_quota = antigravity_quota.clone();
             let antigravity_poll_interval = antigravity_poll_interval.clone();
             let settings_state = settings_state.clone();
@@ -1001,6 +1004,8 @@ pub fn run() {
                 use tauri::Manager;
                 app.manage(quota_state.clone());
                 app.manage(claude_quota_ping_running.clone());
+                app.manage(codex_quota.clone());
+                app.manage(CodexPingGuard(codex_quota_ping_running.clone()));
                 app.manage(settings_state.clone());
                 app.manage(antigravity_quota.clone());
                 app.manage(antigravity_poll_interval.clone());
@@ -1477,6 +1482,7 @@ pub fn run() {
                             );
                             if let Some(p) = pct_wk { c.quota_used_pct_weekly = Some(p); }
                             if let Some(r) = reset_wk { c.quota_reset_at_weekly = Some(r); }
+                            c.quota_error = quota_for_tick.last_error.lock().unwrap().clone();
                         }
                         if let Some(c) = snap.agents.iter_mut().find(|a| a.kind == AgentKind::Codex)
                         {
@@ -1494,6 +1500,7 @@ pub fn run() {
                             );
                             if let Some(p) = pct_wk { c.quota_used_pct_weekly = Some(p); }
                             if let Some(r) = reset_wk { c.quota_reset_at_weekly = Some(r); }
+                            c.quota_error = codex_for_tick.last_error.lock().unwrap().clone();
                         }
                         if let Some(c) = snap.agents.iter_mut().find(|a| a.kind == AgentKind::Antigravity)
                         {
@@ -1511,6 +1518,7 @@ pub fn run() {
                             );
                             if let Some(p) = pct_wk { c.quota_used_pct_weekly = Some(p); }
                             if let Some(r) = reset_wk { c.quota_reset_at_weekly = Some(r); }
+                            c.quota_error = antigravity_for_tick.last_error.lock().unwrap().clone();
                         }
                         let mut g = gate_for_tick.lock().await;
                         if g.should_emit(&snap, now) {

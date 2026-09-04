@@ -72,6 +72,7 @@ mod tests {
             tokens_5h: TokenCounts::default(), quota_limit: None,
             quota_reset_at: None, quota_used_pct: None,
             quota_reset_at_weekly: None, quota_used_pct_weekly: None,
+            quota_error: None,
             projects: vec![],
         }
     }

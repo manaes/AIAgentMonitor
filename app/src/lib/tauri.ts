@@ -40,6 +40,8 @@ export type AgentState = {
   quota_used_pct: number | null;
   quota_reset_at_weekly: { secs_since_epoch: number } | null;
   quota_used_pct_weekly: number | null;
+  // 사용량을 못 읽고 있는 이유(로그인 안 됨, CLI 없음 등). null 이면 정상.
+  quota_error: string | null;
   projects: ProjectActivity[];
 };
 

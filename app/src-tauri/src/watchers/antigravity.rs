@@ -23,6 +23,9 @@ pub struct AntigravityQuota {
     pub reset_5h: Mutex<Option<SystemTime>>,
     pub used_pct_weekly: Mutex<Option<f32>>,
     pub reset_weekly: Mutex<Option<SystemTime>>,
+    /// 마지막 `agy -p /usage` 가 실패한 이유. 성공하면 지운다 — 카드의
+    /// 프로젝트 줄 아래에 그대로 표시된다(2026-09-04).
+    pub last_error: Mutex<Option<String>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -72,22 +75,30 @@ pub(crate) fn poll_usage(quota: &AntigravityQuota) {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
             tracing::warn!(status = ?output.status, "antigravity /usage 명령 실패");
+            fail(quota, "Antigravity 한도 조회 실패 — `agy` 로그인 상태를 확인하세요");
             return;
         }
         Err(e) => {
             tracing::warn!(%e, "antigravity /usage 실행 실패");
+            fail(quota, &format!("agy 실행 실패 — 설치돼 있나요? ({e})"));
             return;
         }
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let Some(limits) = parse_usage_limits(&stdout) else {
         tracing::warn!("antigravity /usage 출력에서 Gemini quota를 찾지 못함");
+        fail(quota, "agy /usage 출력에서 Gemini 한도를 찾지 못했습니다");
         return;
     };
     *quota.used_pct_5h.lock().unwrap() = Some(limits.used_pct_5h);
     *quota.reset_5h.lock().unwrap() = Some(limits.reset_5h);
     *quota.used_pct_weekly.lock().unwrap() = Some(limits.used_pct_weekly);
     *quota.reset_weekly.lock().unwrap() = Some(limits.reset_weekly);
+    *quota.last_error.lock().unwrap() = None;
+}
+
+fn fail(quota: &AntigravityQuota, msg: &str) {
+    *quota.last_error.lock().unwrap() = Some(msg.to_string());
 }
 
 fn spawn_usage_poller(quota: Arc<AntigravityQuota>, interval_secs: Arc<AtomicU64>) {

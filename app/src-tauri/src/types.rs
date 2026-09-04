@@ -77,6 +77,11 @@ pub struct AgentState {
     pub quota_used_pct: Option<f32>,          // 실제 5h 사용률(%) — Claude:프록시 / Codex:rollout
     pub quota_reset_at_weekly: Option<SystemTime>,
     pub quota_used_pct_weekly: Option<f32>,   // 주간(7d) 사용률(%)
+    /// 사용량을 못 읽고 있는 이유(로그인 안 됨, CLI 없음, 타임아웃 등).
+    /// 값이 있으면 카드의 프로젝트 줄 아래에 그대로 띄운다 — 0% 를 조용히
+    /// 보여주면 "안 쓰는 중"과 "못 읽는 중"이 구분되지 않는다(2026-09-04).
+    /// 프라이버시 이슈가 없는 상태 문자열이라 BLE/LAN 미러로도 나간다.
+    pub quota_error: Option<String>,
     pub projects: Vec<ProjectActivity>,
 }
 

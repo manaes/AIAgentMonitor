@@ -27,7 +27,7 @@
 
 ### 🎯 실측 사용량 자동 동기화
 - **Claude Code**: 앱 시작 시 및 10분마다 자동으로 `claude -p "ping"`을 내부 프록시(포트 4319) 경유로 실행해 Anthropic 서버가 응답 헤더로 보내는 5h/주간 사용률과 리셋 시각을 캡처합니다. 수동 동기화 버튼도 제공.
-- **Codex**: 세션 rollout JSONL의 `rate_limits` 필드에서 5h/주간 사용률과 리셋 시각을 자동으로 읽습니다.
+- **Codex**: 세션 rollout JSONL의 `rate_limits` 필드에서 5h/주간 사용률과 리셋 시각을 자동으로 읽습니다. 유휴 상태라 rollout 이벤트가 없을 때는 `codex app-server` 의 조회 전용 RPC `account/rateLimits/read` 로 10분마다 같은 값을 다시 받아옵니다 — 계정 한도 조회라 토큰을 소모하지 않습니다.
 - **Antigravity**: `agy -p /usage` 명령을 통해 Google AI Pro 5h/주간 쿼터를 자동으로 폴링하고 동기화합니다.
 
 ### 📟 외장 스마트 디스플레이 (ESP32 CYD) 지원

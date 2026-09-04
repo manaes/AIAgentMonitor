@@ -39,6 +39,9 @@ pub struct QuotaState {
     /// lib.rs의 주기 자동 동기화가 "안전망으로 /usage 를 부를지"를
     /// 판단하는 기준이다 — `is_stale` 문서 참고.
     last_updated: Mutex<Option<SystemTime>>,
+    /// 마지막 `/usage` 조회가 실패한 이유. 성공하면 지운다 — 카드의 프로젝트 줄
+    /// 아래에 그대로 표시된다(2026-09-04).
+    pub last_error: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -92,6 +95,7 @@ impl QuotaState {
         }
         if session_pct.is_some() || week_pct.is_some() {
             *self.active.lock().unwrap() = true;
+            *self.last_error.lock().unwrap() = None;
             self.mark_updated();
             self.save_persisted();
         }
@@ -228,6 +232,8 @@ fn observe(headers: &HeaderMap, quota: &Arc<QuotaState>) {
 
     if saw_any {
         *quota.active.lock().unwrap() = true;
+        // 실 트래픽 헤더가 들어왔다 = 인증·연결 정상. 이전 실패 문구를 지운다.
+        *quota.last_error.lock().unwrap() = None;
         quota.mark_updated();
         quota.save_persisted();
     }
