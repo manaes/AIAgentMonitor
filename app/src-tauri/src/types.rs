@@ -78,9 +78,15 @@ pub struct AgentState {
     pub quota_reset_at_weekly: Option<SystemTime>,
     pub quota_used_pct_weekly: Option<f32>,   // 주간(7d) 사용률(%)
     /// 사용량을 못 읽고 있는 이유(로그인 안 됨, CLI 없음, 타임아웃 등).
-    /// 값이 있으면 카드의 프로젝트 줄 아래에 그대로 띄운다 — 0% 를 조용히
-    /// 보여주면 "안 쓰는 중"과 "못 읽는 중"이 구분되지 않는다(2026-09-04).
-    /// 프라이버시 이슈가 없는 상태 문자열이라 BLE/LAN 미러로도 나간다.
+    /// 값이 있으면 카드의 프로젝트 줄 아래에 띄우고, 한도 %·리셋 카운트다운은
+    /// 숨긴다 — 0% 를 조용히 보여주면 "안 쓰는 중"과 "못 읽는 중"이 구분되지
+    /// 않고, 마지막으로 받아둔 낡은 %는 지금 상태를 말해주지 못한다(2026-09-04).
+    ///
+    /// **아직 데스크톱 전용이다.** BLE/LAN/네트워크 미러는 `MirrorAgent`
+    /// (ble/wire.rs)라는 별도 DTO로 나가는데 거기엔 이 필드가 없다 — iOS 와
+    /// CYD 는 조회가 실패해도 마지막 %를 그대로 계속 보여준다. 미러로 내보내려면
+    /// 문자열이 아니라 1바이트 코드가 맞다(BLE 대역, CYD DRAM — snapshot.h 의
+    /// dram0_0_seg overflow 실측 주석 참고).
     pub quota_error: Option<String>,
     pub projects: Vec<ProjectActivity>,
 }

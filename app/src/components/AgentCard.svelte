@@ -33,6 +33,9 @@
   let isReset5h = $derived(resetEpochSecs !== null && resetEpochSecs - nowSecs <= 0);
 
   let countdown = $derived.by((): string | null => {
+    // 한도를 못 읽는 중이면 리셋 카운트다운도 숨긴다 — 같은 (낡은) 스냅샷에서
+    // 나온 값이라 %만 가리고 이건 남기면 앞뒤가 안 맞는다.
+    if (agent.quota_error) return null;
     if (resetEpochSecs !== null) {
       const rem = resetEpochSecs - nowSecs;
       if (rem <= 0) return "리셋됨";
@@ -103,7 +106,7 @@
     <div class="quota-error" title={agent.quota_error}>⚠ {agent.quota_error}</div>
   {/if}
 
-  <QuotaBar tokens_5h={agent.tokens_5h} auto_pct={agent.quota_used_pct} weekly_pct={agent.quota_used_pct_weekly} reset_5h={isReset5h} />
+  <QuotaBar tokens_5h={agent.tokens_5h} auto_pct={agent.quota_used_pct} weekly_pct={agent.quota_used_pct_weekly} reset_5h={isReset5h} unreadable={!!agent.quota_error} />
 
   <div class="sync-row">
     <button class="inline-btn" onclick={syncQuota} disabled={syncing} title={SYNC_HINT[agent.kind]}>

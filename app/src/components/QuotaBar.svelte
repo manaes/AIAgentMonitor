@@ -4,18 +4,25 @@
 
   // auto_pct: 실제 5h 사용률(%), weekly_pct: 주간(7d) 사용률(%). 둘 다 동기화 전이면 null.
   // reset_5h: 5h 윈도우가 리셋된 직후면 true → 백엔드 갱신 전까지 5h 사용률을 0%로 표시.
-  let { tokens_5h, auto_pct = null, weekly_pct = null, reset_5h = false }: {
+  // unreadable: 사용량 조회가 실패 중이면 true → %와 막대를 아예 숨긴다. 마지막으로
+  //   받아둔 값이 남아 있어도 지금 상태를 말해주지 못하므로, 낡은 숫자를 멀쩡한 척
+  //   보여주느니 안 보여주는 편이 정직하다(이유는 카드의 에러 배지가 말한다).
+  //   로컬에서 직접 센 5h 토큰 수는 서버 한도가 아니라 계속 유효하므로 그건 남긴다.
+  let { tokens_5h, auto_pct = null, weekly_pct = null, reset_5h = false, unreadable = false }: {
     tokens_5h: TokenCounts;
     auto_pct?: number | null;
     weekly_pct?: number | null;
     reset_5h?: boolean;
+    unreadable?: boolean;
   } = $props();
 
   let localUsed = $derived(tokens_5h.tokens_in + tokens_5h.tokens_out);
   let pct = $derived(
-    reset_5h ? 0 : auto_pct !== null ? Math.min(100, auto_pct) : null
+    unreadable ? null : reset_5h ? 0 : auto_pct !== null ? Math.min(100, auto_pct) : null
   );
-  let wpct = $derived(weekly_pct !== null ? Math.min(100, weekly_pct) : null);
+  let wpct = $derived(
+    unreadable ? null : weekly_pct !== null ? Math.min(100, weekly_pct) : null
+  );
 
   function color(p: number): string {
     return p >= 90 ? "linear-gradient(90deg, #ff9f0a, #ff453a)"
@@ -52,7 +59,7 @@
   {:else}
     <div class="row">
       <span class="subtle">5h 토큰: {formatTokensTotal(localUsed)}</span>
-      <span class="subtle hint">· 동기화 전</span>
+      <span class="subtle hint">{unreadable ? "· 한도 조회 실패" : "· 동기화 전"}</span>
     </div>
   {/if}
 </div>
