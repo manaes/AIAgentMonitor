@@ -86,12 +86,32 @@ impl QuotaState {
     /// `claude -p "/usage"` 텍스트 파싱 결과를 반영한다. 실 트래픽 헤더(`observe`)와
     /// 달리 reset 시각은 여기서 다루지 않는다(파일 하단 `parse_usage_pct` 문서 참고) —
     /// 값이 있는 쪽만 갱신하고, 기존 reset_at 은 그대로 둔다.
+    ///
+    /// 단, 캐시된 reset_at 이 이미 과거면 지운다. `quota_pct_for_tick`(lib.rs)은
+    /// "reset_at 이 지났다 = 창이 만료됐다"로 보고 표시용 %를 강제로 0으로 깐다 —
+    /// 원래는 %와 reset_at 이 항상 `observe()`(실 트래픽 헤더)에서 같이 갱신되던
+    /// 시절의 가정이다. 지금은 `/usage` 안전망이 %만 갱신하고 reset_at 은 그대로
+    /// 두므로, 실제로 창이 리셋된 뒤에도(그 사이 프록시를 안 거치는 트래픽만
+    /// 있었다면) reset_at 이 과거로 굳어버린다 — 그러면 이 함수가 방금 받아온
+    /// 정확한 새 %를 quota_pct_for_tick 이 0%로 덮어써버린다(2026-09-07 사용자
+    /// 보고: 실제 usage 는 7%/1%인데 카드엔 0%로 표시됨). None 으로 지워두면
+    /// quota_pct_for_tick 이 캐시된 %를 그대로 통과시킨다 — 카운트다운만 잠깐
+    /// 비고, 다음 실트래픽 관측 때 reset_at 이 다시 채워진다.
     pub fn apply_usage_pct(&self, session_pct: Option<f32>, week_pct: Option<f32>) {
+        let now = SystemTime::now();
         if let Some(p) = session_pct {
             *self.used_pct.lock().unwrap() = Some(p.clamp(0.0, 100.0));
+            let mut reset = self.reset_at.lock().unwrap();
+            if matches!(*reset, Some(r) if r <= now) {
+                *reset = None;
+            }
         }
         if let Some(p) = week_pct {
             *self.used_pct_weekly.lock().unwrap() = Some(p.clamp(0.0, 100.0));
+            let mut reset = self.reset_weekly.lock().unwrap();
+            if matches!(*reset, Some(r) if r <= now) {
+                *reset = None;
+            }
         }
         if session_pct.is_some() || week_pct.is_some() {
             *self.active.lock().unwrap() = true;
@@ -413,6 +433,34 @@ What's contributing to your limits usage?
 
         assert_eq!(*quota.used_pct.lock().unwrap(), Some(30.0), "값이 있으면 갱신");
         assert_eq!(*quota.used_pct_weekly.lock().unwrap(), Some(20.0), "None 이면 기존 값 유지");
+    }
+
+    #[test]
+    fn apply_usage_pct_clears_a_reset_at_that_is_already_in_the_past() {
+        // 2026-09-07 사용자 보고 재현: 실제 창은 이미 리셋됐는데(프록시를 안 거치는
+        // 트래픽만 있어 observe() 가 못 갱신) 캐시엔 지난 reset_at 이 남아있던 상황.
+        // /usage 로 새 %를 받아도 quota_pct_for_tick(lib.rs) 이 "reset_at 이 지났다
+        // = 창 만료 = 0%"로 덮어써버려, 실제 usage(7%/1%)가 카드엔 0%로 보였다.
+        let quota = QuotaState::default();
+        let past = SystemTime::now() - Duration::from_secs(60);
+        let future = SystemTime::now() + Duration::from_secs(60);
+        *quota.reset_at.lock().unwrap() = Some(past);
+        *quota.reset_weekly.lock().unwrap() = Some(future);
+
+        quota.apply_usage_pct(Some(7.0), Some(1.0));
+
+        assert_eq!(
+            *quota.reset_at.lock().unwrap(),
+            None,
+            "지난 reset_at 은 새 %를 받으면 지워야 quota_pct_for_tick 이 0%로 덮어쓰지 않는다"
+        );
+        assert_eq!(
+            *quota.reset_weekly.lock().unwrap(),
+            Some(future),
+            "아직 안 지난 reset_weekly 는 그대로 유지"
+        );
+        assert_eq!(*quota.used_pct.lock().unwrap(), Some(7.0));
+        assert_eq!(*quota.used_pct_weekly.lock().unwrap(), Some(1.0));
     }
 
     #[test]
