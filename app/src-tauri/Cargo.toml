@@ -1,6 +1,6 @@
 [package]
 name = "ai-agent-monitor"
-version = "1.7.8"
+version = "1.7.9"
 description = "AI Agent Monitor"
 authors = ["you"]
 edition = "2021"
@@ -70,3 +70,8 @@ tempfile = "3"
 # 있는 자기일관적인 짝을 강제한다. 자세한 내용은 vendor/README.md 참고.
 [patch.crates-io]
 wmi = { path = "vendor/wmi-0.18.4" }
+# macOS 27(Golden Gate)에서 메뉴바 아이콘 좌클릭이 팝오버를 못 띄우는 문제.
+# NSStatusItem 에 메뉴가 붙어 있으면 시스템이 클릭을 가로채 메뉴만 띄운다
+# (tauri-apps/tray-icon#355). 업스트림 수정(PR #341/#365)이 아직 미머지라
+# 같은 접근을 로컬 사본에 적용했다. 자세한 내용은 vendor/README.md 참고.
+tray-icon = { path = "vendor/tray-icon-0.23.1" }
