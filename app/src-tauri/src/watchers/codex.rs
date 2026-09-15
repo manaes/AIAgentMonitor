@@ -210,15 +210,17 @@ fn parse_counts(u: &Usage) -> TokenCounts {
     }
 }
 
-fn apply_window(w: &Window, quota: &CodexQuota, is_secondary: bool) {
-    // window_minutes: 10080(7일), 300(5시간).
-    // window_minutes가 명시되어 있지 않은 경우 primary는 5h, secondary는 weekly로 기본 폴백.
-    let is_weekly = match w.window_minutes {
+/// 이 창이 주간(7일)짜리인지. window_minutes: 10080(7일), 300(5시간).
+/// 명시돼 있지 않으면 위치로 폴백한다(primary=5h, secondary=weekly).
+fn is_weekly(w: &Window, is_secondary: bool) -> bool {
+    match w.window_minutes {
         Some(m) => m > 360,
         None => is_secondary,
-    };
+    }
+}
 
-    if is_weekly {
+fn apply_window(w: &Window, quota: &CodexQuota, is_secondary: bool) {
+    if is_weekly(w, is_secondary) {
         *quota.used_pct_weekly.lock().unwrap() = Some(w.used_percent as f32);
         *quota.reset_weekly.lock().unwrap() = epoch(w.resets_at);
     } else {
@@ -239,6 +241,32 @@ pub(crate) fn apply_rate_limits(rl: &RateLimits, quota: &CodexQuota) {
     // 아무것도 증명하지 못한다. 그걸로 에러를 지우면 방금 실패한 능동 조회의
     // 메시지가 낡은 로그 한 줄에 덮여 사라진다. 지우는 건 조회 성공뿐이다
     // (codex_rpc::poll_rate_limits).
+}
+
+/// 능동 조회(`account/rateLimits/read`)로 받은 **완전한** 스냅샷을 반영한다.
+///
+/// rollout tail 과 달리 이건 계정의 현재 한도 전부다 — 그래서 스냅샷에 없는 창은
+/// "이번엔 안 실렸다"가 아니라 **그 플랜엔 없다**는 뜻이라, 예전 값을 지워야 한다.
+/// 안 지우면 2026-09 Codex 업데이트처럼 요금제에서 5h(300분) 창이 통째로 빠졌을 때
+/// (그 계정은 primary 가 10080분 주간 하나뿐이다) 마지막으로 본 5h % 가 카드에
+/// 박제된 채 영영 안 바뀐다 — 화면은 멀쩡해 보이는데 값만 죽어 있는, 제일 나쁜 상태.
+pub(crate) fn apply_rate_limits_snapshot(rl: &RateLimits, quota: &CodexQuota) {
+    let windows = [(rl.primary.as_ref(), false), (rl.secondary.as_ref(), true)];
+    let present = |weekly: bool| {
+        windows
+            .iter()
+            .any(|(w, sec)| w.is_some_and(|w| is_weekly(w, *sec) == weekly))
+    };
+
+    if !present(false) {
+        *quota.used_pct_5h.lock().unwrap() = None;
+        *quota.reset_5h.lock().unwrap() = None;
+    }
+    if !present(true) {
+        *quota.used_pct_weekly.lock().unwrap() = None;
+        *quota.reset_weekly.lock().unwrap() = None;
+    }
+    apply_rate_limits(rl, quota);
 }
 
 /// rollout을 offset부터 tail. replay_window=true(파일 최초 인지)면 5h 이내 token_count만

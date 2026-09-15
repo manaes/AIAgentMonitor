@@ -15,7 +15,7 @@
 //! 등)이 섞여 나오므로 **id 로 골라 읽어야** 한다.
 
 use crate::types::QuotaError;
-use crate::watchers::codex::{apply_rate_limits, CodexQuota, RateLimits, Window};
+use crate::watchers::codex::{apply_rate_limits_snapshot, CodexQuota, RateLimits, Window};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -35,7 +35,9 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) async fn poll_rate_limits(bin: &str, cwd: &Path, quota: &CodexQuota) {
     match read_rate_limits(bin, cwd).await {
         Ok(rl) => {
-            apply_rate_limits(&rl, quota);
+            // 조회 응답은 계정 한도 **전부**라, 안 실린 창은 지운다
+            // (apply_rate_limits_snapshot 문서 참고).
+            apply_rate_limits_snapshot(&rl, quota);
             // 방금 조회가 실제로 성공했다 — 이제서야 이전 실패 문구를 지울 자격이 있다.
             *quota.last_error.lock().unwrap() = None;
             tracing::info!(
@@ -249,7 +251,7 @@ mod tests {
         let line = r#"{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":7,"resetsAt":1788500571,"windowDurationMins":300},"secondary":{"usedPercent":35,"resetsAt":1788748697,"windowDurationMins":10080}}}}"#;
         let rl = parse_response(line, RATE_LIMITS_ID).unwrap().unwrap();
         let quota = CodexQuota::default();
-        apply_rate_limits(&rl, &quota);
+        crate::watchers::codex::apply_rate_limits(&rl, &quota);
         assert_eq!(*quota.used_pct_5h.lock().unwrap(), Some(7.0));
         assert_eq!(*quota.used_pct_weekly.lock().unwrap(), Some(35.0));
         assert!(quota.reset_5h.lock().unwrap().is_some());
@@ -264,7 +266,7 @@ mod tests {
         *quota.last_error.lock().unwrap() = Some(QuotaError::auth("Codex 로그인 필요"));
         let line = r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":12}}}}"#;
         let rl = parse_response(line, RATE_LIMITS_ID).unwrap().unwrap();
-        apply_rate_limits(&rl, &quota);
+        crate::watchers::codex::apply_rate_limits(&rl, &quota);
         assert_eq!(
             quota.last_error.lock().unwrap().as_ref().map(|e| e.message.clone()),
             Some("Codex 로그인 필요".to_string())
@@ -286,7 +288,7 @@ mod tests {
         let line = r#"{"id":2,"result":{"rateLimits":{"primary":null,"secondary":null},"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":50,"windowDurationMins":300}}}}}"#;
         let rl = parse_response(line, RATE_LIMITS_ID).unwrap().unwrap();
         let quota = CodexQuota::default();
-        apply_rate_limits(&rl, &quota);
+        crate::watchers::codex::apply_rate_limits(&rl, &quota);
         assert_eq!(*quota.used_pct_5h.lock().unwrap(), Some(50.0));
     }
 
@@ -332,6 +334,37 @@ mod tests {
             "조회 성공했는데 이전 에러가 남아 있다"
         );
         assert!(quota.used_pct_5h.lock().unwrap().is_some());
+    }
+
+    /// 2026-09 Codex 업데이트 실측: 요금제에 따라 `codex` 버킷이 주간(10080분) 하나만
+    /// 돌려주고 5h(300분) 창을 아예 빼 버린다. 이때 **예전에 받아둔 5h % 가 남으면
+    /// 안 된다** — 갱신될 일이 없어서 카드에 낡은 숫자가 박제된다.
+    #[test]
+    fn snapshot_clears_window_the_plan_no_longer_reports() {
+        let quota = CodexQuota::default();
+        *quota.used_pct_5h.lock().unwrap() = Some(42.0);
+        *quota.reset_5h.lock().unwrap() = Some(std::time::UNIX_EPOCH);
+
+        let line = r#"{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":12,"windowDurationMins":10080,"resetsAt":1789805839},"secondary":null}}}"#;
+        let rl = parse_response(line, RATE_LIMITS_ID).unwrap().unwrap();
+        apply_rate_limits_snapshot(&rl, &quota);
+
+        assert_eq!(*quota.used_pct_5h.lock().unwrap(), None, "5h 는 더 이상 보고되지 않는다");
+        assert_eq!(*quota.reset_5h.lock().unwrap(), None);
+        assert_eq!(*quota.used_pct_weekly.lock().unwrap(), Some(12.0), "primary 가 주간으로 분류돼야 한다");
+    }
+
+    /// 반대로 rollout tail 이 부르는 경로는 **지우면 안 된다** — 과거 턴이 남긴
+    /// 조각난 rate_limits 라 "없음"이 "그 플랜엔 없음"을 뜻하지 않는다.
+    #[test]
+    fn rollout_apply_keeps_other_window() {
+        let quota = CodexQuota::default();
+        *quota.used_pct_weekly.lock().unwrap() = Some(35.0);
+        let line = r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":7,"windowDurationMins":300}}}}"#;
+        let rl = parse_response(line, RATE_LIMITS_ID).unwrap().unwrap();
+        crate::watchers::codex::apply_rate_limits(&rl, &quota);
+        assert_eq!(*quota.used_pct_weekly.lock().unwrap(), Some(35.0));
+        assert_eq!(*quota.used_pct_5h.lock().unwrap(), Some(7.0));
     }
 
     /// 한도 자체가 안 오는 계정(API 키 등)은 조용히 성공한 척하면 안 된다.
