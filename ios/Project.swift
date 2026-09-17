@@ -1,6 +1,13 @@
 import ProjectDescription
 
-let bundlePrefix = "com.dgitx.aiagentmonitor.mirror"
+let bundlePrefix = "co.kr.wannypark.aiagentmirror"
+// App / AppBLE 를 짝으로 계속 배포하므로 버전·빌드를 한 곳에서만 관리한다 —
+// 상수를 안 뽑아두면 둘 중 하나만 올리는 실수가 나기 쉽다(2026-09-17).
+// SettingValue 로 타입을 못 박아 둔다 — 그냥 String 이면 settings 딕셔너리 리터럴의
+// 타입 추론이 깨진다(다른 원소들의 String 리터럴은 SettingValue 로 암묵 변환되지만,
+// 이미 String 으로 확정된 변수는 안 된다).
+let marketingVersion: SettingValue = "1.0.0"
+let currentProjectVersion: SettingValue = "1"
 // iroh-ffi(IrohLib) SwiftPM 매니페스트가 iOS 17.5+ 를 요구해서 전체 배포
 // 타깃을 17.5로 올렸다(기존 17.0). 네트워크 전송 추가 이전에는 17.0으로
 // 충분했다 — IrohSpike 사전 스파이크에서 이 제약이 처음 드러났다.
@@ -123,6 +130,16 @@ let project = Project(
                     "Mac 의 AI Agent Monitor 와 연결해 모니터링 화면을 표시합니다.",
                 "NSCameraUsageDescription":
                     "Mac 화면에 뜬 페어링 QR 코드를 스캔해 네트워크로 연결합니다.",
+                // 없으면 iOS 가 로컬 네트워크(사설 IP) 소켓 연결마다 물어보는 권한
+                // 팝업 자체가 제대로 안 뜬다 — NetworkClient 가 QR 로 받은 LAN
+                // 주소로 iroh 직접 dial 을 시도하는데(재연결 시 discovery 가 안 돼
+                // relay/direct 주소를 그대로 쓴다, NetworkClient.swift 참고), 이
+                // 키가 없으면 그 첫 연결 시도 도중에 권한 팝업이 뒤늦게(비동기로)
+                // 떠서 시도 자체가 타임아웃난다(2026-09-17 실기 확인 — 삭제 후
+                // 재설치해도 최초 1회는 항상 재현됨, 권한을 허용한 뒤 재시도하면
+                // 바로 성공).
+                "NSLocalNetworkUsageDescription":
+                    "Mac과 같은 네트워크에서 QUIC(iroh)로 직접 연결하기 위해 필요합니다.",
                 "UIApplicationSceneManifest": [
                     "UIApplicationSupportsMultipleScenes": false,
                     "UISceneConfigurations": [
@@ -132,6 +149,16 @@ let project = Project(
                         ]]
                     ],
                 ],
+                // 개인용 미러 앱이라 자체 암호화(HTTPS/OS 표준 API 외 커스텀 암호화)를
+                // 앱에 새로 추가하지 않는다 — TestFlight/App Store Connect 의 수출
+                // 규정 준수 질문을 빌드마다 다시 안 받도록 미리 선언해 둔다.
+                "ITSAppUsesNonExemptEncryption": false,
+                // Tuist 의 기본 Info.plist 는 이 두 키를 리터럴 "1.0"/"1" 로 박아 두고
+                // MARKETING_VERSION/CURRENT_PROJECT_VERSION 빌드 설정을 보지 않는다
+                // (`Derived/InfoPlists/App-Info.plist` 확인) — 빌드 설정을 실제로
+                // 반영하려면 여기서 명시적으로 변수 치환을 걸어야 한다.
+                "CFBundleShortVersionString": "$(MARKETING_VERSION)",
+                "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
             ]),
             sources: ["Sources/App/**"],
             resources: ["Sources/App/Resources/**"],
@@ -151,6 +178,9 @@ let project = Project(
                 "CODE_SIGN_STYLE": "Automatic",
                 "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
                 "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "$(inherited) NETWORK_TRANSPORT",
+                // 최초 TestFlight 업로드 기준값(2026-09-17).
+                "MARKETING_VERSION": marketingVersion,
+                "CURRENT_PROJECT_VERSION": currentProjectVersion,
             ])
         ),
         // BLE 전용(iOS 16+) 변형. **같은 소스 폴더**(Sources/App/**)를 가리키지만
@@ -176,6 +206,10 @@ let project = Project(
                         ]]
                     ],
                 ],
+                // App 과 짝으로 계속 배포하므로 같은 수출 규정 준수/버전 처리를 맞춘다.
+                "ITSAppUsesNonExemptEncryption": false,
+                "CFBundleShortVersionString": "$(MARKETING_VERSION)",
+                "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
             ]),
             sources: ["Sources/App/**"],
             resources: ["Sources/App/Resources/**"],
@@ -188,6 +222,9 @@ let project = Project(
                 "DEVELOPMENT_TEAM": "LC8PY3D283",
                 "CODE_SIGN_STYLE": "Automatic",
                 "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
+                // App 과 같은 기준값 — 두 앱을 짝으로 같이 배포한다(2026-09-17).
+                "MARKETING_VERSION": marketingVersion,
+                "CURRENT_PROJECT_VERSION": currentProjectVersion,
             ])
         ),
     ],

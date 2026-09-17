@@ -5,7 +5,7 @@ import Security
 /// 쓰되, 계정 문자열을 분리한다 — BLE/네트워크는 별도 PairingManager 인스턴스를 쓰므로
 /// (계획 문서 Phase 1 결정) 같은 기기라도 토큰이 서로 다른 신원이다.
 public enum NetworkTokenStore {
-    private static let service = "com.dgitx.aiagentmonitor.mirror"
+    private static let service = "co.kr.wannypark.aiagentmirror"
     private static let tokenAccount = "network-pairing-token"
     /// 재스캔 없이 재연결하기 위한 Mac 의 EndpointId(hex, 32바이트). 값 자체는
     /// 비밀이 아니지만(공개키), 페어링 여부를 기기 밖으로 흘리지 않기 위해 같은

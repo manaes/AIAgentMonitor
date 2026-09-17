@@ -3,7 +3,7 @@ import Security
 
 /// 페어링 토큰 보관소. UserDefaults 는 백업에 평문으로 실려 나가므로 쓰지 않는다.
 public enum TokenStore {
-    private static let service = "com.dgitx.aiagentmonitor.mirror"
+    private static let service = "co.kr.wannypark.aiagentmirror"
     private static let account = "ble-pairing-token"
 
     private static var baseQuery: [String: Any] {
