@@ -279,6 +279,8 @@ let project = Project(
                 .target(name: "WidgetShared"),
                 .target(name: "NetworkTransport"),
                 .target(name: "Wire"),
+                .target(name: "DesignSystem"),
+                .target(name: "MirrorFormat"),
             ],
             settings: .settings(base: [
                 "DEVELOPMENT_TEAM": "LC8PY3D283",

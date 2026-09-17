@@ -1,4 +1,7 @@
+import DesignSystem
+import MirrorFormat
 import SwiftUI
+import UIKit
 import WidgetKit
 import Wire
 
@@ -33,7 +36,7 @@ struct UsageWidgetView: View {
 
     private func content(for snapshot: MirrorSnapshot) -> some View {
         let ordered = orderedForDisplay(snapshot.agents)
-        let shown = family == .systemSmall ? Array(ordered.prefix(1)) : ordered
+        let now = Date()
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -48,26 +51,119 @@ struct UsageWidgetView: View {
                 }
                 .buttonStyle(.plain)
             }
-            ForEach(Array(shown.enumerated()), id: \.offset) { _, agent in
-                agentRow(agent)
+
+            if family == .systemSmall {
+                // 작은 위젯은 폭이 좁아 막대 없이 이름·%·카운트다운만 한 줄로 쌓는다.
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(ordered.enumerated()), id: \.offset) { _, agent in
+                        compactAgentRow(agent, now: now)
+                    }
+                }
+            } else {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                    ForEach(Array(ordered.enumerated()), id: \.offset) { _, agent in
+                        agentCard(agent, now: now)
+                    }
+                }
             }
         }
         .padding()
     }
 
-    private func agentRow(_ agent: MirrorAgent) -> some View {
+    private func compactAgentRow(_ agent: MirrorAgent, now: Date) -> some View {
         HStack {
             Text(agentName(agent.kind))
-                .font(.subheadline.bold())
+                .font(Font(Typography.name))
+                .foregroundStyle(Color(Palette.primaryText))
             Spacer()
-            Text("\(Int(agent.ratePerSec)) tok/s")
-                .font(.caption)
-            if agent.quotaError == nil, let pct = agent.usedPct5h {
-                Text("· 5h \(Int(pct))%")
-                    .font(.caption)
+            if let usage = weeklyUsage(for: agent, now: now) {
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text(usage.percentText)
+                        .font(Font(Typography.percent))
+                        .foregroundStyle(Color(Palette.percent))
+                    if let countdownText = usage.countdownText {
+                        Text(countdownText)
+                            .font(Font(Typography.countdown))
+                            .foregroundStyle(Color(Palette.countdown))
+                    }
+                }
+            } else {
+                Text(weeklyFallbackText(for: agent))
+                    .font(Font(Typography.label))
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func agentCard(_ agent: MirrorAgent, now: Date) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(agentName(agent.kind))
+                .font(Font(Typography.name))
+                .foregroundStyle(Color(Palette.primaryText))
+
+            if let usage = weeklyUsage(for: agent, now: now) {
+                HStack {
+                    Text(usage.percentText)
+                        .font(Font(Typography.percent))
+                        .foregroundStyle(Color(Palette.percent))
+                    Spacer()
+                    if let countdownText = usage.countdownText {
+                        Text(countdownText)
+                            .font(Font(Typography.countdown))
+                            .foregroundStyle(Color(Palette.countdown))
+                    }
+                }
+                GeometryReader { geo in
+                    let gradient = QuotaDisplay.gradient(forPercent: usage.percent)
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color(Palette.barTrack))
+                        Capsule()
+                            .fill(LinearGradient(
+                                colors: [
+                                    Color(UIColor(hex: gradient.startHex)),
+                                    Color(UIColor(hex: gradient.endHex)),
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            ))
+                            .frame(width: geo.size.width * CGFloat(usage.percent / 100))
+                    }
+                }
+                .frame(height: 6)
+            } else {
+                Text(weeklyFallbackText(for: agent))
+                    .font(Font(Typography.label))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(Palette.cardBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private struct WeeklyUsage {
+        let percentText: String
+        let countdownText: String?
+        let percent: Float
+    }
+
+    /// 5h % 를 가리는 규칙(Fix 2)과 동일하게, 주간 %도 quotaError 가 있으면 숨긴다.
+    private func weeklyUsage(for agent: MirrorAgent, now: Date) -> WeeklyUsage? {
+        guard agent.quotaError == nil, let pct = agent.usedPctWeekly, let resetAt = agent.rw else {
+            return nil
+        }
+        let clamped = min(100, pct)
+        return WeeklyUsage(
+            percentText: MirrorFormat.toFixed(Double(clamped), 0) + "%",
+            countdownText: MirrorFormat.weeklyCountdown(resetAt: resetAt, now: now),
+            percent: clamped
+        )
+    }
+
+    private func weeklyFallbackText(for agent: MirrorAgent) -> String {
+        agent.quotaError?.displayText ?? "동기화 전"
     }
 
     private func agentName(_ kind: AgentKindCode) -> String {
