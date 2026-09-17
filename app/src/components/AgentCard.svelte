@@ -18,6 +18,12 @@
     agent.projects.find((p) => p.status === "active") ?? agent.projects[0]
   );
 
+  // tok/s가 높을수록 빠르게, 유휴 상태에서도 느린 숨쉬기로 계속 움직인다
+  // (완전히 멈춘 정적인 카드로 보이지 않도록).
+  let pulseDurationS = $derived(
+    Math.max(0.35, 2.2 - agent.rate_tok_per_sec / 40)
+  );
+
   // 초 단위 카운트다운 갱신
   let nowSecs = $state(Math.floor(Date.now() / 1000));
   onMount(() => {
@@ -80,7 +86,7 @@
 <div class="card">
   <div class="top">
     <div class="agent">
-      <span class="dot" style="background:{dotColor}"></span>
+      <span class="dot" style="background:{dotColor}; animation-duration:{pulseDurationS}s"></span>
       <span class="name">
         {agent.kind === "claude" ? "Claude Code" : agent.kind === "antigravity" ? "Antigravity" : "Codex"}
       </span>
@@ -120,7 +126,14 @@
   .card + :global(.card) { margin-top: 8px; }
   .top { display: flex; justify-content: space-between; align-items: center; }
   .agent { display: flex; align-items: center; gap: 6px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+    animation: dot-pulse 2.2s ease-in-out infinite;
+  }
+  @keyframes dot-pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.7); opacity: 0.5; }
+  }
   .name { font-weight: 600; }
   .big { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
   .unit { font-size: 11px; color: #8e8e93; font-weight: 500; margin-left: 4px; }

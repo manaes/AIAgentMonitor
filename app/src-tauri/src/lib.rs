@@ -898,6 +898,10 @@ pub fn run() {
     // 그대로 성립한다(공격자는 어느 전송으로 오든 같은 5회를 나눠 쓴다).
     let shared_pairing: SharedPairing = Arc::new(Mutex::new(ble::pairing::PairingManager::new()));
 
+    // 트레이 아이콘 애니메이션 속도(tok/s) — 스냅샷을 emit할 때마다 갱신하고,
+    // tray.rs의 백그라운드 루프가 이 값을 읽어 프레임 전환 속도를 조절한다.
+    let tray_activity = tray::TrayActivityRate::new();
+
     // 앱 시작 시 즉시 한 번 핑 (persisted 캐시가 낡았을 수 있으므로)
     {
         let quota = quota_state.clone();
@@ -1004,6 +1008,7 @@ pub fn run() {
             let antigravity_poll_interval = antigravity_poll_interval.clone();
             let settings_state = settings_state.clone();
             let shared_pairing = shared_pairing.clone();
+            let tray_activity = tray_activity.clone();
             move |app| {
                 use tauri::Manager;
                 app.manage(quota_state.clone());
@@ -1014,11 +1019,12 @@ pub fn run() {
                 app.manage(antigravity_quota.clone());
                 app.manage(antigravity_poll_interval.clone());
                 app.manage(shared_pairing.clone());
+                app.manage(tray_activity.clone());
                 // Dock 아이콘 숨김 — setup 초반에 호출
                 #[cfg(target_os = "macos")]
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-                tray::install(app.handle())?;
+                tray::install(app.handle(), tray_activity.clone())?;
 
                 {
                     let app_handle = app.handle().clone();
@@ -1437,6 +1443,7 @@ pub fn run() {
                 let lan_for_tick = lan_handle.clone();
                 let settings_for_tick = settings_state.clone();
                 let pairing_for_tick = shared_pairing.clone();
+                let tray_activity_for_tick = tray_activity.clone();
                 // **이 루프가 하나의 순차 태스크라는 점이 v2 프레임 순서의 근거다.**
                 // 봉인 카운터는 `prepare_snapshot` 에서 전진하고 실제 쓰기는
                 // `send_prepared` 에서 일어나는데, 둘 사이에 순서를 지키는 장치가
@@ -1524,6 +1531,11 @@ pub fn run() {
                             if let Some(r) = reset_wk { c.quota_reset_at_weekly = Some(r); }
                             c.quota_error = antigravity_for_tick.last_error.lock().unwrap().clone();
                         }
+                        // 트레이 아이콘 애니메이션 속도는 프론트엔드 emit 게이트와 무관하게
+                        // 매 틱(250ms) 갱신한다 — 화면을 안 봐도 메뉴바에서 활동을 느낄 수 있어야 한다.
+                        let total_rate: f32 = snap.agents.iter().map(|a| a.rate_tok_per_sec).sum();
+                        tray_activity_for_tick.set_tok_per_sec(total_rate);
+
                         let mut g = gate_for_tick.lock().await;
                         if g.should_emit(&snap, now) {
                             let _ = app_handle.emit("snapshot", &snap);

@@ -1,3 +1,7 @@
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -5,7 +9,37 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt;
 
-pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+/// 모든 에이전트의 tok/s 합계를 centi-tokens/s(=tok/s * 100) 정수로 담아 둔다.
+/// f32 원자값이 없어서 정수로 스케일링해 저장한다.
+#[derive(Clone)]
+pub struct TrayActivityRate(pub Arc<AtomicU32>);
+
+impl TrayActivityRate {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicU32::new(0)))
+    }
+
+    pub fn set_tok_per_sec(&self, rate: f32) {
+        let centi = (rate.max(0.0) * 100.0).round() as u32;
+        self.0.store(centi, Ordering::Relaxed);
+    }
+
+    pub fn tok_per_sec(&self) -> f32 {
+        self.0.load(Ordering::Relaxed) as f32 / 100.0
+    }
+}
+
+/// 활동량(tok/s)이 클수록 프레임 전환을 빠르게 — 유휴 상태에서도 완전히
+/// 멈추지 않고 천천히 순환시켜 "정적으로 보인다"는 문제를 해결한다.
+fn frame_interval_ms(rate_tok_per_sec: f32) -> u64 {
+    const IDLE_MS: f32 = 900.0;
+    const FAST_MS: f32 = 90.0;
+    const SATURATE_AT: f32 = 150.0; // 이 tok/s 이상이면 가장 빠른 속도로 고정
+    let t = (rate_tok_per_sec / SATURATE_AT).clamp(0.0, 1.0);
+    (IDLE_MS - (IDLE_MS - FAST_MS) * t) as u64
+}
+
+pub fn install<R: Runtime>(app: &AppHandle<R>, activity: TrayActivityRate) -> tauri::Result<()> {
     let detail = MenuItem::with_id(app, "detail", "Open Detail Window…", true, None::<&str>)?;
     let sep    = PredefinedMenuItem::separator(app)?;
     // 로그인 시 자동 실행 토글 — 현재 등록 상태를 체크 표시에 반영
@@ -108,6 +142,39 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+
+    // macOS 메뉴바 아이콘을 RunCat 스타일로 애니메이션: tok/s 활동량에 따라
+    // 이퀄라이저 바 프레임을 순환시킨다. Windows/Linux는 트레이 좌클릭이 바로
+    // Detail 창을 띄우는 용도라 이번 스코프에서는 macOS 전용으로 둔다.
+    #[cfg(target_os = "macos")]
+    {
+        let frames = [
+            tauri::include_image!("icons/tray_anim/frame_0.png"),
+            tauri::include_image!("icons/tray_anim/frame_1.png"),
+            tauri::include_image!("icons/tray_anim/frame_2.png"),
+            tauri::include_image!("icons/tray_anim/frame_3.png"),
+            tauri::include_image!("icons/tray_anim/frame_4.png"),
+            tauri::include_image!("icons/tray_anim/frame_5.png"),
+            tauri::include_image!("icons/tray_anim/frame_6.png"),
+            tauri::include_image!("icons/tray_anim/frame_7.png"),
+        ];
+        let tray_for_anim = tray.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut idx = 0usize;
+            loop {
+                let interval_ms = frame_interval_ms(activity.tok_per_sec());
+                idx = (idx + 1) % frames.len();
+                // set_icon 뒤에 set_icon_as_template을 따로 호출하면 macOS에서
+                // 아이콘이 두 번 그려지며 깜빡인다 — 원자적으로 같이 설정한다.
+                let _ = tray_for_anim.set_icon_with_as_template(Some(frames[idx].clone()), true);
+                tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = activity;
+    }
 
     // TrayIcon을 앱 종료까지 유지 (drop되면 아이콘 사라짐)
     Box::leak(Box::new(tray));
