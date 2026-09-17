@@ -135,4 +135,23 @@ final class NetworkClientTests: XCTestCase {
         XCTAssertTrue(NetworkTokenStore.saveEndpointIdHex("abcdef01"))
         XCTAssertEqual(NetworkTokenStore.loadEndpointIdHex(), "abcdef01")
     }
+
+    // MARK: - fetchSnapshotOnce (위젯 전용 단발성 fetch)
+
+    /// 저장된 페어링 정보가 없으면 iroh를 아예 건드리지 않고 즉시 실패해야
+    /// 한다 — 위젯의 짧은 타임아웃 예산을 존재하지도 않는 연결 시도로
+    /// 낭비하면 안 된다.
+    func testFetchSnapshotOnceThrowsNeedsPairingWithoutStoredEndpoint() async {
+        NetworkTokenStore.clearAll()
+        let client = await NetworkClient()
+
+        do {
+            _ = try await client.fetchSnapshotOnce(timeoutSeconds: 5)
+            XCTFail("페어링 정보가 없으면 반드시 던져야 한다")
+        } catch let error as NetworkClientError {
+            XCTAssertEqual(error, .needsPairing)
+        } catch {
+            XCTFail("NetworkClientError.needsPairing 을 기대했는데 \(error)")
+        }
+    }
 }
