@@ -41,24 +41,47 @@ struct UsageWidgetView: View {
         let ordered = orderedForDisplay(snapshot.agents)
         let now = Date()
 
-        // Small 은 좁아서 1열, 그 외는 2열 — 카드 자체(agentCard)는 모든 패밀리가
-        // 공유한다. 얇은 텍스트 한 줄짜리 compactAgentRow 는 위젯 높이를 못 채워
-        // 아래쪽이 비어 보이는 문제가 있어 폐기했다.
-        let columns: [GridItem] = family == .systemSmall
-            ? [GridItem(.flexible())]
-            : [GridItem(.flexible()), GridItem(.flexible())]
+        return VStack(alignment: .leading, spacing: 6) {
+            headerRow
 
-        return Group {
-            LazyVGrid(columns: columns, spacing: 8) {
-                ForEach(Array(ordered.enumerated()), id: \.offset) { _, agent in
-                    agentCard(agent, now: now)
+            if family == .systemSmall {
+                // 좁은 위젯은 세로 1열 — 에이전트 사이만 구분선을 넣는다.
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(ordered.enumerated()), id: \.offset) { index, agent in
+                        agentCard(agent, now: now)
+                        if index < ordered.count - 1 {
+                            Divider().background(Color(Palette.separator))
+                        }
+                    }
+                }
+            } else {
+                // Medium/Large 는 가로로 나란히 놓고 세로 구분선으로 나눈다.
+                HStack(alignment: .top, spacing: 0) {
+                    ForEach(Array(ordered.enumerated()), id: \.offset) { index, agent in
+                        agentCard(agent, now: now)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if index < ordered.count - 1 {
+                            Divider().background(Color(Palette.separator))
+                        }
+                    }
                 }
             }
         }
         .padding()
-        // 신선도/새로고침은 본문을 침범하지 않도록 우하단 코너에 작게 얹는다.
-        .overlay(alignment: .bottomTrailing) {
-            HStack(spacing: 4) {
+    }
+
+    /// 앱 브랜드 표기(로고 자리 SF Symbol) + 신선도 + 새로고침. 우하단 코너
+    /// 오버레이 방식을 되돌리고, 참고 위젯(HRV)처럼 상단 한 줄 + 구분선으로 복귀.
+    private var headerRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "cpu")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(Palette.subtle))
+                Text("AI Monitor")
+                    .font(Font(Typography.label))
+                    .foregroundStyle(Color(Palette.subtle))
+                Spacer()
                 if let fetchedAt = entry.fetchedAt {
                     Text(fetchedAt, style: .relative)
                         .font(.system(size: 9))
@@ -70,39 +93,63 @@ struct UsageWidgetView: View {
                 }
                 .buttonStyle(.plain)
             }
-            .padding(6)
+            Divider()
+                .background(Color(Palette.separator))
         }
     }
 
     private func agentCard(_ agent: MirrorAgent, now: Date) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(agentName(agent.kind))
                 .font(Font(Typography.name))
                 .foregroundStyle(Color(Palette.primaryText))
 
-            if let fiveHourText = fiveHourPercentText(for: agent) {
-                Text(fiveHourText)
-                    .font(Font(Typography.label))
-                    .foregroundStyle(Color(Palette.subtle))
+            if agent.quotaError == nil, let p5 = agent.usedPct5h {
+                let clamped5h = min(100, p5)
+                quotaRow(
+                    label: "5h",
+                    percentText: MirrorFormat.toFixed(Double(clamped5h), 0) + "%",
+                    countdownText: nil,
+                    percent: clamped5h
+                )
+            } else {
+                quotaRow(label: "5h", percentText: nil, countdownText: weeklyFallbackText(for: agent), percent: nil)
             }
 
             if let usage = weeklyUsage(for: agent, now: now) {
-                HStack {
-                    Text(usage.percentText)
+                quotaRow(label: "Week", percentText: usage.percentText, countdownText: usage.countdownText, percent: usage.percent)
+            } else {
+                quotaRow(label: "Week", percentText: nil, countdownText: weeklyFallbackText(for: agent), percent: nil)
+            }
+        }
+    }
+
+    /// 5h·주간 행을 공유하는 빌더 — `QuotaBarView`처럼 두 창을 같은 모양(라벨 +
+    /// %/카운트다운 + 그라디언트 막대)으로 그린다. `percent`가 nil이면(에러/미동기화)
+    /// 막대 없이 라벨 줄만 남긴다.
+    private func quotaRow(label: String, percentText: String?, countdownText: String?, percent: Float?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(label)
+                    .font(Font(Typography.label))
+                    .foregroundStyle(Color(Palette.subtle))
+                Spacer()
+                if let countdownText {
+                    Text(countdownText)
+                        .font(Font(Typography.countdown))
+                        .foregroundStyle(Color(Palette.countdown))
+                }
+                if let percentText {
+                    Text(percentText)
                         .font(Font(Typography.percent))
                         .foregroundStyle(Color(Palette.percent))
-                    Spacer()
-                    if let countdownText = usage.countdownText {
-                        Text(countdownText)
-                            .font(Font(Typography.countdown))
-                            .foregroundStyle(Color(Palette.countdown))
-                    }
                 }
+            }
+            if let percent {
                 GeometryReader { geo in
-                    let gradient = QuotaDisplay.gradient(forPercent: usage.percent)
+                    let gradient = QuotaDisplay.gradient(forPercent: percent)
                     ZStack(alignment: .leading) {
-                        Capsule()
-                            .fill(Color(Palette.barTrack))
+                        Capsule().fill(Color(Palette.barTrack))
                         Capsule()
                             .fill(LinearGradient(
                                 colors: [
@@ -112,20 +159,12 @@ struct UsageWidgetView: View {
                                 startPoint: .leading,
                                 endPoint: .trailing
                             ))
-                            .frame(width: geo.size.width * CGFloat(usage.percent / 100))
+                            .frame(width: geo.size.width * CGFloat(percent / 100))
                     }
                 }
-                .frame(height: 6)
-            } else {
-                Text(weeklyFallbackText(for: agent))
-                    .font(Font(Typography.label))
-                    .foregroundStyle(.secondary)
+                .frame(height: 5)
             }
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(Palette.cardBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private struct WeeklyUsage {
@@ -153,15 +192,6 @@ struct UsageWidgetView: View {
 
     private func weeklyFallbackText(for agent: MirrorAgent) -> String {
         agent.quotaError?.displayText ?? "동기화 전"
-    }
-
-    /// Medium/Large 카드 전용 보조 표시. quotaError 는 5h·주간 공통 상태이므로
-    /// (Wire/MirrorSnapshot.swift 의 MirrorAgent 문서 참고) weeklyUsage 와 같은
-    /// 게이트를 쓴다 — 실패/미동기화 시엔 아예 줄을 생략한다(에러 안내는 주간
-    /// 폴백 한 줄로 이미 전달되므로 중복 표시하지 않는다).
-    private func fiveHourPercentText(for agent: MirrorAgent) -> String? {
-        guard agent.quotaError == nil, let pct = agent.usedPct5h else { return nil }
-        return "5h " + MirrorFormat.toFixed(Double(min(100, pct)), 0) + "%"
     }
 
     private func agentName(_ kind: AgentKindCode) -> String {
