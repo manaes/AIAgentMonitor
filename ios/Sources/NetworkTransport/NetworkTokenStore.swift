@@ -6,6 +6,13 @@ import Security
 /// (계획 문서 Phase 1 결정) 같은 기기라도 토큰이 서로 다른 신원이다.
 public enum NetworkTokenStore {
     private static let service = "co.kr.wannypark.aiagentmirror"
+    /// Keychain access group. 엔타이틀먼트(`keychain-access-groups`)에는
+    /// `$(AppIdentifierPrefix)co.kr.wannypark.aiagentmirror.shared`로 적지만,
+    /// `$(AppIdentifierPrefix)`는 Xcode가 빌드 시 치환하는 매크로라 런타임
+    /// Swift 코드에서는 이미 치환된 값(팀ID `LC8PY3D283`, Project.swift 참고)을
+    /// 그대로 써야 한다 — 매크로 문자열을 그대로 넘기면 Keychain이 그런
+    /// access group을 못 찾아 항상 실패한다.
+    private static let accessGroup = "LC8PY3D283.co.kr.wannypark.aiagentmirror.shared"
     private static let tokenAccount = "network-pairing-token"
     /// 재스캔 없이 재연결하기 위한 Mac 의 EndpointId(hex, 32바이트). 값 자체는
     /// 비밀이 아니지만(공개키), 페어링 여부를 기기 밖으로 흘리지 않기 위해 같은
@@ -22,6 +29,7 @@ public enum NetworkTokenStore {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
+            kSecAttrAccessGroup as String: accessGroup,
         ]
     }
 

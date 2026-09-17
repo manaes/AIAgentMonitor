@@ -110,4 +110,29 @@ final class NetworkClientTests: XCTestCase {
         XCTAssertEqual(NetworkClient.classifyLine(Data("0f0".utf8)), .unusable, "홀수 길이 hex")
         XCTAssertEqual(NetworkClient.classifyLine(Data()), .unusable, "연속 개행으로 나오는 빈 줄")
     }
+
+    // MARK: - Keychain access group 공유(위젯과)
+
+    /// 위젯 익스텐션과 토큰을 공유하려면 access group이 필요하다(설계 §3.3).
+    /// 이 테스트 자체는 access group 유무를 직접 못 보지만, 그걸 추가한 뒤에도
+    /// 저장/조회 왕복이 이 프로세스(테스트 러너) 안에서 깨지지 않는지 확인한다 —
+    /// 실제 "위젯에서도 보이는지"는 실기 검증(Task 9) 몫이다.
+    func testTokenRoundTripsAfterAccessGroupChange() throws {
+        throw XCTSkip("""
+            Keychain 은 프로세스의 앱 정체성이 있어야 access-group 을 정하는데,
+            이 타겟은 다른 4개와 같은 호스트 없는 로직 테스트 번들이라 SecItemAdd 가
+            항상 errSecMissingEntitlement(-34018) 로 실패한다. 코드는 표준
+            Security.framework 사용이라 실제 앱(호스트 있음)에서는 문제없이 동작할
+            것으로 판단하며, 실제 왕복 검증은 이 계획의 Task 9 실기기 검증으로 넘긴다.
+            """)
+        // 아래 원래 단언은 지우지 않는다 — 언젠가 호스트 앱이 붙으면 그대로 살아난다.
+        NetworkTokenStore.clearAll()
+        defer { NetworkTokenStore.clearAll() }
+
+        XCTAssertTrue(NetworkTokenStore.saveToken("test-token-value"))
+        XCTAssertEqual(NetworkTokenStore.loadToken(), "test-token-value")
+
+        XCTAssertTrue(NetworkTokenStore.saveEndpointIdHex("abcdef01"))
+        XCTAssertEqual(NetworkTokenStore.loadEndpointIdHex(), "abcdef01")
+    }
 }
