@@ -75,6 +75,8 @@ let project = Project(
         unitTests("BLETransportTests", for: "BLETransport"),
         framework("DesignSystem", deps: [.target(name: "MirrorFormat"), .external(name: "SnapKit")]),
         unitTests("DesignSystemTests", for: "DesignSystem"),
+        framework("WidgetShared", deps: [.target(name: "Wire")]),
+        unitTests("WidgetSharedTests", for: "WidgetShared"),
         // 전체지원(iOS 17.5+) 변형. 기존 이름/모듈을 그대로 유지한다 —
         // MirrorFeatureTests 의 `@testable import MirrorFeature` 가 이걸 가리킨다.
         .target(
@@ -273,6 +275,11 @@ let project = Project(
             name: "NetworkTransportTests",
             buildAction: .buildAction(targets: [.target("NetworkTransportTests")]),
             testAction: .targets([.testableTarget(target: .target("NetworkTransportTests"))])
+        ),
+        .scheme(
+            name: "WidgetSharedTests",
+            buildAction: .buildAction(targets: [.target("WidgetSharedTests")]),
+            testAction: .targets([.testableTarget(target: .target("WidgetSharedTests"))])
         ),
     ]
 )
