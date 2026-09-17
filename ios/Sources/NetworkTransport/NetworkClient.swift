@@ -137,6 +137,10 @@ public final class NetworkClient: NSObject {
         let recv = try await conn.acceptUni()
         var buffer = Data()
         while true {
+            // 워치독이 `fetchTask.cancel()`을 걸어도 uniffi 브리지가 자체적으로
+            // 취소를 감지한다는 보장이 없다 — 매 반복 최소 한 번은 취소 지점을
+            // 만들어 무한정 도는 걸 막는다.
+            try Task.checkCancellation()
             let chunk = try await recv.read(sizeLimit: Self.snapshotChunkSizeLimit)
             buffer.append(chunk)
             while let newlineIndex = buffer.firstIndex(of: 0x0A) {

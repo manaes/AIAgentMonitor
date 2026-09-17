@@ -90,6 +90,12 @@ public final class MirrorViewController: UIViewController {
     private var cancellables = Set<AnyCancellable>()
     private var tick: Timer?
     private var latest: MirrorSnapshot?
+    #if NETWORK_TRANSPORT
+    /// 위젯 리로드 스로틀. 스냅샷은 초당 1회씩 들어오지만 리로드는 5분에
+    /// 한 번이면 충분하다 — 매번 부르면 위젯 익스텐션이 그때마다 별도
+    /// 네트워크 연결을 새로 연다(배터리/예산 낭비).
+    private var lastWidgetReload: Date = .distantPast
+    #endif
     /// 페어링이 필요한 동안(needsPairing/pairingFailed) modal 로 띄워둔 화면.
     /// nil 이 아니면 이미 떠 있다는 뜻 — 상태가 반복해서 같은 갈래로 와도 다시
     /// present 하지 않고 남은 시도 문구만 갱신한다. 전송마다 다른 화면을 띄우므로
@@ -283,7 +289,12 @@ public final class MirrorViewController: UIViewController {
                 // 안 될 뿐, 설계 §3.1). AppBLE 빌드에는 이 블록 자체가 없다.
                 let now = Date()
                 UsageCacheStore.save(snap, fetchedAt: now)
-                WidgetCenter.shared.reloadTimelines(ofKind: widgetKind)
+                // 리로드만 스로틀한다 — 캐시 갱신과 달리 위젯 익스텐션이 매번
+                // 별도 네트워크 연결을 여는 비용이 있어 5분에 한 번이면 충분하다.
+                if let self, now.timeIntervalSince(self.lastWidgetReload) >= 300 {
+                    WidgetCenter.shared.reloadTimelines(ofKind: widgetKind)
+                    self.lastWidgetReload = now
+                }
                 #endif
                 self?.configure(snapshot: snap, now: Date())
             }

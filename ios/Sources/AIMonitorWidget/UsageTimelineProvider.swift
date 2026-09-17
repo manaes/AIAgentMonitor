@@ -29,12 +29,18 @@ struct UsageTimelineProvider: TimelineProvider {
             var snapshot = cached?.snapshot
             var fetchedAt = cached?.fetchedAt
 
-            let client = NetworkClient()
-            if let fresh = try? await client.fetchSnapshotOnce(timeoutSeconds: 7) {
-                let now = Date()
-                UsageCacheStore.save(fresh, fetchedAt: now)
-                snapshot = fresh
-                fetchedAt = now
+            // 수동 새로고침(RefreshUsageIntent)이 이미 캐시를 갱신하고 리로드를
+            // 걸었을 수 있다 — 그 직후 다시 여기서 fetch까지 하면 8초 예산을
+            // 넘긴다. 캐시가 30초 이내로 신선하면 네트워크를 아예 안 탄다.
+            let isFresh = cached.map { Date().timeIntervalSince($0.fetchedAt) < 30 } ?? false
+            if !isFresh {
+                let client = NetworkClient()
+                if let fresh = try? await client.fetchSnapshotOnce(timeoutSeconds: 7) {
+                    let now = Date()
+                    UsageCacheStore.save(fresh, fetchedAt: now)
+                    snapshot = fresh
+                    fetchedAt = now
+                }
             }
 
             let entry = UsageEntry(date: Date(), snapshot: snapshot, fetchedAt: fetchedAt)

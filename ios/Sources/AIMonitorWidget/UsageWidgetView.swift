@@ -37,9 +37,11 @@ struct UsageWidgetView: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(freshnessText)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                if let fetchedAt = entry.fetchedAt {
+                    Text(fetchedAt, style: .relative)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button(intent: RefreshUsageIntent()) {
                     Image(systemName: "arrow.clockwise")
@@ -60,18 +62,12 @@ struct UsageWidgetView: View {
             Spacer()
             Text("\(Int(agent.ratePerSec)) tok/s")
                 .font(.caption)
-            if let pct = agent.usedPct5h {
+            if agent.quotaError == nil, let pct = agent.usedPct5h {
                 Text("· 5h \(Int(pct))%")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
-    }
-
-    private var freshnessText: String {
-        guard let fetchedAt = entry.fetchedAt else { return "" }
-        let minutes = max(0, Int(Date().timeIntervalSince(fetchedAt) / 60))
-        return minutes < 1 ? "방금 갱신" : "\(minutes)분 전"
     }
 
     private func agentName(_ kind: AgentKindCode) -> String {
