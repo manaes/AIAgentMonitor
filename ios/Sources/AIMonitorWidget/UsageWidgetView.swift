@@ -9,9 +9,7 @@ struct UsageWidgetView: View {
     @Environment(\.widgetFamily) private var family
     let entry: UsageEntry
 
-    /// Small 은 158pt 안에 에이전트 2개가 들어가야 해서 주간(Week) 행만 보여준다 —
-    /// 5h 까지 넣으면 마지막 막대가 아래로 잘렸다(실기 2026-09-17). 브랜드 텍스트도
-    /// 폭이 모자라 아이콘만 남긴다.
+    /// Small은 주간 사용량만 세로로 배치하고 헤더는 아이콘으로 줄인다.
     private var compact: Bool { family == .systemSmall }
 
     var body: some View {
@@ -46,29 +44,25 @@ struct UsageWidgetView: View {
         let ordered = orderedForDisplay(snapshot.agents)
         let now = Date()
 
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: compact ? 4 : 8) {
             headerRow
 
-            // 카드가 남는 높이를 나눠 받아야 안의 Spacer 가 사용량 행을 아래로
-            // 밀어 붙인다(사용자 요청: 이름은 위, 사용량은 bottom 정렬).
             if compact {
-                // 좁은 위젯은 세로 1열 — 에이전트 사이만 구분선을 넣는다.
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(ordered.enumerated()), id: \.offset) { index, agent in
-                        agentCard(agent, now: now)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        if index < ordered.count - 1 {
-                            Divider().background(Color(Palette.separator))
-                        }
-                    }
+                // 고유 높이로 위부터 쌓고, 남는 공간은 마지막 카드 아래에 둔다.
+                ViewThatFits(in: .vertical) {
+                    compactCards(ordered, now: now, tight: false)
+                    compactCards(ordered, now: now, tight: false, contentSpacing: 6)
+                    compactCards(ordered, now: now, tight: true, contentSpacing: 6)
+                    compactCards(ordered, now: now, tight: true, contentSpacing: 2)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 // Medium/Large 는 가로로 나란히 놓고 세로 구분선으로 나눈다.
                 HStack(alignment: .top, spacing: 0) {
                     ForEach(Array(ordered.enumerated()), id: \.offset) { index, agent in
                         agentCard(agent, now: now)
-                            .padding(.leading, index == 0 ? 0 : 8)
-                            .padding(.trailing, index == ordered.count - 1 ? 0 : 8)
+                            .padding(.leading, index == 0 ? 0 : 12)
+                            .padding(.trailing, index == ordered.count - 1 ? 0 : 12)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         if index < ordered.count - 1 {
                             Divider().background(Color(Palette.separator))
@@ -78,15 +72,31 @@ struct UsageWidgetView: View {
                 .frame(maxHeight: .infinity)
             }
         }
-        // 시스템 콘텐츠 여백은 AIMonitorWidgetBundle 에서 껐다 — 여기가 유일한 여백이다.
-        .padding(8)
+        // 둥근 모서리 안쪽의 안전 여백. 시스템 여백은 꺼져 있어 한 번만 적용된다.
+        .padding(.horizontal, 16)
+        .padding(.top, 16)
+        .padding(.bottom, 24)
+    }
+
+    private func compactCards(_ agents: [MirrorAgent], now: Date, tight: Bool, contentSpacing: CGFloat = 8) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(agents.enumerated()), id: \.offset) { index, agent in
+                agentCard(agent, now: now, tight: tight, contentSpacing: contentSpacing)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if index < agents.count - 1 {
+                    Divider()
+                        .background(Color(Palette.separator))
+                        .padding(.vertical, tight ? 5 : 6)
+                }
+            }
+        }
     }
 
     /// 앱 브랜드 표기(로고 자리 SF Symbol) + 신선도 + 새로고침. 우하단 코너
     /// 오버레이 방식을 되돌리고, 참고 위젯(HRV)처럼 상단 한 줄 + 구분선으로 복귀.
     private var headerRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
+        VStack(alignment: .leading, spacing: compact ? 4 : 6) {
+            HStack(spacing: 6) {
                 Image(systemName: "cpu")
                     .font(.system(size: 11))
                     .foregroundStyle(Color(Palette.subtle))
@@ -104,6 +114,10 @@ struct UsageWidgetView: View {
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        // WidgetKit의 동적 날짜 텍스트는 실제 글자보다 넓게 배치된다.
+                        // 프레임뿐 아니라 텍스트 자체도 trailing으로 정렬해야 한다.
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
                 Button(intent: RefreshUsageIntent()) {
                     Image(systemName: "arrow.clockwise")
@@ -116,17 +130,26 @@ struct UsageWidgetView: View {
         }
     }
 
-    /// 이름은 위, 사용량 행은 아래에 붙인다. 행 사이 간격은 16 고정이고 이름과 행
-    /// 사이의 Spacer 가 남는 높이를 먹는다 — 상한을 두어 Large 처럼 아주 큰
-    /// 패밀리에서 이름과 사용량이 화면 양끝으로 찢어지지 않게 한다.
-    private func agentCard(_ agent: MirrorAgent, now: Date) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text(agentName(agent.kind))
-                .font(Font(Typography.name))
-                .foregroundStyle(Color(Palette.primaryText))
-                .lineLimit(1)
+    /// 콘텐츠는 위부터 쌓는다. 좁은 Small에서만 글자와 내부 간격을 압축한다.
+    private func agentCard(_ agent: MirrorAgent, now: Date, tight: Bool = false, contentSpacing: CGFloat = 8) -> some View {
+        let usage = weeklyUsage(for: agent, now: now)
 
-            Spacer(minLength: 6).frame(maxHeight: 40)
+        return VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: compact ? 1 : 3) {
+                Text(agentName(agent.kind))
+                    .font(tight ? .system(size: 11, weight: .semibold) : Font(Typography.name))
+                    .foregroundStyle(Color(Palette.primaryText))
+                    .lineLimit(1)
+                // 모든 카드에 같은 한 줄을 예약한다. 내용 유무로 그래프가 움직이지 않는다.
+                Text(usage?.countdownText ?? " ")
+                    .font(compact ? .system(size: tight ? 8 : 9, weight: .semibold) : Font(Typography.countdown))
+                    .foregroundStyle(Color(Palette.countdown))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .accessibilityHidden(usage?.countdownText == nil)
+            }
+
+            Color.clear.frame(height: contentSpacing)
 
             if !compact {
                 if agent.quotaError == nil, let p5 = agent.usedPct5h {
@@ -141,31 +164,31 @@ struct UsageWidgetView: View {
                     quotaRow(label: "5h", percentText: nil, countdownText: quotaFallbackText(for: agent), percent: nil)
                 }
 
-                Spacer().frame(height: 16)
+                Color.clear.frame(height: 12)
             }
 
-            if let usage = weeklyUsage(for: agent, now: now) {
-                quotaRow(label: "Week", percentText: usage.percentText, countdownText: usage.countdownText, percent: usage.percent)
+            if let usage {
+                quotaRow(label: "Week", percentText: usage.percentText, countdownText: nil, percent: usage.percent, tight: tight)
             } else {
-                quotaRow(label: "Week", percentText: nil, countdownText: quotaFallbackText(for: agent), percent: nil)
+                quotaRow(label: "Week", percentText: nil, countdownText: quotaFallbackText(for: agent), percent: nil, tight: tight)
             }
         }
     }
 
     /// 5h·주간 행을 공유하는 빌더 — `QuotaBarView`처럼 두 창을 같은 모양(라벨 +
-    /// %/카운트다운 + 그라디언트 막대)으로 그린다. `percent`가 nil이면(에러/미동기화)
-    /// 막대 없이 라벨 줄만 남긴다.
-    private func quotaRow(label: String, percentText: String?, countdownText: String?, percent: Float?) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
+    /// %/카운트다운 + 그라디언트 막대)으로 그린다. 값이 없어도 막대의 자리와
+    /// 라벨 높이를 유지해 옆 카드의 같은 기간과 수평으로 맞춘다.
+    private func quotaRow(label: String, percentText: String?, countdownText: String?, percent: Float?, tight: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: compact ? 1 : 2) {
+            HStack(spacing: 4) {
                 Text(label)
                     .font(Font(Typography.label))
                     .foregroundStyle(Color(Palette.subtle))
                     .lineLimit(1)
-                Spacer()
+                Spacer(minLength: 2)
                 if let countdownText {
                     Text(countdownText)
-                        .font(Font(Typography.countdown))
+                        .font(compact ? .system(size: 9, weight: .semibold) : Font(Typography.countdown))
                         .foregroundStyle(Color(Palette.countdown))
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
@@ -173,11 +196,12 @@ struct UsageWidgetView: View {
                 }
                 if let percentText {
                     Text(percentText)
-                        .font(Font(Typography.percent))
+                        .font(tight ? .system(size: 11, weight: .bold).monospacedDigit() : Font(Typography.percent))
                         .foregroundStyle(Color(Palette.percent))
                         .lineLimit(1)
                 }
             }
+            .frame(height: tight ? 12 : (compact ? 14 : 16))
             if let percent {
                 GeometryReader { geo in
                     let gradient = QuotaDisplay.gradient(forPercent: percent)
@@ -195,8 +219,9 @@ struct UsageWidgetView: View {
                             .frame(width: geo.size.width * CGFloat(percent / 100))
                     }
                 }
-                // 앱의 QuotaBarView 트랙 두께(6)와 맞춘다.
-                .frame(height: 6)
+                .frame(height: tight ? 4 : (compact ? 5 : 6))
+            } else {
+                Color.clear.frame(height: tight ? 4 : (compact ? 5 : 6))
             }
         }
     }
