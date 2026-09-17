@@ -91,6 +91,7 @@ let project = Project(
                 .target(name: "NetworkTransport"),
                 .target(name: "DesignSystem"),
                 .target(name: "MirrorFormat"),
+                .target(name: "WidgetShared"),
                 .external(name: "SnapKit"),
             ],
             settings: .settings(base: ["SWIFT_ACTIVE_COMPILATION_CONDITIONS": "$(inherited) NETWORK_TRANSPORT"])
