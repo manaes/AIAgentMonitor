@@ -164,6 +164,10 @@ let project = Project(
             ]),
             sources: ["Sources/App/**"],
             resources: ["Sources/App/Resources/**"],
+            entitlements: .dictionary([
+                "com.apple.security.application-groups": ["group.co.kr.wannypark.aiagentmirror"],
+                "keychain-access-groups": ["$(AppIdentifierPrefix)co.kr.wannypark.aiagentmirror.shared"],
+            ]),
             dependencies: [
                 .target(name: "BLETransport"),
                 .target(name: "NetworkTransport"),
