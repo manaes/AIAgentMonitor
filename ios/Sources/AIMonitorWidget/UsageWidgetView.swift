@@ -41,19 +41,17 @@ struct UsageWidgetView: View {
         let ordered = orderedForDisplay(snapshot.agents)
         let now = Date()
 
+        // Small 은 좁아서 1열, 그 외는 2열 — 카드 자체(agentCard)는 모든 패밀리가
+        // 공유한다. 얇은 텍스트 한 줄짜리 compactAgentRow 는 위젯 높이를 못 채워
+        // 아래쪽이 비어 보이는 문제가 있어 폐기했다.
+        let columns: [GridItem] = family == .systemSmall
+            ? [GridItem(.flexible())]
+            : [GridItem(.flexible()), GridItem(.flexible())]
+
         return Group {
-            if family == .systemSmall {
-                // 작은 위젯은 폭이 좁아 막대 없이 이름·%·카운트다운만 한 줄로 쌓는다.
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(Array(ordered.enumerated()), id: \.offset) { _, agent in
-                        compactAgentRow(agent, now: now)
-                    }
-                }
-            } else {
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                    ForEach(Array(ordered.enumerated()), id: \.offset) { _, agent in
-                        agentCard(agent, now: now)
-                    }
+            LazyVGrid(columns: columns, spacing: 8) {
+                ForEach(Array(ordered.enumerated()), id: \.offset) { _, agent in
+                    agentCard(agent, now: now)
                 }
             }
         }
@@ -73,31 +71,6 @@ struct UsageWidgetView: View {
                 .buttonStyle(.plain)
             }
             .padding(6)
-        }
-    }
-
-    private func compactAgentRow(_ agent: MirrorAgent, now: Date) -> some View {
-        HStack {
-            Text(agentName(agent.kind))
-                .font(Font(Typography.name))
-                .foregroundStyle(Color(Palette.primaryText))
-            Spacer()
-            if let usage = weeklyUsage(for: agent, now: now) {
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text(usage.percentText)
-                        .font(Font(Typography.percent))
-                        .foregroundStyle(Color(Palette.percent))
-                    if let countdownText = usage.countdownText {
-                        Text(countdownText)
-                            .font(Font(Typography.countdown))
-                            .foregroundStyle(Color(Palette.countdown))
-                    }
-                }
-            } else {
-                Text(weeklyFallbackText(for: agent))
-                    .font(Font(Typography.label))
-                    .foregroundStyle(.secondary)
-            }
         }
     }
 
