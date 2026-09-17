@@ -9,9 +9,9 @@ struct UsageWidgetView: View {
     @Environment(\.widgetFamily) private var family
     let entry: UsageEntry
 
-    /// Small 은 높이 예산이 빡빡하다(에이전트 2개 × 막대 2개 + 헤더가 158pt 안에
-    /// 들어가야 한다) — 간격·막대 두께를 최소로 줄인다. 실기에서 6pt 간격으로는
-    /// 마지막 막대가 아래로 잘렸다(2026-09-17).
+    /// Small 은 158pt 안에 에이전트 2개가 들어가야 해서 주간(Week) 행만 보여준다 —
+    /// 5h 까지 넣으면 마지막 막대가 아래로 잘렸다(실기 2026-09-17). 브랜드 텍스트도
+    /// 폭이 모자라 아이콘만 남긴다.
     private var compact: Bool { family == .systemSmall }
 
     var body: some View {
@@ -46,14 +46,17 @@ struct UsageWidgetView: View {
         let ordered = orderedForDisplay(snapshot.agents)
         let now = Date()
 
-        return VStack(alignment: .leading, spacing: compact ? 4 : 8) {
+        return VStack(alignment: .leading, spacing: 8) {
             headerRow
 
+            // 카드가 남는 높이를 나눠 받아야 안의 Spacer 가 사용량 행을 아래로
+            // 밀어 붙인다(사용자 요청: 이름은 위, 사용량은 bottom 정렬).
             if compact {
                 // 좁은 위젯은 세로 1열 — 에이전트 사이만 구분선을 넣는다.
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(ordered.enumerated()), id: \.offset) { index, agent in
                         agentCard(agent, now: now)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         if index < ordered.count - 1 {
                             Divider().background(Color(Palette.separator))
                         }
@@ -61,7 +64,6 @@ struct UsageWidgetView: View {
                 }
             } else {
                 // Medium/Large 는 가로로 나란히 놓고 세로 구분선으로 나눈다.
-                // 카드가 남는 높이를 받아야 안의 flexibleGap 이 벌어져 위젯을 채운다.
                 HStack(alignment: .top, spacing: 0) {
                     ForEach(Array(ordered.enumerated()), id: \.offset) { index, agent in
                         agentCard(agent, now: now)
@@ -77,14 +79,13 @@ struct UsageWidgetView: View {
             }
         }
         // 시스템 콘텐츠 여백은 AIMonitorWidgetBundle 에서 껐다 — 여기가 유일한 여백이다.
-        .padding(.horizontal, 12)
-        .padding(.vertical, compact ? 5 : 10)
+        .padding(8)
     }
 
     /// 앱 브랜드 표기(로고 자리 SF Symbol) + 신선도 + 새로고침. 우하단 코너
     /// 오버레이 방식을 되돌리고, 참고 위젯(HRV)처럼 상단 한 줄 + 구분선으로 복귀.
     private var headerRow: some View {
-        VStack(alignment: .leading, spacing: compact ? 2 : 6) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Image(systemName: "cpu")
                     .font(.system(size: 11))
@@ -115,28 +116,33 @@ struct UsageWidgetView: View {
         }
     }
 
+    /// 이름은 위, 사용량 행은 아래에 붙인다. 행 사이 간격은 16 고정이고 이름과 행
+    /// 사이의 Spacer 가 남는 높이를 먹는다 — 상한을 두어 Large 처럼 아주 큰
+    /// 패밀리에서 이름과 사용량이 화면 양끝으로 찢어지지 않게 한다.
     private func agentCard(_ agent: MirrorAgent, now: Date) -> some View {
-        VStack(alignment: .leading, spacing: compact ? 2 : 6) {
+        VStack(alignment: .leading, spacing: 0) {
             Text(agentName(agent.kind))
                 .font(Font(Typography.name))
                 .foregroundStyle(Color(Palette.primaryText))
                 .lineLimit(1)
 
-            flexibleGap
+            Spacer(minLength: 6).frame(maxHeight: 40)
 
-            if agent.quotaError == nil, let p5 = agent.usedPct5h {
-                let clamped5h = min(100, p5)
-                quotaRow(
-                    label: "5h",
-                    percentText: MirrorFormat.toFixed(Double(clamped5h), 0) + "%",
-                    countdownText: nil,
-                    percent: clamped5h
-                )
-            } else {
-                quotaRow(label: "5h", percentText: nil, countdownText: quotaFallbackText(for: agent), percent: nil)
+            if !compact {
+                if agent.quotaError == nil, let p5 = agent.usedPct5h {
+                    let clamped5h = min(100, p5)
+                    quotaRow(
+                        label: "5h",
+                        percentText: MirrorFormat.toFixed(Double(clamped5h), 0) + "%",
+                        countdownText: nil,
+                        percent: clamped5h
+                    )
+                } else {
+                    quotaRow(label: "5h", percentText: nil, countdownText: quotaFallbackText(for: agent), percent: nil)
+                }
+
+                Spacer().frame(height: 16)
             }
-
-            flexibleGap
 
             if let usage = weeklyUsage(for: agent, now: now) {
                 quotaRow(label: "Week", percentText: usage.percentText, countdownText: usage.countdownText, percent: usage.percent)
@@ -146,17 +152,11 @@ struct UsageWidgetView: View {
         }
     }
 
-    /// 남는 높이가 있으면 행 사이를 벌려 위젯을 채우고(상한 있음), 없으면 0으로
-    /// 접힌다 — Medium 은 막대 아래가 통째로 비어 보였고, Small 은 반대로 넘쳤다.
-    private var flexibleGap: some View {
-        Spacer(minLength: 0).frame(maxHeight: compact ? 6 : 18)
-    }
-
     /// 5h·주간 행을 공유하는 빌더 — `QuotaBarView`처럼 두 창을 같은 모양(라벨 +
     /// %/카운트다운 + 그라디언트 막대)으로 그린다. `percent`가 nil이면(에러/미동기화)
     /// 막대 없이 라벨 줄만 남긴다.
     private func quotaRow(label: String, percentText: String?, countdownText: String?, percent: Float?) -> some View {
-        VStack(alignment: .leading, spacing: compact ? 1 : 2) {
+        VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text(label)
                     .font(Font(Typography.label))
@@ -195,8 +195,8 @@ struct UsageWidgetView: View {
                             .frame(width: geo.size.width * CGFloat(percent / 100))
                     }
                 }
-                // 앱의 QuotaBarView 트랙 두께(6)와 맞춘다. Small 만 높이 예산 때문에 줄인다.
-                .frame(height: compact ? 4 : 6)
+                // 앱의 QuotaBarView 트랙 두께(6)와 맞춘다.
+                .frame(height: 6)
             }
         }
     }
