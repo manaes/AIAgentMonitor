@@ -173,6 +173,8 @@ let project = Project(
                 .target(name: "NetworkTransport"),
                 .target(name: "MirrorFeature"),
                 .external(name: "SnapKit"),
+                .target(name: "WidgetShared"),
+                .target(name: "AIMonitorWidget"),
             ],
             // 실기기 디버그 빌드에 매번 Xcode 에서 Team 을 고르지 않도록 고정한다.
             // "Juwan Park" 이름으로 로컬에 팀이 두 개 있다(4Z3DSP9QUS / LC8PY3D283).
@@ -241,6 +243,45 @@ let project = Project(
                 "CODE_SIGN_STYLE": "Automatic",
                 "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
                 // App 과 같은 기준값 — 두 앱을 짝으로 같이 배포한다(2026-09-17).
+                "MARKETING_VERSION": marketingVersion,
+                "CURRENT_PROJECT_VERSION": currentProjectVersion,
+            ])
+        ),
+        // 홈 화면 위젯. `App`에만 embed한다(`AppBLE`은 iroh 자체가 없어 위젯
+        // 자체 새로고침이 불가능 — 설계 §1 범위 밖).
+        //
+        // ⚠️ NetworkTransport → BLETransport(CoreBluetooth 포함) 의존 때문에,
+        // 실제로 안 쓰여도 이 위젯 바이너리에 Bluetooth API 심볼이 딸려온다 —
+        // AppBLE의 NSCameraUsageDescription(ITMS-90683)과 같은 메커니즘
+        // (설계 §6). 그래서 아래 NSBluetoothAlwaysUsageDescription이 필요하다.
+        .target(
+            name: "AIMonitorWidget",
+            destinations: .iOS,
+            product: .appExtension,
+            bundleId: "\(bundlePrefix).widget",
+            deploymentTargets: iOS,
+            infoPlist: .extendingDefault(with: [
+                "NSExtension": [
+                    "NSExtensionPointIdentifier": "com.apple.widgetkit-extension",
+                ],
+                "NSBluetoothAlwaysUsageDescription":
+                    "이 위젯은 블루투스를 쓰지 않지만, 공유 코드에 Bluetooth API가 포함돼 있어 시스템이 이 문구를 요구합니다.",
+                "CFBundleShortVersionString": "$(MARKETING_VERSION)",
+                "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
+            ]),
+            sources: ["Sources/AIMonitorWidget/**"],
+            entitlements: .dictionary([
+                "com.apple.security.application-groups": ["group.co.kr.wannypark.aiagentmirror"],
+                "keychain-access-groups": ["$(AppIdentifierPrefix)co.kr.wannypark.aiagentmirror.shared"],
+            ]),
+            dependencies: [
+                .target(name: "WidgetShared"),
+                .target(name: "NetworkTransport"),
+                .target(name: "Wire"),
+            ],
+            settings: .settings(base: [
+                "DEVELOPMENT_TEAM": "LC8PY3D283",
+                "CODE_SIGN_STYLE": "Automatic",
                 "MARKETING_VERSION": marketingVersion,
                 "CURRENT_PROJECT_VERSION": currentProjectVersion,
             ])
