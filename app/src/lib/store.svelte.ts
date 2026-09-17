@@ -92,6 +92,14 @@ class SnapshotStore {
       // 실패한 켜기가 남긴 bleActionError 가 (DevicePanel 이 그것을 우선 표시하므로)
       // 이후 도착하는 백엔드 오류를 계속 가린다.
       this.bleActionError = null;
+      // 공유 페어링 창은 이 기기가 방금 인가됐을 때(= 창 소진) 백엔드에서
+      // 조용히 닫힌다(pairing.rs: 창 하나·코드 하나, grant 즉시 pending=None).
+      // 그런데 pairing_status 자체는 push 되지 않으므로, 이 이벤트를 못 쓰면
+      // 다른 기기(예: 네트워크로 붙으려는 iPhone)가 이미 소진된 QR/코드를
+      // 화면에서 계속 보고 스캔하게 된다 — 재현: BLE로 먼저 페어링 성공 →
+      // 그 직후 네트워크 QR 스캔 → Mac 은 창이 없어 Rejected → iOS 는
+      // needsPairing 에 멈춘 채 복구 동작이 없음(2026-09-17 실기 확인).
+      await this.#refreshPairing();
     });
   }
 
@@ -131,6 +139,9 @@ class SnapshotStore {
       if (seq !== this.#networkReqSeq) return;
       this.network = status;
       this.networkActionError = null;
+      // BLE 리스너와 같은 이유 — 공유 페어링 창이 이 전송의 grant 로
+      // 소진됐을 수 있다(위 initBle 주석 참고).
+      await this.#refreshPairing();
     });
   }
 
@@ -173,6 +184,9 @@ class SnapshotStore {
       if (seq !== this.#lanReqSeq) return;
       this.lan = status;
       this.lanActionError = null;
+      // BLE 리스너와 같은 이유 — 공유 페어링 창이 이 전송의 grant 로
+      // 소진됐을 수 있다(위 initBle 주석 참고).
+      await this.#refreshPairing();
     });
   }
 
