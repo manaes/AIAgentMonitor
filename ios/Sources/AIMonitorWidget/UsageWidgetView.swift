@@ -9,6 +9,11 @@ struct UsageWidgetView: View {
     @Environment(\.widgetFamily) private var family
     let entry: UsageEntry
 
+    /// Small 은 높이 예산이 빡빡하다(에이전트 2개 × 막대 2개 + 헤더가 158pt 안에
+    /// 들어가야 한다) — 간격·막대 두께를 최소로 줄인다. 실기에서 6pt 간격으로는
+    /// 마지막 막대가 아래로 잘렸다(2026-09-17).
+    private var compact: Bool { family == .systemSmall }
+
     var body: some View {
         Group {
             if let snapshot = entry.snapshot {
@@ -41,12 +46,12 @@ struct UsageWidgetView: View {
         let ordered = orderedForDisplay(snapshot.agents)
         let now = Date()
 
-        return VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: compact ? 4 : 8) {
             headerRow
 
-            if family == .systemSmall {
+            if compact {
                 // 좁은 위젯은 세로 1열 — 에이전트 사이만 구분선을 넣는다.
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(ordered.enumerated()), id: \.offset) { index, agent in
                         agentCard(agent, now: now)
                         if index < ordered.count - 1 {
@@ -56,32 +61,37 @@ struct UsageWidgetView: View {
                 }
             } else {
                 // Medium/Large 는 가로로 나란히 놓고 세로 구분선으로 나눈다.
+                // 카드가 남는 높이를 받아야 안의 flexibleGap 이 벌어져 위젯을 채운다.
                 HStack(alignment: .top, spacing: 0) {
                     ForEach(Array(ordered.enumerated()), id: \.offset) { index, agent in
                         agentCard(agent, now: now)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.leading, index == 0 ? 0 : 8)
+                            .padding(.trailing, index == ordered.count - 1 ? 0 : 8)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         if index < ordered.count - 1 {
                             Divider().background(Color(Palette.separator))
                         }
                     }
                 }
+                .frame(maxHeight: .infinity)
             }
         }
+        // 시스템 콘텐츠 여백은 AIMonitorWidgetBundle 에서 껐다 — 여기가 유일한 여백이다.
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.vertical, compact ? 5 : 10)
     }
 
     /// 앱 브랜드 표기(로고 자리 SF Symbol) + 신선도 + 새로고침. 우하단 코너
     /// 오버레이 방식을 되돌리고, 참고 위젯(HRV)처럼 상단 한 줄 + 구분선으로 복귀.
     private var headerRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: compact ? 2 : 6) {
             HStack {
                 Image(systemName: "cpu")
                     .font(.system(size: 11))
                     .foregroundStyle(Color(Palette.subtle))
                 // Small은 폭이 좁아 "AI Monitor" 전체 텍스트가 줄바꿈되며 깨진다 —
                 // 아이콘만으로도 브랜드 표기는 충분하다.
-                if family != .systemSmall {
+                if !compact {
                     Text("AI Monitor")
                         .font(Font(Typography.label))
                         .foregroundStyle(Color(Palette.subtle))
@@ -106,10 +116,13 @@ struct UsageWidgetView: View {
     }
 
     private func agentCard(_ agent: MirrorAgent, now: Date) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: compact ? 2 : 6) {
             Text(agentName(agent.kind))
                 .font(Font(Typography.name))
                 .foregroundStyle(Color(Palette.primaryText))
+                .lineLimit(1)
+
+            flexibleGap
 
             if agent.quotaError == nil, let p5 = agent.usedPct5h {
                 let clamped5h = min(100, p5)
@@ -120,22 +133,30 @@ struct UsageWidgetView: View {
                     percent: clamped5h
                 )
             } else {
-                quotaRow(label: "5h", percentText: nil, countdownText: weeklyFallbackText(for: agent), percent: nil)
+                quotaRow(label: "5h", percentText: nil, countdownText: quotaFallbackText(for: agent), percent: nil)
             }
+
+            flexibleGap
 
             if let usage = weeklyUsage(for: agent, now: now) {
                 quotaRow(label: "Week", percentText: usage.percentText, countdownText: usage.countdownText, percent: usage.percent)
             } else {
-                quotaRow(label: "Week", percentText: nil, countdownText: weeklyFallbackText(for: agent), percent: nil)
+                quotaRow(label: "Week", percentText: nil, countdownText: quotaFallbackText(for: agent), percent: nil)
             }
         }
+    }
+
+    /// 남는 높이가 있으면 행 사이를 벌려 위젯을 채우고(상한 있음), 없으면 0으로
+    /// 접힌다 — Medium 은 막대 아래가 통째로 비어 보였고, Small 은 반대로 넘쳤다.
+    private var flexibleGap: some View {
+        Spacer(minLength: 0).frame(maxHeight: compact ? 6 : 18)
     }
 
     /// 5h·주간 행을 공유하는 빌더 — `QuotaBarView`처럼 두 창을 같은 모양(라벨 +
     /// %/카운트다운 + 그라디언트 막대)으로 그린다. `percent`가 nil이면(에러/미동기화)
     /// 막대 없이 라벨 줄만 남긴다.
     private func quotaRow(label: String, percentText: String?, countdownText: String?, percent: Float?) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: compact ? 1 : 2) {
             HStack {
                 Text(label)
                     .font(Font(Typography.label))
@@ -174,7 +195,8 @@ struct UsageWidgetView: View {
                             .frame(width: geo.size.width * CGFloat(percent / 100))
                     }
                 }
-                .frame(height: 5)
+                // 앱의 QuotaBarView 트랙 두께(6)와 맞춘다. Small 만 높이 예산 때문에 줄인다.
+                .frame(height: compact ? 4 : 6)
             }
         }
     }
@@ -202,8 +224,13 @@ struct UsageWidgetView: View {
         )
     }
 
-    private func weeklyFallbackText(for agent: MirrorAgent) -> String {
-        agent.quotaError?.displayText ?? "동기화 전"
+    /// 값이 없는 행의 안내 문구 — `QuotaBarView.configure` 의 `note()` 와 같은 구분.
+    /// 다른 창의 값이 하나라도 왔으면 조회 자체는 성공한 것이라 "동기화 전"이 아니라
+    /// 이 플랜에 없는 창("지원하지 않음")이다 — Codex 는 5h 창 없이 주간만 온다.
+    private func quotaFallbackText(for agent: MirrorAgent) -> String {
+        if let error = agent.quotaError { return error.displayText }
+        let synced = agent.usedPct5h != nil || agent.usedPctWeekly != nil
+        return synced ? "지원하지 않음" : "동기화 전"
     }
 
     private func agentName(_ kind: AgentKindCode) -> String {
