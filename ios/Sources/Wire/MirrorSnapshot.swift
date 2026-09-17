@@ -72,7 +72,7 @@ public enum QuotaErrorKindCode: Equatable, Sendable {
     }
 }
 
-public struct MirrorProject: Decodable, Equatable, Sendable {
+public struct MirrorProject: Codable, Equatable, Sendable {
     public let id: UInt32
     public let n: String
     public let m: String
@@ -87,7 +87,7 @@ public struct MirrorProject: Decodable, Equatable, Sendable {
     public var status: ActivityStatusCode { ActivityStatusCode(code: s) }
 }
 
-public struct MirrorAgent: Decodable, Equatable, Sendable {
+public struct MirrorAgent: Codable, Equatable, Sendable {
     public let k: UInt8
     public let r: Float
     public let t5: UInt32
@@ -114,7 +114,7 @@ public struct MirrorAgent: Decodable, Equatable, Sendable {
     public var quotaError: QuotaErrorKindCode? { e.map { QuotaErrorKindCode(code: $0) } }
 }
 
-public struct MirrorSnapshot: Decodable, Equatable, Sendable {
+public struct MirrorSnapshot: Codable, Equatable, Sendable {
     public let v: UInt8
     public let t: UInt64
     public let a: [MirrorAgent]

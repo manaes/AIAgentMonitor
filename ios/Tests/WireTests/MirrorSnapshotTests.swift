@@ -107,4 +107,16 @@ final class MirrorSnapshotTests: XCTestCase {
         XCTAssertEqual(QuotaErrorKindCode(code: 3), .timeout)
         XCTAssertEqual(QuotaErrorKindCode(code: 4), .other)
     }
+
+    /// 위젯 캐시(WidgetShared)가 스냅샷을 App Group에 저장하려면 인코딩도
+    /// 가능해야 한다 — 지금은 Decodable뿐이라 컴파일이 안 된다.
+    func testSnapshotRoundTripsThroughEncodingForWidgetCache() throws {
+        let url = try XCTUnwrap(
+            Bundle(for: Self.self).url(forResource: "snapshot-sample", withExtension: "json")
+        )
+        let original = try JSONDecoder().decode(MirrorSnapshot.self, from: Data(contentsOf: url))
+        let encoded = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(MirrorSnapshot.self, from: encoded)
+        XCTAssertEqual(decoded, original)
+    }
 }
