@@ -67,7 +67,8 @@ struct UsageWidgetView: View {
                 }
             }
         }
-        .padding()
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
     }
 
     /// 앱 브랜드 표기(로고 자리 SF Symbol) + 신선도 + 새로고침. 우하단 코너
@@ -78,14 +79,20 @@ struct UsageWidgetView: View {
                 Image(systemName: "cpu")
                     .font(.system(size: 11))
                     .foregroundStyle(Color(Palette.subtle))
-                Text("AI Monitor")
-                    .font(Font(Typography.label))
-                    .foregroundStyle(Color(Palette.subtle))
+                // Small은 폭이 좁아 "AI Monitor" 전체 텍스트가 줄바꿈되며 깨진다 —
+                // 아이콘만으로도 브랜드 표기는 충분하다.
+                if family != .systemSmall {
+                    Text("AI Monitor")
+                        .font(Font(Typography.label))
+                        .foregroundStyle(Color(Palette.subtle))
+                        .lineLimit(1)
+                }
                 Spacer()
                 if let fetchedAt = entry.fetchedAt {
                     Text(fetchedAt, style: .relative)
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
                 Button(intent: RefreshUsageIntent()) {
                     Image(systemName: "arrow.clockwise")
@@ -133,16 +140,21 @@ struct UsageWidgetView: View {
                 Text(label)
                     .font(Font(Typography.label))
                     .foregroundStyle(Color(Palette.subtle))
+                    .lineLimit(1)
                 Spacer()
                 if let countdownText {
                     Text(countdownText)
                         .font(Font(Typography.countdown))
                         .foregroundStyle(Color(Palette.countdown))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .layoutPriority(-1)
                 }
                 if let percentText {
                     Text(percentText)
                         .font(Font(Typography.percent))
                         .foregroundStyle(Color(Palette.percent))
+                        .lineLimit(1)
                 }
             }
             if let percent {
