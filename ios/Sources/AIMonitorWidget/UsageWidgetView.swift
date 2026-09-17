@@ -101,6 +101,12 @@ struct UsageWidgetView: View {
                 .font(Font(Typography.name))
                 .foregroundStyle(Color(Palette.primaryText))
 
+            if let fiveHourText = fiveHourPercentText(for: agent) {
+                Text(fiveHourText)
+                    .font(Font(Typography.label))
+                    .foregroundStyle(Color(Palette.subtle))
+            }
+
             if let usage = weeklyUsage(for: agent, now: now) {
                 HStack {
                     Text(usage.percentText)
@@ -164,6 +170,15 @@ struct UsageWidgetView: View {
 
     private func weeklyFallbackText(for agent: MirrorAgent) -> String {
         agent.quotaError?.displayText ?? "동기화 전"
+    }
+
+    /// Medium/Large 카드 전용 보조 표시. quotaError 는 5h·주간 공통 상태이므로
+    /// (Wire/MirrorSnapshot.swift 의 MirrorAgent 문서 참고) weeklyUsage 와 같은
+    /// 게이트를 쓴다 — 실패/미동기화 시엔 아예 줄을 생략한다(에러 안내는 주간
+    /// 폴백 한 줄로 이미 전달되므로 중복 표시하지 않는다).
+    private func fiveHourPercentText(for agent: MirrorAgent) -> String? {
+        guard agent.quotaError == nil, let pct = agent.usedPct5h else { return nil }
+        return "5h " + MirrorFormat.toFixed(Double(min(100, pct)), 0) + "%"
     }
 
     private func agentName(_ kind: AgentKindCode) -> String {
