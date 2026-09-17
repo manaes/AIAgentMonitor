@@ -17,6 +17,9 @@ struct UsageWidgetView: View {
                 emptyState
             }
         }
+        // frame이 없으면 WidgetKit이 내용물의 고유 크기로만 배치해 중앙에
+        // 뭉치고 나머지 영역이 빈다 — 위젯 전체 영역을 채우고 좌상단에 고정한다.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         // iOS 17+ 위젯은 이 modifier가 없으면 배경이 제대로 안 그려진다.
         .containerBackground(.fill.tertiary, for: .widget)
     }
@@ -38,23 +41,10 @@ struct UsageWidgetView: View {
         let ordered = orderedForDisplay(snapshot.agents)
         let now = Date()
 
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                if let fetchedAt = entry.fetchedAt {
-                    Text(fetchedAt, style: .relative)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button(intent: RefreshUsageIntent()) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.plain)
-            }
-
+        return Group {
             if family == .systemSmall {
                 // 작은 위젯은 폭이 좁아 막대 없이 이름·%·카운트다운만 한 줄로 쌓는다.
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 10) {
                     ForEach(Array(ordered.enumerated()), id: \.offset) { _, agent in
                         compactAgentRow(agent, now: now)
                     }
@@ -68,6 +58,22 @@ struct UsageWidgetView: View {
             }
         }
         .padding()
+        // 신선도/새로고침은 본문을 침범하지 않도록 우하단 코너에 작게 얹는다.
+        .overlay(alignment: .bottomTrailing) {
+            HStack(spacing: 4) {
+                if let fetchedAt = entry.fetchedAt {
+                    Text(fetchedAt, style: .relative)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+                Button(intent: RefreshUsageIntent()) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(6)
+        }
     }
 
     private func compactAgentRow(_ agent: MirrorAgent, now: Date) -> some View {
@@ -156,14 +162,18 @@ struct UsageWidgetView: View {
     }
 
     /// 5h % 를 가리는 규칙(Fix 2)과 동일하게, 주간 %도 quotaError 가 있으면 숨긴다.
+    /// % 와 카운트다운은 서로 독립이다 — rw(주간 리셋 시각) 없이 usedPctWeekly 만
+    /// 오는 폴백 경로가 실존해서(맥 백엔드 확인), 둘을 all-or-nothing으로 묶으면
+    /// 메인 앱은 %를 보여주는데 위젯만 "동기화 전"으로 떨어지는 불일치가 생긴다
+    /// (AgentCardView/QuotaBarView 도 이미 %와 카운트다운을 따로 게이팅한다).
     private func weeklyUsage(for agent: MirrorAgent, now: Date) -> WeeklyUsage? {
-        guard agent.quotaError == nil, let pct = agent.usedPctWeekly, let resetAt = agent.rw else {
+        guard agent.quotaError == nil, let pct = agent.usedPctWeekly else {
             return nil
         }
         let clamped = min(100, pct)
         return WeeklyUsage(
             percentText: MirrorFormat.toFixed(Double(clamped), 0) + "%",
-            countdownText: MirrorFormat.weeklyCountdown(resetAt: resetAt, now: now),
+            countdownText: agent.rw.flatMap { MirrorFormat.weeklyCountdown(resetAt: $0, now: now) },
             percent: clamped
         )
     }
