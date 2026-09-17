@@ -48,6 +48,14 @@ public final class MirrorViewController: UIViewController {
     /// (사용자 확인 — 기본값 BLE 로 고정돼 있으면 재시도 자체가 안 됨).
     private static let transportPreferenceKey = "mirror.transport.preference"
 
+    /// 사용자가 연결 방식을 한 번이라도 명시적으로 골랐는지. 키 자체가 없으면
+    /// 최초 실행(또는 "연결 재설정" 이후)이라는 뜻이다 — 이때는 `preferredTransport`
+    /// 의 BLE 기본값으로 조용히 자동 연결하지 않고, 화면이 먼저 물어봐야 한다
+    /// (2026-09-17 사용자 확인 — 자동 연결이 뭘 골랐는지 모른 채 진행돼 혼란스러웠다).
+    public static var hasChosenTransport: Bool {
+        UserDefaults.standard.object(forKey: transportPreferenceKey) != nil
+    }
+
     public static var preferredTransport: TransportKind {
         #if NETWORK_TRANSPORT
         UserDefaults.standard.string(forKey: transportPreferenceKey) == "network" ? .network : .ble
@@ -198,11 +206,56 @@ public final class MirrorViewController: UIViewController {
             Task { @MainActor in self?.render(now: Date()) }
         }
 
-        client.start()
+        // 연결 방식을 한 번도 고른 적 없으면(최초 실행/연결 재설정 직후) 여기서
+        // 조용히 BLE로 자동 연결하지 않는다 — `viewDidAppear`가 먼저 물어본다.
+        if Self.hasChosenTransport {
+            client.start()
+        }
+    }
+
+    public override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // `hasChosenTransport`가 true가 되는 순간부터는 다시 뜨지 않는다 — 별도
+        // 플래그 없이 UserDefaults 존재 여부 자체가 "이미 물어봤다"는 가드다.
+        if !Self.hasChosenTransport, presentedViewController == nil {
+            presentTransportChooser()
+        }
     }
 
     deinit {
         tick?.invalidate()
+    }
+
+    /// 최초 실행(또는 "연결 재설정" 직후) 전용 — 자동으로 아무 전송이나 시작하지
+    /// 않고 사용자가 먼저 고르게 한다. 전체화면으로 띄운다 — 액션시트/팝오버로
+    /// 띄우면 화면 중앙에 앵커를 둬야 해서 설정 메뉴와 똑같은 말풍선(하단 삼각형
+    /// 포인터) 모양이 되고, 이 선택은 메뉴 조작이 아니라 온보딩의 일부다
+    /// (2026-09-17 사용자 확인). `isModalInPresentation`이 걸려 있어 스와이프로
+    /// 못 닫는다 — 아무것도 안 고르고 닫히면 화면이 "대기 중"에서 영원히 멈춘다.
+    private func presentTransportChooser() {
+        let vc = TransportChooserViewController()
+        vc.onChoose = { [weak self, weak vc] kind in
+            self?.beginWithChosenTransport(kind)
+            vc?.dismiss(animated: true)
+        }
+        present(vc, animated: true)
+    }
+
+    /// `switchTransport`와 달리 "이미 이 전송이었다"는 이유로 아무 일도 안 하고
+    /// 넘어가면 안 된다 — 최초 선택은 `activeKind`가 기본값(BLE)과 같아도 반드시
+    /// 실제로 시작해야 한다.
+    private func beginWithChosenTransport(_ kind: TransportKind) {
+        activeKind = kind
+        Self.persistTransportPreference(kind)
+        bind(to: client)
+        switch kind {
+        case .ble:
+            bleClient.start()
+        #if NETWORK_TRANSPORT
+        case .network:
+            networkClient.resetPairing()
+        #endif
+        }
     }
 
     /// 현재 활성 전송의 퍼블리셔를 구독한다. 전송을 바꿀 때(`switchTransport`)
@@ -213,8 +266,9 @@ public final class MirrorViewController: UIViewController {
         transport.state
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
-                self?.statusLabel.text = state.label
-                self?.updatePairingPresentation(for: state)
+                guard let self else { return }
+                self.statusLabel.text = self.statusLabelText(for: state)
+                self.updatePairingPresentation(for: state)
             }
             .store(in: &cancellables)
 
@@ -236,6 +290,9 @@ public final class MirrorViewController: UIViewController {
             self?.switchTransport(to: .network)
         })
         #endif
+        sheet.addAction(UIAlertAction(title: "연결 재설정", style: .destructive) { [weak self] _ in
+            self?.resetConnection()
+        })
         sheet.addAction(UIAlertAction(title: "취소", style: .cancel))
         // iPad 는 액션시트를 팝오버로 띄우므로 앵커가 없으면 그 자리에서 크래시한다.
         sheet.popoverPresentationController?.sourceView = settingsButton
@@ -262,6 +319,23 @@ public final class MirrorViewController: UIViewController {
             networkClient.resetPairing()
         #endif
         }
+    }
+
+    /// 설정의 "연결 재설정" — 저장된 페어링 정보를 BLE·네트워크 양쪽 다 지우고
+    /// 연결 방식 선택 자체를 되돌려 최초 실행 상태로 만든다. 지금 어느 전송으로
+    /// 붙어 있었는지와 무관하게 둘 다 지우는 이유: 사용자가 기대하는 건 "완전히
+    /// 처음부터"이지 "지금 쓰던 전송만"이 아니다(2026-09-17 요청).
+    private func resetConnection() {
+        client.stop()
+        dismissPairingIfPresented()
+        TokenStore.clear()
+        #if NETWORK_TRANSPORT
+        NetworkTokenStore.clearAll()
+        #endif
+        UserDefaults.standard.removeObject(forKey: Self.transportPreferenceKey)
+        latest = nil
+        statusLabel.text = ConnectionState.idle.label
+        presentTransportChooser()
     }
 
     public override func viewDidLayoutSubviews() {
@@ -354,6 +428,27 @@ public final class MirrorViewController: UIViewController {
         case .scanning, .connecting:
             return .none
         }
+    }
+
+    /// `ConnectionState.label` 은 BLE(6자리 코드 입력)을 기준으로 쓰여 있어, 네트워크
+    /// 전송(QR 스캔으로 코드까지 자동 제출 — `NetworkClient.pair` 문서 참고)에도 그
+    /// 문구를 그대로 붙이면 "입력하세요" 라고 하는데 입력할 화면이 없어 사용자가
+    /// 혼란스럽다(2026-09-17 실기 확인 — 스캔 후에도 이 문구가 남아 있어 아무 일도
+    /// 안 일어나는 것처럼 보였다). 네트워크에서만 페어링 관련 두 상태의 문구를 덮어쓴다.
+    private func statusLabelText(for state: ConnectionState) -> String {
+        #if NETWORK_TRANSPORT
+        if activeKind == .network {
+            switch state {
+            case .needsPairing:
+                return "페어링 필요 · Mac 화면의 QR을 스캔하세요"
+            case .pairingFailed:
+                return "페어링 실패 · Mac에서 QR을 새로 표시한 뒤 다시 스캔하세요"
+            default:
+                break
+            }
+        }
+        #endif
+        return state.label
     }
 
     private func updatePairingPresentation(for state: ConnectionState) {
