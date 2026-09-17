@@ -17,13 +17,18 @@ final class QuotaBarViewTests: XCTestCase {
         v.configure(tokens5h: 48210, autoPct: nil, weeklyPct: nil, isReset5h: false)
         XCTAssertNil(v.fivePercentText)
         XCTAssertEqual(v.fallbackText, "5h 토큰: 48.2k · 동기화 전")
+        XCTAssertEqual(v.weeklyFallbackText, "동기화 전", "둘 다 아직 안 왔으면 주간 줄도 같은 문구")
     }
 
-    func testWeeklyRowHiddenWhenWeeklyMissing() {
+    /// 2026-09-17: 예전엔 주간 값이 없으면 주간 줄 자체를 숨겼는데, 그러면 에이전트마다
+    /// 카드 높이가 달라진다(맥이 QuotaBar.svelte 에서 2026-09-15 에 고친 것과 같은 버그).
+    /// 지금은 줄은 그대로 두고 안내 문구로 자리를 채운다.
+    func testWeeklyRowShowsUnavailableWhenWeeklyMissing() {
         let v = QuotaBarView()
         v.configure(tokens5h: 0, autoPct: 50, weeklyPct: nil, isReset5h: false)
         XCTAssertEqual(v.fivePercentText, "50%")
-        XCTAssertNil(v.weeklyPercentText, "주간 값이 없으면 주간 줄 자체가 없다")
+        XCTAssertNil(v.weeklyPercentText, "값이 없으면 %가 아니라 안내 문구")
+        XCTAssertEqual(v.weeklyFallbackText, "지원하지 않음", "5h 는 동기화됐으니 '동기화 전'이 아니라 '지원하지 않음'")
     }
 
     func testResetShowsZeroPercentNotFallback() {
@@ -79,6 +84,7 @@ final class QuotaBarViewTests: XCTestCase {
         XCTAssertNil(v.fivePercentText)
         XCTAssertNil(v.weeklyPercentText)
         XCTAssertEqual(v.fallbackText, "5h 토큰: 48.2k · 한도 조회 실패")
+        XCTAssertEqual(v.weeklyFallbackText, "한도 조회 실패", "주간 줄도 숨기지 않고 같은 이유를 보여준다")
     }
 
     /// unreadable 기본값이 false 라 기존 호출부는 그대로 동작해야 한다.

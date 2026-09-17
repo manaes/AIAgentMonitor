@@ -33,6 +33,7 @@ public final class AgentCardView: UIView {
     public var quotaFivePercentText: String? { quotaBarView.fivePercentText }
     public var quotaWeeklyPercentText: String? { quotaBarView.weeklyPercentText }
     public var quotaFallbackText: String? { quotaBarView.fallbackText }
+    public var quotaWeeklyFallbackText: String? { quotaBarView.weeklyFallbackText }
     /// 22pt 숫자와 "tok/s" 사이 간격. 상수 자체가 원본 CSS 에서 곧바로 읽히지 않는
     /// 유일한 값이라(아래 unitGap 주석 참고) 레이아웃 결과로도 고정해 둔다.
     public var rateToUnitGap: CGFloat { unitLabel.frame.minX - rateLabel.frame.maxX }
@@ -158,6 +159,9 @@ public final class AgentCardView: UIView {
         modelLabel.text = primary?.model ?? "—"
         projectLabel.text = primary?.name ?? "no active session"
         rateLabel.text = MirrorFormat.tokensPerSec(agent.ratePerSec)
+        // tok/s가 높을수록 빠르게, 유휴에도 느린 숨쉬기로 계속 움직인다
+        // (AgentCard.svelte의 pulseDurationS와 동일한 공식 — 맥과 같은 체감 속도).
+        dot.setPulseDuration(max(0.35, 2.2 - Double(agent.ratePerSec) / 40.0))
 
         let quotaError = agent.quotaError
         if let quotaError {
