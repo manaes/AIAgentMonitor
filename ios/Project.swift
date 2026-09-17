@@ -7,7 +7,7 @@ let bundlePrefix = "co.kr.wannypark.aiagentmirror"
 // 타입 추론이 깨진다(다른 원소들의 String 리터럴은 SettingValue 로 암묵 변환되지만,
 // 이미 String 으로 확정된 변수는 안 된다).
 let marketingVersion: SettingValue = "1.0.0"
-let currentProjectVersion: SettingValue = "2"
+let currentProjectVersion: SettingValue = "3"
 // iroh-ffi(IrohLib) SwiftPM 매니페스트가 iOS 17.5+ 를 요구해서 전체 배포
 // 타깃을 17.5로 올렸다(기존 17.0). 네트워크 전송 추가 이전에는 17.0으로
 // 충분했다 — IrohSpike 사전 스파이크에서 이 제약이 처음 드러났다.
@@ -185,7 +185,17 @@ let project = Project(
         ),
         // BLE 전용(iOS 16+) 변형. **같은 소스 폴더**(Sources/App/**)를 가리키지만
         // NETWORK_TRANSPORT 가 꺼져 있어 SceneDelegate.swift 의 그 블록이 컴파일되지
-        // 않는다 — QR 스캔(카메라)도 네트워크 전송 전용 기능이라 권한 문구를 안 둔다.
+        // 않는다.
+        //
+        // ⚠️ 그래도 NSCameraUsageDescription 은 필요하다 — "QR 스캔은 네트워크
+        // 전용 기능이니 권한 문구를 안 둬도 된다"는 예전 가정이 틀렸다(2026-09-17
+        // App Store Connect ITMS-90683 반려로 확인). `MirrorFeatureBLE` 도
+        // `MirrorFeature` 와 같은 소스 폴더(Sources/MirrorFeature/**)를 컴파일
+        // 하는데, 그 안의 QRScannerViewController.swift(AVFoundation 카메라 API)
+        // 자체는 `#if NETWORK_TRANSPORT` 로 감싸져 있지 않아 BLE 전용 바이너리
+        // 에도 카메라 API 심볼이 그대로 링크된다 — Apple 의 정적 바이너리 스캔은
+        // 실제 실행 경로가 아니라 심볼 존재 여부만 보므로, 실행 중 절대 안 쓰여도
+        // 권한 문구가 있어야 통과한다.
         .target(
             name: "AppBLE",
             destinations: .iOS,
@@ -197,6 +207,8 @@ let project = Project(
                 "CFBundleDisplayName": "AI Monitor (BLE)",
                 "NSBluetoothAlwaysUsageDescription":
                     "Mac 의 AI Agent Monitor 와 연결해 모니터링 화면을 표시합니다.",
+                "NSCameraUsageDescription":
+                    "이 빌드는 QR 페어링을 쓰지 않지만, 공유 코드에 카메라 API가 포함돼 있어 시스템이 이 문구를 요구합니다.",
                 "UIApplicationSceneManifest": [
                     "UIApplicationSupportsMultipleScenes": false,
                     "UISceneConfigurations": [
