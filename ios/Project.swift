@@ -265,6 +265,10 @@ let project = Project(
                 "NSExtension": [
                     "NSExtensionPointIdentifier": "com.apple.widgetkit-extension",
                 ],
+                // App Store Connect 검증이 익스텐션 번들에도 이 키를 요구한다
+                // ("Missing Info.plist value ... CFBundleDisplayName ... .appex",
+                // 빌드 5 업로드에서 반려됨). Tuist 기본 plist 에는 없다.
+                "CFBundleDisplayName": "AI Monitor",
                 "NSBluetoothAlwaysUsageDescription":
                     "이 위젯은 블루투스를 쓰지 않지만, 공유 코드에 Bluetooth API가 포함돼 있어 시스템이 이 문구를 요구합니다.",
                 "CFBundleShortVersionString": "$(MARKETING_VERSION)",
