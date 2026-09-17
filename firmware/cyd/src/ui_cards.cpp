@@ -33,6 +33,9 @@ namespace {
 struct AgentCardWidgets {
     lv_obj_t *card = nullptr;
     lv_obj_t *topRow = nullptr;
+    lv_obj_t *nameGroup = nullptr;       // dot + nameLabel 묶음(좌측 정렬)
+    lv_obj_t *dot = nullptr;             // 8x8, 에이전트 색상, tok/s 비례 pulse
+    bool dotBright = true;               // 마지막으로 그린 밝기(불필요한 재도장 방지)
     lv_obj_t *nameLabel = nullptr;       // 14px, #8e8e93
     lv_obj_t *rateLabel = nullptr;       // 14px, #0a84ff
 
@@ -73,6 +76,28 @@ const char *getAgentName(SnapshotAgentKind kind) {
         case SnapshotAgentKind::Antigravity: return "Antigravity";
         default: return "Agent";
     }
+}
+
+// 맥/iOS `.dot` / `DotView`와 동일한 색상표(AgentCard.svelte, Palette.swift).
+lv_color_t getAgentDotColor(SnapshotAgentKind kind) {
+    switch (kind) {
+        case SnapshotAgentKind::Claude: return lv_color_hex(0x30d158);
+        case SnapshotAgentKind::Codex: return lv_color_hex(0xff9f0a);
+        case SnapshotAgentKind::Antigravity: return lv_color_hex(0x388bfd);
+        default: return lv_color_hex(0x636366);
+    }
+}
+
+// tok/s가 높을수록 짧게(빠르게 깜빡), 유휴에도 완전히 멈추지 않도록 느린
+// 주기로 계속 돈다 — 맥 트레이 아이콘 `frame_interval_ms()`와 같은 원칙.
+uint32_t dotBlinkPeriodMs(float rateTokPerSec) {
+    const float kIdleMs = 1800.0f;
+    const float kFastMs = 260.0f;
+    const float kSaturateAt = 150.0f;  // 이 tok/s 이상이면 가장 빠른 주기로 고정
+    float t = rateTokPerSec / kSaturateAt;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    return (uint32_t)(kIdleMs - (kIdleMs - kFastMs) * t);
 }
 
 // 리셋 카운트다운 간소화 포맷팅 (예: "4h 55m", "2d 8h", "17m 55s")
@@ -178,7 +203,28 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent) {
         lv_obj_set_flex_flow(cw.topRow, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(cw.topRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-        cw.nameLabel = lv_label_create(cw.topRow);
+        // 이름 좌측의 상태 점 + 이름을 한 그룹으로 묶어서 topRow의
+        // space-between(이름 그룹 좌 / 속도 우) 배치를 그대로 유지한다.
+        cw.nameGroup = lv_obj_create(cw.topRow);
+        lv_obj_set_size(cw.nameGroup, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(cw.nameGroup, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(cw.nameGroup, 0, 0);
+        lv_obj_set_style_pad_all(cw.nameGroup, 0, 0);
+        lv_obj_set_style_pad_column(cw.nameGroup, 5, 0);
+        lv_obj_set_flex_flow(cw.nameGroup, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(cw.nameGroup, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_remove_flag(cw.nameGroup, LV_OBJ_FLAG_SCROLLABLE);
+
+        cw.dot = lv_obj_create(cw.nameGroup);
+        lv_obj_set_size(cw.dot, 8, 8);
+        lv_obj_set_style_radius(cw.dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(cw.dot, 0, 0);
+        lv_obj_set_style_pad_all(cw.dot, 0, 0);
+        lv_obj_set_style_bg_color(cw.dot, lv_color_hex(0x636366), 0);
+        lv_obj_set_style_bg_opa(cw.dot, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(cw.dot, LV_OBJ_FLAG_SCROLLABLE);
+
+        cw.nameLabel = lv_label_create(cw.nameGroup);
         lv_obj_set_style_text_font(cw.nameLabel, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(cw.nameLabel, lv_color_hex(0x8e8e93), 0);
         lv_label_set_text(cw.nameLabel, "");
@@ -278,8 +324,9 @@ void uiCardsUpdate(const Transport &transport, size_t agentIndexToUpdate) {
         AgentCardWidgets &cw = g_cards[agentIndexToUpdate];
         const SnapshotAgent &ag = snap.agents[agentIndexToUpdate];
 
-        // 이름
+        // 이름 + 상태 점 색상(에이전트 종류가 바뀔 때만 실제로 dirty해짐)
         lv_label_set_text(cw.nameLabel, getAgentName(ag.kind));
+        lv_obj_set_style_bg_color(cw.dot, getAgentDotColor(ag.kind), 0);
 
 #if !PROFILE_SKIP_RATE_LABEL
         // tok/s 속도 (k/M 단축 표기 적용)
@@ -401,6 +448,7 @@ void uiCardsUpdateRates(const Transport &transport) {
         return;
     }
     const Snapshot &snap = transport.latestSnapshot();
+    const uint32_t nowMs = millis();
     for (size_t i = 0; i < SNAPSHOT_MAX_AGENTS && i < snap.agentCount; i++) {
         AgentCardWidgets &cw = g_cards[i];
         if (lv_obj_has_flag(cw.card, LV_OBJ_FLAG_HIDDEN)) {
@@ -409,6 +457,17 @@ void uiCardsUpdateRates(const Transport &transport) {
         char rateBuf[32];
         formatTokensPerSec(snap.agents[i].rateTokPerSec, rateBuf, sizeof(rateBuf));
         lv_label_set_text(cw.rateLabel, rateBuf);
+
+        // 좌측 상태 점 pulse. elapsed millis() 기준 위상 계산이라 loop()
+        // 반복 속도가 들쭉날쭉해도(transport.loop() 재연결 백오프 등) 체감
+        // 속도가 시스템 부하가 아니라 tok/s만 반영한다. 상태가 실제로
+        // 바뀔 때만 그리므로(불투명도 8x8 영역) rate 라벨보다도 가볍다.
+        const uint32_t periodMs = dotBlinkPeriodMs(snap.agents[i].rateTokPerSec);
+        const bool bright = (nowMs % periodMs) < (periodMs / 2);
+        if (bright != cw.dotBright) {
+            cw.dotBright = bright;
+            lv_obj_set_style_bg_opa(cw.dot, bright ? LV_OPA_COVER : LV_OPA_40, 0);
+        }
     }
 #endif
 }

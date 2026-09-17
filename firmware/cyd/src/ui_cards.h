@@ -24,9 +24,13 @@ lv_obj_t *uiCardsCreate(lv_obj_t *parent);
 /// 카드 인덱스를 순환시켜 가며 여러 차례 나눠 부르는 것을 전제로 한다.
 void uiCardsUpdate(const Transport &transport, size_t agentIndexToUpdate);
 
-/// tok/s 속도 라벨만 갱신한다(이름/쿼터%/바/리셋시간은 건드리지 않음).
-/// 라벨 3개(폭 좁고 텍스트만)만 dirty 해지므로 uiCardsUpdate() 보다 훨씬
-/// 가볍다 — 매 loop() 마다 스로틀 없이 불러도 안전하다.
+/// tok/s 속도 라벨과 좌측 상태 점(pulse)만 갱신한다(이름/쿼터%/바/리셋시간은
+/// 건드리지 않음). 라벨 3개(폭 좁고 텍스트만) + 점 3개(8x8, 불투명도만 토글)
+/// 만 dirty 해지므로 uiCardsUpdate() 보다 훨씬 가볍다 — 매 loop() 마다
+/// 스로틀 없이 불러도 안전하다. 점의 깜빡임 주기는 elapsed millis() 기준
+/// tok/s에 비례해 계산한다 — loop() 반복 속도(transport.loop() 재연결
+/// 백오프 등으로 들쭉날쭉함)가 아니라 실제 경과 시간을 기준으로 삼아야
+/// 체감 속도가 시스템 부하와 무관하게 tok/s만 반영한다.
 void uiCardsUpdateRates(const Transport &transport);
 
 /// 카드 화면의 표시 여부를 설정한다.
