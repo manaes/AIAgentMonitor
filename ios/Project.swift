@@ -7,7 +7,7 @@ let bundlePrefix = "co.kr.wannypark.aiagentmirror"
 // 타입 추론이 깨진다(다른 원소들의 String 리터럴은 SettingValue 로 암묵 변환되지만,
 // 이미 String 으로 확정된 변수는 안 된다).
 let marketingVersion: SettingValue = "1.0.0"
-let currentProjectVersion: SettingValue = "3"
+let currentProjectVersion: SettingValue = "4"
 // iroh-ffi(IrohLib) SwiftPM 매니페스트가 iOS 17.5+ 를 요구해서 전체 배포
 // 타깃을 17.5로 올렸다(기존 17.0). 네트워크 전송 추가 이전에는 17.0으로
 // 충분했다 — IrohSpike 사전 스파이크에서 이 제약이 처음 드러났다.
