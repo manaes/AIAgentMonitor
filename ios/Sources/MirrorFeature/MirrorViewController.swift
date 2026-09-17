@@ -9,6 +9,8 @@ import DesignSystem
 // 유일한 방법이다(Project.swift 상단 주석 참고).
 #if NETWORK_TRANSPORT
 import NetworkTransport
+import WidgetKit
+import WidgetShared
 #endif
 import SnapKit
 import UIKit
@@ -275,6 +277,14 @@ public final class MirrorViewController: UIViewController {
         transport.snapshots
             .receive(on: DispatchQueue.main)
             .sink { [weak self] snap in
+                #if NETWORK_TRANSPORT
+                // BLE로 받았든 네트워크로 받았든 캐시는 항상 갱신한다 — BLE만
+                // 쓰는 사용자도 위젯에 값은 보여야 한다(위젯 자체 새로고침만
+                // 안 될 뿐, 설계 §3.1). AppBLE 빌드에는 이 블록 자체가 없다.
+                let now = Date()
+                UsageCacheStore.save(snap, fetchedAt: now)
+                WidgetCenter.shared.reloadTimelines(ofKind: widgetKind)
+                #endif
                 self?.configure(snapshot: snap, now: Date())
             }
             .store(in: &cancellables)
@@ -331,6 +341,8 @@ public final class MirrorViewController: UIViewController {
         TokenStore.clear()
         #if NETWORK_TRANSPORT
         NetworkTokenStore.clearAll()
+        UsageCacheStore.clear()
+        WidgetCenter.shared.reloadTimelines(ofKind: widgetKind)
         #endif
         UserDefaults.standard.removeObject(forKey: Self.transportPreferenceKey)
         latest = nil
