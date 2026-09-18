@@ -154,4 +154,27 @@ final class NetworkClientTests: XCTestCase {
             XCTFail("NetworkClientError.needsPairing 을 기대했는데 \(error)")
         }
     }
+
+    // MARK: - QR 파서가 Mac 표시 이름을 읽는다
+
+    func testParseQrPayloadReadsMacName() throws {
+        // "wanny-macbook" 의 UTF-8 hex
+        let payload = "aim://pair?endpoint=deadbeef&code=123456&name=77616e6e792d6d6163626f6f6b"
+
+        let parsed = try XCTUnwrap(NetworkClient.parseQrPayload(payload))
+
+        XCTAssertEqual(parsed.endpointIdHex, "deadbeef")
+        XCTAssertEqual(parsed.code, "123456")
+        XCTAssertEqual(parsed.macName, "wanny-macbook")
+    }
+
+    /// 이름은 표시용이라 없어도 페어링은 성립해야 한다 — 구버전 Mac 과의 하위호환.
+    func testParseQrPayloadWithoutNameStillSucceeds() throws {
+        let payload = "aim://pair?endpoint=deadbeef&code=123456"
+
+        let parsed = try XCTUnwrap(NetworkClient.parseQrPayload(payload))
+
+        XCTAssertNil(parsed.macName)
+        XCTAssertEqual(parsed.endpointIdHex, "deadbeef")
+    }
 }

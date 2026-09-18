@@ -156,9 +156,16 @@ public final class NetworkClient: NSObject {
         }
     }
 
-    nonisolated static func parseQrPayload(
-        _ payload: String
-    ) -> (endpointIdHex: String, code: String, relayUrl: String?, addresses: [String])? {
+    /// QR 로 받은 페어링 정보. 이름은 표시용이라 optional 이다 — 구버전 Mac 은 보내지 않는다.
+    public struct ParsedPairingPayload: Equatable, Sendable {
+        public let endpointIdHex: String
+        public let code: String
+        public let relayUrl: String?
+        public let addresses: [String]
+        public let macName: String?
+    }
+
+    nonisolated public static func parseQrPayload(_ payload: String) -> ParsedPairingPayload? {
         guard let components = URLComponents(string: payload),
               components.scheme == "aim", components.host == "pair",
               let items = components.queryItems,
@@ -166,17 +173,19 @@ public final class NetworkClient: NSObject {
               let code = items.first(where: { $0.name == "code" })?.value else {
             return nil
         }
-        // relay/addr 는 Rust 쪽에서 URL 인코딩을 피하려고 hex 로 실어 보낸다
+        // relay/addr/name 은 Rust 쪽에서 URL 인코딩을 피하려고 hex 로 실어 보낸다
         // (Data(hexString:) 는 이 파일이 이미 BLE 쪽에서 재사용하고 있다).
         func decodeHex(_ value: String?) -> String? {
             guard let value, let data = Data(hexString: value) else { return nil }
             return String(data: data, encoding: .utf8)
         }
-        let relayUrl = decodeHex(items.first(where: { $0.name == "relay" })?.value)
-        let addresses = items
-            .filter { $0.name == "addr" }
-            .compactMap { decodeHex($0.value) }
-        return (endpointIdHex, code, relayUrl, addresses)
+        return ParsedPairingPayload(
+            endpointIdHex: endpointIdHex,
+            code: code,
+            relayUrl: decodeHex(items.first(where: { $0.name == "relay" })?.value),
+            addresses: items.filter { $0.name == "addr" }.compactMap { decodeHex($0.value) },
+            macName: decodeHex(items.first(where: { $0.name == "name" })?.value)
+        )
     }
 
     private func beginConnecting(endpointIdHex: String, relayUrl: String?, addresses: [String], code: String?) {
