@@ -403,11 +403,47 @@ public final class NetworkClient: NSObject {
     /// 여기서 `try? JSONDecoder().decode(...)` 로 바로 떨어뜨리면 안 된다 —
     /// hex 줄은 JSON 이 아니라 항상 nil 을 내고, `continue` 가 그걸 조용히
     /// 삼켜 "연결은 됐는데 화면이 영영 비어 있는" 무증상 실패가 된다.
+    ///
+    /// 읽기 루프 자체는 `streamSnapshots`(AppMulti 와 공유)에 맡기고, 여기서는
+    /// 이 인스턴스의 Combine 퍼블리셔로 옮겨 담는 것과 `wantsRunning` 기반
+    /// 정지, 버전 불일치 시 상태 전송만 담당한다 — 기존 앱의 동작은 그대로다.
     private func listenForSnapshots(conn: Connection, channel: SealedChannel) async throws {
         stateSubject.send(.streaming)
+        do {
+            try await streamSnapshots(
+                conn: conn, channel: channel,
+                shouldContinue: { [weak self] in self?.wantsRunning ?? false }
+            ) { [weak self] snapshot in
+                self?.snapshotSubject.send(snapshot)
+            }
+        } catch NetworkClientError.versionMismatch {
+            // AppMulti(`snapshotStream`)는 이 경우를 던져서 알려야 하지만, 이
+            // 1:1 앱은 원래부터 상태 전송 후 조용히 멈추는 게 정상 동작이다
+            // (runConnection 이 재시도하지 않도록).
+            wantsRunning = false
+            stateSubject.send(.versionMismatch)
+        }
+    }
+
+    /// `listenForSnapshots`(1:1 앱)와 `snapshotStream`(AppMulti)이 공유하는
+    /// 읽기 루프. 프레이밍(NDJSON)·복호화(`SealedChannel`)·평문 거부·버전 검사가
+    /// 전부 여기 한 곳에만 있다 — 호출부는 유효한 스냅샷을 어디로 흘려보낼지만
+    /// (`onSnapshot`) 정한다.
+    ///
+    /// 버전 불일치는 **던진다.** 예전 `listenForSnapshots`처럼 `wantsRunning = false;
+    /// return`으로 조용히 끝내면, `AppMulti`의 `DeviceSession`은 스트림의 정상 종료를
+    /// "지금 당장 더 보낼 스냅샷이 없다"로만 해석해 마지막 상태(`.online`)에 그대로
+    /// 얼어붙는다(`DeviceTransport`의 스트림 종료 규약). 호출부가 필요하면 이 에러를
+    /// 잡아 자기 방식대로 처리한다(`listenForSnapshots`는 흡수하고, `snapshotStream`은
+    /// 그대로 던진다).
+    private func streamSnapshots(
+        conn: Connection, channel: SealedChannel,
+        shouldContinue: @escaping () -> Bool,
+        onSnapshot: (MirrorSnapshot) -> Void
+    ) async throws {
         let recv = try await conn.acceptUni()
         var buffer = Data()
-        while wantsRunning {
+        while shouldContinue() {
             let chunk = try await recv.read(sizeLimit: Self.snapshotChunkSizeLimit)
             buffer.append(chunk)
             while let newlineIndex = buffer.firstIndex(of: 0x0A) {
@@ -441,23 +477,55 @@ public final class NetworkClient: NSObject {
                     continue
                 }
                 guard snap.isSupportedVersion else {
-                    wantsRunning = false
-                    stateSubject.send(.versionMismatch)
-                    return
+                    throw NetworkClientError.versionMismatch
                 }
-                snapshotSubject.send(snap)
+                onSnapshot(snap)
+            }
+        }
+    }
+
+    /// `probe(...)`로 연 연결을 그대로 스냅샷 스트림으로 잇는다(`Fleet`의
+    /// `IrohDeviceTransport` 전용). 첫 스냅샷을 먼저 흘리고, 이후
+    /// `listenForSnapshots`와 같은 방식(`streamSnapshots`)으로 계속 읽는다.
+    ///
+    /// 스트림 소비가 멈추면(`DeviceSession`이 세션을 정리하는 등)
+    /// `continuation.onTermination`에서 읽기 태스크를 취소하고 연결을 닫는다 —
+    /// 다시 dial 하면 hole-punch·QUIC·인증 왕복을 또 내야 하므로, 살아있는
+    /// 연결을 여기서 재사용하는 것 자체가 이 함수의 존재 이유다.
+    public func snapshotStream(from result: ProbeResult) -> AsyncThrowingStream<MirrorSnapshot, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task { [weak self] in
+                guard let self else { continuation.finish(); return }
+                continuation.yield(result.firstSnapshot)
+                do {
+                    try await self.streamSnapshots(
+                        conn: result.connection, channel: result.channel,
+                        shouldContinue: { true }
+                    ) { snapshot in
+                        continuation.yield(snapshot)
+                    }
+                    continuation.finish()
+                } catch {
+                    // 버전 불일치를 포함해 여기서 잡히는 모든 에러를 그대로
+                    // 던진다 — DeviceSession 이 종단 상태를 판별할 수 있어야 한다.
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+                Task { try? result.connection.close(errorCode: 0, reason: Data()) }
             }
         }
     }
 }
 
-enum NetworkClientError: Error, Equatable {
+public enum NetworkClientError: Error, Equatable {
     case malformedReply
     case authFailed
     case needsPairing
     /// 위젯 전용 — `fetchSnapshotOnce`가 타임아웃 예산 안에 못 끝났을 때.
     case fetchTimedOut
-    /// 위젯 전용 — 단발성 fetch 중 받은 스냅샷이 지원 버전이 아닐 때.
+    /// 스냅샷이 지원 버전이 아닐 때(위젯 단발성 fetch, 스트리밍 도중 모두 해당).
     case versionMismatch
 }
 
