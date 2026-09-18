@@ -10,12 +10,17 @@ import Wire
 /// 쪽 `pairing.rs` 상태 기계는 두 전송이 동일하게 취급한다.
 @MainActor
 public final class NetworkClient: NSObject {
-    private static let alpn = Data("aim/mirror/1".utf8)
+    /// `IrohEndpointProvider` 도 같은 값으로 bind 해야 하므로 모듈 내부에 공개한다.
+    static let alpnData = Data("aim/mirror/1".utf8)
+    private static var alpn: Data { alpnData }
     /// 제어 메시지 하나의 최대 크기. 실제 응답은 수십 바이트 수준이라 넉넉히 잡는다.
     private static let controlSizeLimit: UInt32 = 4096
     private static let snapshotChunkSizeLimit: UInt32 = 65536
 
     private var endpoint: Endpoint?
+    /// 주입되면 Endpoint 를 여기서 받아 쓴다(여러 장치가 공유). nil 이면 기존처럼
+    /// 자기 것을 만든다 — 기존 App/AppBLE 의 동작을 바꾸지 않기 위한 기본값이다.
+    private let endpointProvider: IrohEndpointProvider?
     private var wantsRunning = false
     private var runTask: Task<Void, Never>?
 
@@ -25,7 +30,8 @@ public final class NetworkClient: NSObject {
     public var state: AnyPublisher<ConnectionState, Never> { stateSubject.eraseToAnyPublisher() }
     public var snapshots: AnyPublisher<MirrorSnapshot, Never> { snapshotSubject.eraseToAnyPublisher() }
 
-    public override init() {
+    public init(endpointProvider: IrohEndpointProvider? = nil) {
+        self.endpointProvider = endpointProvider
         super.init()
     }
 
@@ -112,6 +118,16 @@ public final class NetworkClient: NSObject {
         }
     }
 
+    /// `endpointProvider` 가 주입돼 있으면 공유 Endpoint 를 빌려 쓰고, 없으면
+    /// 기존처럼 이 인스턴스 전용 Endpoint 를 새로 bind 한다.
+    private func resolveEndpoint() async throws -> Endpoint {
+        if let endpointProvider { return try await endpointProvider.endpoint() }
+        let builder = EndpointBuilder()
+        builder.applyN0()
+        builder.alpns(alpns: [Self.alpn])
+        return try await builder.bind()
+    }
+
     /// `runConnection`/`listenForSnapshots`와 같은 저수준 조각(`authenticate`,
     /// `classifyLine`)을 재사용하되, 무한 루프 대신 **첫 유효 프레임 하나**를
     /// 받으면 바로 돌려준다.
@@ -124,10 +140,7 @@ public final class NetworkClient: NSObject {
         let endpointId = try EndpointId.fromBytes(bytes: idBytes)
         let addr = EndpointAddr(id: endpointId, relayUrl: relayUrl, addresses: addresses)
 
-        let builder = EndpointBuilder()
-        builder.applyN0()
-        builder.alpns(alpns: [Self.alpn])
-        let ep = try await builder.bind()
+        let ep = try await resolveEndpoint()
 
         let conn = try await ep.connect(addr: addr, alpn: Self.alpn)
         // code: nil — 위젯은 항상 재연결 경로다(이미 저장된 토큰으로 인증),
@@ -209,11 +222,10 @@ public final class NetworkClient: NSObject {
             // 같이 실려온 relay/direct 주소를 그대로 넣어준다.
             let addr = EndpointAddr(id: endpointId, relayUrl: relayUrl, addresses: addresses)
 
-            let builder = EndpointBuilder()
-            builder.applyN0()
-            builder.alpns(alpns: [Self.alpn])
-            let ep = try await builder.bind()
-            endpoint = ep
+            let ep = try await resolveEndpoint()
+            // 공유 Endpoint 를 받은 경우에는 보관하지 않는다 — 이 인스턴스가
+            // 소유한 게 아니라서 정리(teardown)할 권한이 없기 때문이다.
+            if endpointProvider == nil { endpoint = ep }
 
             let conn = try await ep.connect(addr: addr, alpn: Self.alpn)
             let channel = try await authenticate(conn: conn, code: code)
