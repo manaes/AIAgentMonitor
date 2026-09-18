@@ -15,6 +15,10 @@ private final class FakeTransport: DeviceTransport, @unchecked Sendable {
         /// 진행 중인 probe 를 흉내낸다. `stop()` 이 그 사이에 끼어드는 경쟁을 재현할 때 쓴다.
         /// 테스트 전용이라 지속시간을 짧게 조절할 수 있게 열어둔다(기본 300ms).
         case hang(nanoseconds: UInt64 = 300_000_000)
+        /// 이미 online 이 된 뒤(스냅샷을 한 번 이상 흘려보낸 뒤) 스트림 도중에 종단
+        /// 상태를 만나는 경우를 흉내낸다 — `consume()` 이 그 타입을 무시하고 전부
+        /// `connectionLost` 로 뭉개는 회귀를 잡기 위한 픽스처.
+        case streamThenFail([MirrorSnapshot], DeviceTransportError)
     }
     var outcomes: [Outcome] = []
     private(set) var probeCount = 0
@@ -32,6 +36,11 @@ private final class FakeTransport: DeviceTransport, @unchecked Sendable {
             return AsyncThrowingStream { continuation in
                 for s in snapshots { continuation.yield(s) }
                 continuation.finish()
+            }
+        case .streamThenFail(let snapshots, let error):
+            return AsyncThrowingStream { continuation in
+                for s in snapshots { continuation.yield(s) }
+                continuation.finish(throwing: error)
             }
         }
     }
@@ -113,6 +122,31 @@ final class DeviceSessionTests: XCTestCase {
         await session.probeNow()
 
         XCTAssertEqual(session.status, .versionMismatch)
+    }
+
+    /// 이미 online 인 장치가 스트림 도중에(probe 성공 이후) 버전 불일치를 만나도
+    /// 종단 상태에 도달해야 한다. `consume()` 이 스트림 에러 타입을 안 가리고 전부
+    /// `connectionLost` 로 처리하면, 이 장치는 `.unstable` 로만 갔다가 재시도되고
+    /// 절대 `.versionMismatch` 에 이르지 못한다 — Task 12 리뷰에서 발견된 회귀.
+    func testMidStreamVersionMismatchAfterOnlineReachesTerminalState() async throws {
+        let transport = FakeTransport()
+        transport.outcomes = [.streamThenFail([try makeSnapshot(rate: 1)], .versionMismatch)]
+        let session = DeviceSession(device: makeDevice(), transport: transport)
+
+        await session.probeNow()
+
+        XCTAssertEqual(session.status, .versionMismatch)
+    }
+
+    /// 위와 같은 회귀를 인증 거부 쪽에서도 검증한다.
+    func testMidStreamAuthRejectionAfterOnlineReachesTerminalState() async throws {
+        let transport = FakeTransport()
+        transport.outcomes = [.streamThenFail([try makeSnapshot(rate: 1)], .authRejected)]
+        let session = DeviceSession(device: makeDevice(), transport: transport)
+
+        await session.probeNow()
+
+        XCTAssertEqual(session.status, .needsRepairing)
     }
 
     /// stop() 이후 늦게 도착한 결과가 상태를 오염시키면 안 된다 —

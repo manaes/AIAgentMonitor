@@ -97,6 +97,17 @@ public final class DeviceSession {
             // 흘려보내므로, 정상 종료는 "이번 probe 로 받을 수 있는 만큼 다 받았다"는
             // 뜻이지 연결이 끊겼다는 뜻이 아니다. 마지막으로 도달한 상태(대개 online)를
             // 그대로 둔다. 실제로 연결이 끊기면 스트림은 에러를 던지고, 그건 catch 가 처리한다.
+        } catch let error as DeviceTransportError {
+            // 스트림 도중에 도착한 종단 상태를 재시도 가능한 상태로 격하하면 안 된다 —
+            // 타입을 버리고 전부 connectionLost 로 뭉개면, 이미 online 이던 장치가
+            // 버전 불일치·인증 거부를 만나도 unstable → offline 로만 가서 성공할 수 없는
+            // 재시도를 영원히 반복한다(probeNow 의 catch 와 같은 분기를 쓴다).
+            guard current == generation else { return }
+            switch error {
+            case .authRejected: apply(.authRejected, generation: current)
+            case .versionMismatch: apply(.versionRejected, generation: current)
+            case .unreachable: apply(.connectionLost, generation: current)
+            }
         } catch {
             guard current == generation else { return }
             apply(.connectionLost, generation: current)
