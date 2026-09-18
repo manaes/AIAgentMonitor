@@ -157,6 +157,30 @@ final class DeviceSessionTests: XCTestCase {
         XCTAssertNil(session.latestAt)
     }
 
+    /// retrigger() 는 이미 probing 중일 때 두 번째 probe 를 시작하면 안 된다.
+    /// `DeviceStatusMachine.next(.probing, on: .retriggered)` 는 항등 매핑으로 `.probing` 을
+    /// 그대로 돌려주는데, 이는 `.offline → .probing` 전이와 값이 같아서 상태값만으로는 구분이
+    /// 안 된다 — `guard status != .probing` 가드가 없으면 진행 중인 probe 에 재요청이 겹쳐
+    /// generation 이 올라가고, 방금 시작된 probe 자체가 스스로를 "늦게 도착한 결과"로 만들어
+    /// 버린다. 상태값이 아니라 probeCount 로 검증한다 — 상태는 우연히 같아 보일 수 있어도
+    /// 두 번째 probe() 호출은 가드 실패의 명백한 증거이기 때문이다.
+    func testRetriggerIgnoresRequestWhileProbeIsInFlight() async throws {
+        let transport = FakeTransport()
+        transport.outcomes = [.hang()]
+        let session = DeviceSession(device: makeDevice(), transport: transport)
+
+        let probeTask = Task { await session.probeNow() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(session.status, .probing, "probing 중이어야 이 테스트가 검증하려는 경합이 재현된다")
+
+        await session.retrigger()
+
+        XCTAssertEqual(transport.probeCount, 1, "probing 중인데 retrigger 가 두 번째 probe 를 시작했다")
+
+        // 진행 중이던 probe 를 마저 끝내서 태스크가 새지 않게 한다.
+        await probeTask.value
+    }
+
     func testOfflineDeviceProbesAgainOnRetrigger() async throws {
         let transport = FakeTransport()
         transport.outcomes = [
