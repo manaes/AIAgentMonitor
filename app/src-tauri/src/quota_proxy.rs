@@ -39,6 +39,9 @@ pub struct QuotaState {
     /// lib.rs의 주기 자동 동기화가 "안전망으로 /usage 를 부를지"를
     /// 판단하는 기준이다 — `is_stale` 문서 참고.
     last_updated: Mutex<Option<SystemTime>>,
+    /// 주간(7d) %가 마지막으로 **실제로 들어온** 시각. `last_updated` 와 따로 두는
+    /// 이유는 `weekly_is_stale` 문서 참고.
+    weekly_updated: Mutex<Option<SystemTime>>,
     /// 마지막 `/usage` 조회가 실패한 이유. 성공하면 지운다.
     /// 데스크톱 카드에는 문장이, 미러에는 `kind` 코드가 나간다(2026-09-04).
     pub last_error: Mutex<Option<crate::types::QuotaError>>,
@@ -112,6 +115,8 @@ impl QuotaState {
             if matches!(*reset, Some(r) if r <= now) {
                 *reset = None;
             }
+            drop(reset);
+            self.mark_weekly_updated();
         }
         if session_pct.is_some() || week_pct.is_some() {
             *self.active.lock().unwrap() = true;
@@ -125,6 +130,10 @@ impl QuotaState {
         *self.last_updated.lock().unwrap() = Some(SystemTime::now());
     }
 
+    fn mark_weekly_updated(&self) {
+        *self.weekly_updated.lock().unwrap() = Some(SystemTime::now());
+    }
+
     /// 마지막 갱신(프록시 헤더든 `/usage` 파싱이든) 이후 `after` 이상 지났으면
     /// true. 한 번도 갱신된 적 없으면(앱을 막 띄웠는데 persisted 캐시도 없는
     /// 경우) 무조건 true — 최대한 빨리 첫 값을 받아야 하니 안전망 쪽으로
@@ -133,6 +142,24 @@ impl QuotaState {
     /// 프로세스를 띄울 필요가 없다.
     pub fn is_stale(&self, now: SystemTime, after: Duration) -> bool {
         match *self.last_updated.lock().unwrap() {
+            Some(t) => now.duration_since(t).unwrap_or_default() >= after,
+            None => true,
+        }
+    }
+
+    /// 주간(7d) %를 `after` 이상 못 받았으면 true.
+    ///
+    /// `is_stale` 과 따로 있는 이유: `last_updated` 는 `anthropic-ratelimit*` 헤더를
+    /// 하나라도 보면 갱신되는데, 실사용 중에는 5h 헤더가 계속 들어온다. 그래서
+    /// 주간 헤더가 **한 번도** 안 와도 `is_stale` 은 영영 false 가 되고, 주간 값을
+    /// 채울 유일한 다른 경로인 `/usage` 안전망이 한 번도 실행되지 않는다 — 활발히
+    /// 쓸수록 주간 %가 안 뜨는 역설이다(2026-09-18: Claude Code 주간 한도가 앱·위젯
+    /// 양쪽에서 계속 비어 있던 원인). 주간 헤더 이름(`…-unified-7d-*`)이 아직
+    /// 확정 전 추측값이라(파일 상단 주석) 더더욱 안전망이 살아 있어야 한다.
+    ///
+    /// 창 자체가 7일이라 5h 쪽보다 훨씬 느긋하게 봐도 된다 — 호출부가 더 긴 임계값을 준다.
+    pub fn weekly_is_stale(&self, now: SystemTime, after: Duration) -> bool {
+        match *self.weekly_updated.lock().unwrap() {
             Some(t) => now.duration_since(t).unwrap_or_default() >= after,
             None => true,
         }
@@ -243,6 +270,7 @@ fn observe(headers: &HeaderMap, quota: &Arc<QuotaState>) {
     if let Some(u) = parse_f64(headers, "anthropic-ratelimit-unified-7d-utilization") {
         let pct = ratio_to_pct(u);
         *quota.used_pct_weekly.lock().unwrap() = Some(pct.clamp(0.0, 100.0));
+        quota.mark_weekly_updated();
     }
     if let Some(r) = parse_f64(headers, "anthropic-ratelimit-unified-7d-reset") {
         if r > 1_000_000_000.0 {
@@ -371,6 +399,57 @@ mod tests {
         quota.apply_usage_pct(Some(10.0), None);
         let later = SystemTime::now() + Duration::from_secs(601);
         assert!(quota.is_stale(later, Duration::from_secs(600)));
+    }
+
+    /// 회귀: 5h 헤더만 계속 들어오면 `is_stale` 은 false 가 되지만, 주간은 여전히
+    /// 비어 있으므로 `/usage` 안전망이 돌아야 한다. 이게 깨지면 활발히 쓸수록 주간
+    /// %가 영영 안 뜬다(2026-09-18).
+    #[test]
+    fn five_hour_traffic_does_not_hide_missing_weekly() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "anthropic-ratelimit-unified-5h-utilization",
+            HeaderValue::from_static("0.5"),
+        );
+        let quota = Arc::new(QuotaState::default());
+        observe(&headers, &quota);
+
+        let now = SystemTime::now();
+        assert!(!quota.is_stale(now, Duration::from_secs(600)));
+        assert!(quota.weekly_is_stale(now, Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn weekly_header_marks_weekly_fresh() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "anthropic-ratelimit-unified-7d-utilization",
+            HeaderValue::from_static("0.8"),
+        );
+        let quota = Arc::new(QuotaState::default());
+        observe(&headers, &quota);
+
+        assert!(!quota.weekly_is_stale(SystemTime::now(), Duration::from_secs(3600)));
+    }
+
+    /// `/usage` 안전망은 reset 시각을 주지 않지만 %는 준다 — 그것만으로도 주간은
+    /// 갱신된 것으로 봐야 다음 1시간 동안 또 프로세스를 띄우지 않는다.
+    #[test]
+    fn usage_fallback_marks_weekly_fresh_even_without_reset_time() {
+        let quota = QuotaState::default();
+        quota.apply_usage_pct(None, Some(42.0));
+
+        let now = SystemTime::now();
+        assert!(!quota.weekly_is_stale(now, Duration::from_secs(3600)));
+        assert!(quota.reset_weekly.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn weekly_becomes_stale_after_the_threshold() {
+        let quota = QuotaState::default();
+        quota.apply_usage_pct(None, Some(42.0));
+        let later = SystemTime::now() + Duration::from_secs(3601);
+        assert!(quota.weekly_is_stale(later, Duration::from_secs(3600)));
     }
 
     #[test]

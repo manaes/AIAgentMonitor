@@ -919,6 +919,10 @@ pub fn run() {
     // 마다 깨어나 "마지막 갱신 이후 10분이 지났는지"만 확인하고, 그때만 /usage를
     // 부른다 — 완전히 손 놓고 있을 때만 실제로 실행된다.
     const QUOTA_STALE_AFTER: Duration = Duration::from_secs(600);
+    // 주간(7d)은 따로 본다 — 5h 헤더가 계속 들어오면 위 조건만으로는 영영 안 낡은
+    // 것으로 판정돼, 주간 %를 채울 유일한 다른 경로인 /usage 가 한 번도 안 돈다
+    // (quota_proxy::weekly_is_stale 문서 참고). 창이 7일이라 1시간이면 충분하다.
+    const QUOTA_WEEKLY_STALE_AFTER: Duration = Duration::from_secs(3600);
     {
         let quota = quota_state.clone();
         let running = claude_quota_ping_running.clone();
@@ -927,10 +931,12 @@ pub fn run() {
             let mut ticker = tokio::time::interval(Duration::from_secs(60));
             loop {
                 ticker.tick().await;
-                if !quota.is_stale(std::time::SystemTime::now(), QUOTA_STALE_AFTER) {
+                let now = std::time::SystemTime::now();
+                let weekly_stale = quota.weekly_is_stale(now, QUOTA_WEEKLY_STALE_AFTER);
+                if !quota.is_stale(now, QUOTA_STALE_AFTER) && !weekly_stale {
                     continue;
                 }
-                tracing::info!("10분간 갱신 없음 — 안전망 quota 핑");
+                tracing::info!(weekly_stale, "갱신 없음 — 안전망 quota 핑");
                 run_claude_usage_ping(quota.clone(), running.clone()).await;
             }
         });

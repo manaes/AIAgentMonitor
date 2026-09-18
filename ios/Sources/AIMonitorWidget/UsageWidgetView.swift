@@ -3,6 +3,7 @@ import MirrorFormat
 import SwiftUI
 import UIKit
 import WidgetKit
+import WidgetShared
 import Wire
 
 struct UsageWidgetView: View {
@@ -132,7 +133,10 @@ struct UsageWidgetView: View {
 
     /// 콘텐츠는 위부터 쌓는다. 좁은 Small에서만 글자와 내부 간격을 압축한다.
     private func agentCard(_ agent: MirrorAgent, now: Date, tight: Bool = false, contentSpacing: CGFloat = 8) -> some View {
-        let usage = weeklyUsage(for: agent, now: now)
+        // 표시 규칙(어떤 창을 %로 보여줄지, 값이 없을 때 무슨 문구를 쓸지)은 뷰가 아니라
+        // WidgetShared 의 UsagePresentation 이 정한다 — 테스트로 고정돼 있다.
+        let weekly = UsagePresentation.weekly(for: agent, now: now)
+        let fiveHour = UsagePresentation.fiveHour(for: agent)
 
         return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: compact ? 1 : 3) {
@@ -141,37 +145,35 @@ struct UsageWidgetView: View {
                     .foregroundStyle(Color(Palette.primaryText))
                     .lineLimit(1)
                 // 모든 카드에 같은 한 줄을 예약한다. 내용 유무로 그래프가 움직이지 않는다.
-                Text(usage?.countdownText ?? " ")
+                Text(weekly.countdownText ?? " ")
                     .font(compact ? .system(size: tight ? 8 : 9, weight: .semibold) : Font(Typography.countdown))
                     .foregroundStyle(Color(Palette.countdown))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
-                    .accessibilityHidden(usage?.countdownText == nil)
+                    .accessibilityHidden(weekly.countdownText == nil)
             }
 
             Color.clear.frame(height: contentSpacing)
 
             if !compact {
-                if agent.quotaError == nil, let p5 = agent.usedPct5h {
-                    let clamped5h = min(100, p5)
-                    quotaRow(
-                        label: "5h",
-                        percentText: MirrorFormat.toFixed(Double(clamped5h), 0) + "%",
-                        countdownText: nil,
-                        percent: clamped5h
-                    )
-                } else {
-                    quotaRow(label: "5h", percentText: nil, countdownText: quotaFallbackText(for: agent), percent: nil)
-                }
+                quotaRow(
+                    label: "5h",
+                    percentText: fiveHour.percentText,
+                    countdownText: fiveHour.fallbackText,
+                    percent: fiveHour.percent
+                )
 
                 Color.clear.frame(height: 12)
             }
 
-            if let usage {
-                quotaRow(label: "Week", percentText: usage.percentText, countdownText: nil, percent: usage.percent, tight: tight)
-            } else {
-                quotaRow(label: "Week", percentText: nil, countdownText: quotaFallbackText(for: agent), percent: nil, tight: tight)
-            }
+            quotaRow(
+                label: "Week",
+                percentText: weekly.percentText,
+                // 카운트다운은 카드 상단에 이미 예약된 줄로 나가므로 여기선 폴백 문구만 쓴다.
+                countdownText: weekly.fallbackText,
+                percent: weekly.percent,
+                tight: tight
+            )
         }
     }
 
@@ -224,38 +226,6 @@ struct UsageWidgetView: View {
                 Color.clear.frame(height: tight ? 4 : (compact ? 5 : 6))
             }
         }
-    }
-
-    private struct WeeklyUsage {
-        let percentText: String
-        let countdownText: String?
-        let percent: Float
-    }
-
-    /// 5h % 를 가리는 규칙(Fix 2)과 동일하게, 주간 %도 quotaError 가 있으면 숨긴다.
-    /// % 와 카운트다운은 서로 독립이다 — rw(주간 리셋 시각) 없이 usedPctWeekly 만
-    /// 오는 폴백 경로가 실존해서(맥 백엔드 확인), 둘을 all-or-nothing으로 묶으면
-    /// 메인 앱은 %를 보여주는데 위젯만 "동기화 전"으로 떨어지는 불일치가 생긴다
-    /// (AgentCardView/QuotaBarView 도 이미 %와 카운트다운을 따로 게이팅한다).
-    private func weeklyUsage(for agent: MirrorAgent, now: Date) -> WeeklyUsage? {
-        guard agent.quotaError == nil, let pct = agent.usedPctWeekly else {
-            return nil
-        }
-        let clamped = min(100, pct)
-        return WeeklyUsage(
-            percentText: MirrorFormat.toFixed(Double(clamped), 0) + "%",
-            countdownText: agent.rw.flatMap { MirrorFormat.weeklyCountdown(resetAt: $0, now: now) },
-            percent: clamped
-        )
-    }
-
-    /// 값이 없는 행의 안내 문구 — `QuotaBarView.configure` 의 `note()` 와 같은 구분.
-    /// 다른 창의 값이 하나라도 왔으면 조회 자체는 성공한 것이라 "동기화 전"이 아니라
-    /// 이 플랜에 없는 창("지원하지 않음")이다 — Codex 는 5h 창 없이 주간만 온다.
-    private func quotaFallbackText(for agent: MirrorAgent) -> String {
-        if let error = agent.quotaError { return error.displayText }
-        let synced = agent.usedPct5h != nil || agent.usedPctWeekly != nil
-        return synced ? "지원하지 않음" : "동기화 전"
     }
 
     private func agentName(_ kind: AgentKindCode) -> String {
