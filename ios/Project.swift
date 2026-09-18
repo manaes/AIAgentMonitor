@@ -73,7 +73,7 @@ let project = Project(
         unitTests("WireTests", for: "Wire"),
         framework("BLETransport", deps: [.target(name: "Wire")]),
         unitTests("BLETransportTests", for: "BLETransport"),
-        framework("DesignSystem", deps: [.target(name: "MirrorFormat"), .external(name: "SnapKit")]),
+        framework("DesignSystem", deps: [.target(name: "MirrorFormat"), .target(name: "Wire"), .external(name: "SnapKit")]),
         unitTests("DesignSystemTests", for: "DesignSystem"),
         framework("WidgetShared", deps: [.target(name: "Wire"), .target(name: "MirrorFormat")]),
         unitTests("WidgetSharedTests", for: "WidgetShared"),

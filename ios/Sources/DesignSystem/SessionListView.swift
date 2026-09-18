@@ -1,4 +1,3 @@
-import DesignSystem
 import SnapKit
 import UIKit
 import Wire

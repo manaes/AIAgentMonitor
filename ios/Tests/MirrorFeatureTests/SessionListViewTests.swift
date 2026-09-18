@@ -1,6 +1,7 @@
 import UIKit
 import Wire
 import XCTest
+@testable import DesignSystem
 @testable import MirrorFeature
 
 final class SessionListViewTests: XCTestCase {
