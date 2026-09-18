@@ -12,7 +12,9 @@ private final class FakeTransport: DeviceTransport, @unchecked Sendable {
     enum Outcome {
         case stream([MirrorSnapshot])
         case fail(DeviceTransportError)
-        case hang
+        /// 진행 중인 probe 를 흉내낸다. `stop()` 이 그 사이에 끼어드는 경쟁을 재현할 때 쓴다.
+        /// 테스트 전용이라 지속시간을 짧게 조절할 수 있게 열어둔다(기본 300ms).
+        case hang(nanoseconds: UInt64 = 300_000_000)
     }
     var outcomes: [Outcome] = []
     private(set) var probeCount = 0
@@ -23,8 +25,8 @@ private final class FakeTransport: DeviceTransport, @unchecked Sendable {
         switch outcome {
         case .fail(let error):
             throw error
-        case .hang:
-            try await Task.sleep(nanoseconds: 10_000_000_000)
+        case .hang(let nanoseconds):
+            try await Task.sleep(nanoseconds: nanoseconds)
             throw DeviceTransportError.unreachable
         case .stream(let snapshots):
             return AsyncThrowingStream { continuation in
@@ -115,6 +117,10 @@ final class DeviceSessionTests: XCTestCase {
 
     /// stop() 이후 늦게 도착한 결과가 상태를 오염시키면 안 된다 —
     /// 2026-09-17 TunnelKit 리뷰의 버그 클래스.
+    ///
+    /// 이 경우는 probeNow() 호출 자체가 stop() 보다 나중이라 완전히 순차적이다 — 진입 시점의
+    /// `isStopped` 가드가 막아준다. 진짜 경쟁(진행 중이던 probe 가 stop() 이후에 완료되는 경우)은
+    /// `testInFlightProbeResultArrivingAfterStopIsIgnored` 가 따로 검증한다.
     func testResultArrivingAfterStopIsIgnored() async throws {
         let transport = FakeTransport()
         transport.outcomes = [.stream([try makeSnapshot(rate: 9)])]
@@ -125,6 +131,30 @@ final class DeviceSessionTests: XCTestCase {
 
         XCTAssertEqual(session.status, .idle)
         XCTAssertNil(session.latest)
+    }
+
+    /// 이 태스크가 막으려는 실제 버그 클래스: probe 가 아직 전송 계층에 붙어 있는 도중에
+    /// stop() 이 끼어들고, 그 뒤에야 (실패로) 완료된다. `isStopped` 가드는 probeNow() 진입
+    /// 시점에만 검사하므로 이미 시작된 호출은 막지 못한다 — 여기서 실제로 검증해야 하는 건
+    /// generation 카운터다: stop() 이 generation 을 올려버리면, 나중에 도착하는 완료 콜백의
+    /// `current == generation` 검사가 거짓이 되어 상태 갱신이 조용히 버려져야 한다.
+    func testInFlightProbeResultArrivingAfterStopIsIgnored() async throws {
+        let transport = FakeTransport()
+        transport.outcomes = [.hang()]
+        let session = DeviceSession(device: makeDevice(), transport: transport)
+
+        let probeTask = Task { await session.probeNow() }
+        // probeNow() 가 transport.probe(...) 호출부까지 진입해서 실제로 hang 에 들어갈
+        // 시간을 준다 — stop() 이 "그 사이"에 끼어드는 걸 운이 아니라 순서로 보장한다.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(session.status, .probing, "stop() 이전에 probe 가 실제로 진행 중이어야 경쟁을 재현한다")
+
+        session.stop()
+        await probeTask.value
+
+        XCTAssertEqual(session.status, .idle)
+        XCTAssertNil(session.latest)
+        XCTAssertNil(session.latestAt)
     }
 
     func testOfflineDeviceProbesAgainOnRetrigger() async throws {

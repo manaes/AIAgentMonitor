@@ -16,7 +16,6 @@ public final class DeviceSession {
     public var onChange: ((DeviceSession) -> Void)?
 
     private let transport: DeviceTransport
-    private var runTask: Task<Void, Never>?
     /// 취소/정리 시점 이후에 도착한 결과가 상태를 덮어쓰는 걸 막는다.
     /// 완료 지점마다 이 값을 검사한다.
     private var generation = 0
@@ -61,6 +60,12 @@ public final class DeviceSession {
     /// 타이머(3분)/포어그라운드 복귀/당겨서 새로고침이 부른다.
     public func retrigger() async {
         guard !isStopped, !isTerminal else { return }
+        // 이미 probing 중이면 재요청은 무시한다. DeviceStatusMachine.next(.probing, on:
+        // .retriggered) 는 항등 매핑으로 .probing 을 그대로 돌려주는데, 이는 offline→probing
+        // 전이와 값이 같아서 다음 줄의 가드만으로는 두 경우를 구분할 수 없다. 여기서 걸러내지
+        // 않으면 probeNow() 가 다시 호출되어 generation 이 올라가고, 지금 한창 진행 중인 probe
+        // 자체가 "늦게 도착한 결과"로 취급돼 버려 이 태스크가 막으려는 버그를 스스로 일으킨다.
+        guard status != .probing else { return }
         let nextStatus = DeviceStatusMachine.next(status, on: .retriggered)
         // 오프라인이 아니면 재탐색 대상이 아니다(이미 붙어 있거나 붙는 중).
         guard nextStatus == .probing || status == .idle else { return }
@@ -70,8 +75,6 @@ public final class DeviceSession {
     public func stop() {
         generation += 1
         isStopped = true
-        runTask?.cancel()
-        runTask = nil
         status = .idle
         latest = nil
         latestAt = nil
