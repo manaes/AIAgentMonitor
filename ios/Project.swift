@@ -77,6 +77,8 @@ let project = Project(
         unitTests("DesignSystemTests", for: "DesignSystem"),
         framework("WidgetShared", deps: [.target(name: "Wire"), .target(name: "MirrorFormat")]),
         unitTests("WidgetSharedTests", for: "WidgetShared"),
+        framework("Fleet", deps: [.target(name: "Wire"), .target(name: "MirrorFormat"), .target(name: "NetworkTransport")], deploymentTargets: iOS),
+        unitTests("FleetTests", for: "Fleet", deploymentTargets: iOS),
         // 전체지원(iOS 17.5+) 변형. 기존 이름/모듈을 그대로 유지한다 —
         // MirrorFeatureTests 의 `@testable import MirrorFeature` 가 이걸 가리킨다.
         .target(
@@ -332,6 +334,11 @@ let project = Project(
             name: "WidgetSharedTests",
             buildAction: .buildAction(targets: [.target("WidgetSharedTests")]),
             testAction: .targets([.testableTarget(target: .target("WidgetSharedTests"))])
+        ),
+        .scheme(
+            name: "FleetTests",
+            buildAction: .buildAction(targets: [.target("FleetTests")]),
+            testAction: .targets([.testableTarget(target: .target("FleetTests"))])
         ),
     ]
 )
