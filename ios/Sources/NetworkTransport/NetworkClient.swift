@@ -117,15 +117,22 @@ public final class NetworkClient: NSObject {
 
     /// dial → 인증 → 첫 스냅샷까지 하고 **연결을 살려둔 채** 반환한다.
     /// 실패 시 재시도하지 않는다 — 재시도 정책은 호출부(DeviceSession)가 정한다.
+    ///
+    /// `token` 을 넘기면 그 토큰 하나로만 인증하고 전역 Keychain 슬롯은 읽지도 지우지도
+    /// 않는다(AppMulti 는 장치마다 토큰이 다르다). 기본값 `nil` 이면 기존처럼 전역
+    /// 슬롯을 쓴다 — 위젯·1:1 앱의 호출부는 수정 없이 그대로 동작한다.
     public func probe(
         endpointIdHex: String,
         relayUrl: String?,
         addresses: [String],
-        timeoutSeconds: Double
+        timeoutSeconds: Double,
+        token: String? = nil
     ) async throws -> ProbeResult {
+        let tokens: TokenSlot = token.map(TokenSlot.fixed) ?? .shared
         let work = Task { () throws -> ProbeResult in
             try await dialAuthenticateAndOpen(
-                endpointIdHex: endpointIdHex, relayUrl: relayUrl, addresses: addresses
+                endpointIdHex: endpointIdHex, relayUrl: relayUrl, addresses: addresses,
+                tokens: tokens
             )
         }
         let watchdog = Task {
@@ -156,7 +163,7 @@ public final class NetworkClient: NSObject {
     /// 받으면 연결을 닫지 않고 바로 돌려준다 — 호출부가 그대로 스트리밍을
     /// 이어가거나(AppMulti), 즉시 닫는다(위젯, `fetchSnapshotOnce`).
     private func dialAuthenticateAndOpen(
-        endpointIdHex: String, relayUrl: String?, addresses: [String]
+        endpointIdHex: String, relayUrl: String?, addresses: [String], tokens: TokenSlot
     ) async throws -> ProbeResult {
         guard let idBytes = Data(hexString: endpointIdHex) else {
             throw NetworkClientError.needsPairing
@@ -168,7 +175,7 @@ public final class NetworkClient: NSObject {
         let conn = try await ep.connect(addr: addr, alpn: Self.alpn)
         // code: nil — 재연결 경로다(이미 저장된 토큰으로 인증). 새 페어링은 여기서
         // 절대 일어나지 않는다.
-        let channel = try await authenticate(conn: conn, code: nil)
+        let channel = try await authenticate(conn: conn, code: nil, tokens: tokens)
 
         let recv = try await conn.acceptUni()
         var buffer = Data()
@@ -258,7 +265,8 @@ public final class NetworkClient: NSObject {
             if endpointProvider == nil { endpoint = ep }
 
             let conn = try await ep.connect(addr: addr, alpn: Self.alpn)
-            let channel = try await authenticate(conn: conn, code: code)
+            // 1:1 앱은 예전 그대로 전역 Keychain 슬롯 하나를 쓴다.
+            let channel = try await authenticate(conn: conn, code: code, tokens: .shared)
             guard wantsRunning else { return }
             try await listenForSnapshots(conn: conn, channel: channel)
         } catch NetworkClientError.needsPairing, NetworkClientError.authFailed {
@@ -282,6 +290,39 @@ public final class NetworkClient: NSObject {
         }
     }
 
+    /// 인증에 쓸 토큰의 출처. `.shared` 는 1:1 앱·위젯의 전역 Keychain 슬롯(기존 동작 그대로),
+    /// `.fixed` 는 호출부가 넘긴 토큰 하나 — AppMulti 는 장치마다 다른 토큰을 레지스트리에 들고 있고,
+    /// 전역 슬롯을 읽거나 지우면 1:1 앱의 페어링을 망가뜨리므로 저장/삭제가 모두 no-op 이다.
+    enum TokenSlot {
+        case shared
+        case fixed(String)
+
+        func load() -> String? {
+            switch self {
+            case .shared: return NetworkTokenStore.loadToken()
+            case .fixed(let token): return token
+            }
+        }
+
+        /// `.fixed` 는 no-op. 여기서 전역 슬롯을 지우면 장치 B 의 인증 실패가
+        /// 1:1 앱의 페어링 토큰까지 같이 날려버린다.
+        func clear() {
+            switch self {
+            case .shared: NetworkTokenStore.clearToken()
+            case .fixed: break
+            }
+        }
+
+        /// `.fixed` 는 저장하지 않고 true 를 돌려준다 — 저장할 곳이 없는 게 정상이라
+        /// false 를 내면 호출부가 쓸데없이 "토큰 저장 실패" 경고를 남긴다.
+        func save(_ token: String) -> Bool {
+            switch self {
+            case .shared: return NetworkTokenStore.saveToken(token)
+            case .fixed: return true
+            }
+        }
+    }
+
     /// `BLEClient.decideV2` 와 동일한 결정을 그대로 쓴다 — 전송만 다를 뿐 상태
     /// 기계는 하나다. QR 로 코드를 이미 받았으므로 `AwaitingCode2` 에서 사용자
     /// 입력을 기다리지 않고 즉시 바인딩을 낸다(재연결 경로에서는 `code` 가 nil
@@ -290,14 +331,16 @@ public final class NetworkClient: NSObject {
     ///
     /// 인가되면 이 연결의 봉인 채널을 돌려준다. 이 값 없이는 스냅샷을 한 장도
     /// 읽을 수 없다.
-    private func authenticate(conn: Connection, code: String?) async throws -> SealedChannel {
+    private func authenticate(
+        conn: Connection, code: String?, tokens: TokenSlot
+    ) async throws -> SealedChannel {
         let handshake = V2Handshake()
         // 프레임과 동사를 **한 값으로** 받는다 — 따로 계산하면 조건 하나만
         // 고쳤을 때 서로 어긋나고, 그러면 `AwaitingCode2` 를 `Nonce2` 로 오해해
         // 논스 없는 `PROOF2` 를 내고 조용히 `needsPairing` 에 앉는다.
         // "코드가 저장된 토큰을 이긴다" 는 규칙도 이 한 함수에만 있다.
         let first = BLEClient.initialSend(
-            hasToken: NetworkTokenStore.loadToken() != nil,
+            hasToken: tokens.load() != nil,
             code: code,
             clientPub: handshake.clientPub
         )
@@ -317,9 +360,9 @@ public final class NetworkClient: NSObject {
                 reply = try await sendControl(conn, PairingClient.code2Frame(binding: binding))
             case .signSessionProof(let epk, let nonce):
                 guard handshake.agree(epkHex: epk, nonceHex: nonce),
-                      let token = NetworkTokenStore.loadToken(),
+                      let token = tokens.load(),
                       let proof = handshake.sessionProof(tokenHex: token) else {
-                    NetworkTokenStore.clearToken()
+                    tokens.clear()
                     stateSubject.send(.needsPairing)
                     throw NetworkClientError.needsPairing
                 }
@@ -332,14 +375,14 @@ public final class NetworkClient: NSObject {
                     stateSubject.send(.needsPairing)
                     throw NetworkClientError.needsPairing
                 }
-                if !NetworkTokenStore.saveToken(token) {
+                if !tokens.save(token) {
                     NSLog("네트워크 페어링 토큰 저장 실패 — 다음 재연결부터 코드를 다시 요구합니다")
                 }
                 return channel
             case .openSession:
-                guard let token = NetworkTokenStore.loadToken(),
+                guard let token = tokens.load(),
                       let channel = handshake.sessionChannel(tokenHex: token) else {
-                    NetworkTokenStore.clearToken()
+                    tokens.clear()
                     stateSubject.send(.needsPairing)
                     throw NetworkClientError.needsPairing
                 }
@@ -350,7 +393,7 @@ public final class NetworkClient: NSObject {
             case .needsPairing:
                 // v1 으로 물러서지 않는다. 재시도도 하지 않는다 — 두 결정 모두
                 // `runConnection` 의 전용 catch 가 지킨다.
-                NetworkTokenStore.clearToken()
+                tokens.clear()
                 stateSubject.send(.needsPairing)
                 throw NetworkClientError.needsPairing
             }
@@ -438,12 +481,17 @@ public final class NetworkClient: NSObject {
     /// 그대로 던진다).
     private func streamSnapshots(
         conn: Connection, channel: SealedChannel,
-        shouldContinue: @escaping () -> Bool,
+        shouldContinue: () -> Bool,
         onSnapshot: (MirrorSnapshot) -> Void
     ) async throws {
         let recv = try await conn.acceptUni()
         var buffer = Data()
         while shouldContinue() {
+            // `dialAuthenticateAndOpen` 과 같은 이유 — uniffi 브리지가 취소를 스스로
+            // 감지한다는 보장이 없어서, onTermination 의 task.cancel() 만으로는
+            // recv.read() 에서 빠져나온다는 보장이 없다. 1:1 경로에도 무해하다
+            // (`wantsRunning` 이 먼저 걸린다).
+            try Task.checkCancellation()
             let chunk = try await recv.read(sizeLimit: Self.snapshotChunkSizeLimit)
             buffer.append(chunk)
             while let newlineIndex = buffer.firstIndex(of: 0x0A) {
@@ -494,8 +542,12 @@ public final class NetworkClient: NSObject {
     /// 연결을 여기서 재사용하는 것 자체가 이 함수의 존재 이유다.
     public func snapshotStream(from result: ProbeResult) -> AsyncThrowingStream<MirrorSnapshot, Error> {
         AsyncThrowingStream { continuation in
-            let task = Task { [weak self] in
-                guard let self else { continuation.finish(); return }
+            // self 를 **강하게** 잡는다. probe 호출부는 이 클라이언트를 지역변수로만
+            // 들고 있다 — weak 로 잡으면 메인 액터가 양보하는 순간 해제돼 첫 스냅샷도
+            // 못 흘리고 빈 스트림으로 끝난다(리뷰에서 실측). 이 태스크를 클라이언트가
+            // 저장하지 않으므로 순환은 생기지 않는다 — 스트림이 끝나면 태스크가 끝나고
+            // 클라이언트가 풀린다.
+            let task = Task {
                 continuation.yield(result.firstSnapshot)
                 do {
                     try await self.streamSnapshots(
