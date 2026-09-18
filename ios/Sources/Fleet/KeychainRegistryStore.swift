@@ -33,10 +33,16 @@ public struct KeychainRegistryStore: DeviceRegistryStore {
 
         var out: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &out)
+        // "저장된 게 없다"와 "읽기 실패"를 구분해야 한다 — 후자를 nil 로 뭉개면
+        // Keychain 잠김 등으로 16대 페어링이 조용히 날아간 것처럼 보인다.
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = out as? Data else {
+        guard status == errSecSuccess else {
             Self.logger.error("레지스트리 조회 실패 status=\(status, privacy: .public)")
-            return nil
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+        guard let data = out as? Data else {
+            Self.logger.error("레지스트리 조회 결과 타입 불일치")
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }
         return data
     }

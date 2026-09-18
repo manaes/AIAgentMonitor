@@ -34,8 +34,17 @@ public final class DeviceSnapshotCache {
 
     public func load(endpointIdHex: String) -> CachedSnapshot? {
         guard let url = fileURL(endpointIdHex) else { return nil }
+        // 파일이 아직 없는 건 정상 상태라 여기서는 로그를 남기지 않는다.
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(CachedSnapshot.self, from: data)
+        do {
+            return try JSONDecoder().decode(CachedSnapshot.self, from: data)
+        } catch {
+            // 디코딩 실패는 스키마 변경/파일 손상을 뜻하므로 진단 흔적을 남긴다.
+            Self.logger.error(
+                "캐시 디코딩 실패 endpointIdHex=\(endpointIdHex, privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
+            return nil
+        }
     }
 
     public func save(_ snapshot: MirrorSnapshot, fetchedAt: Date, endpointIdHex: String) {
@@ -44,8 +53,18 @@ public final class DeviceSnapshotCache {
             return
         }
         let cached = CachedSnapshot(snapshot: snapshot, fetchedAt: fetchedAt)
-        guard let data = try? JSONEncoder().encode(cached) else { return }
-        try? data.write(to: url, options: .atomic)
+        guard let data = try? JSONEncoder().encode(cached) else {
+            Self.logger.error("캐시 인코딩 실패 endpointIdHex=\(endpointIdHex, privacy: .public)")
+            return
+        }
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // 디스크 쓰기 실패(권한/용량 부족 등)가 조용히 사라지면 원인 추적이 불가능해진다.
+            Self.logger.error(
+                "캐시 파일 쓰기 실패 endpointIdHex=\(endpointIdHex, privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
+        }
     }
 
     /// `endpointIdHex` 가 그대로 파일명이 되므로 hex 문자만 허용한다 — 경로 조작 차단.
