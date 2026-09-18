@@ -67,6 +67,25 @@ public final class DeviceSnapshotCache {
         }
     }
 
+    /// 장치를 목록에서 지울 때 캐시 파일도 같이 지운다. 남겨두면 고아 파일이 쌓이고,
+    /// 같은 Mac 을 다시 페어링하면 연결되기도 전에 낡은 스냅샷이 먼저 보인다.
+    public func remove(endpointIdHex: String) {
+        // hex 검증은 fileURL 이 이미 한다 — 경로 조작으로 임의 파일을 지우지 못한다.
+        guard let url = fileURL(endpointIdHex) else {
+            Self.logger.error("캐시 파일명으로 쓸 수 없는 식별자")
+            return
+        }
+        // 저장된 적 없는 장치를 지우는 건 정상이라 없으면 조용히 끝낸다.
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            Self.logger.error(
+                "캐시 파일 삭제 실패 endpointIdHex=\(endpointIdHex, privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
+        }
+    }
+
     /// `endpointIdHex` 가 그대로 파일명이 되므로 hex 문자만 허용한다 — 경로 조작 차단.
     private func fileURL(_ endpointIdHex: String) -> URL? {
         let allowed = CharacterSet(charactersIn: "0123456789abcdefABCDEF")

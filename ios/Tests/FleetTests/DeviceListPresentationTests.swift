@@ -101,6 +101,60 @@ final class DeviceListPresentationTests: XCTestCase {
         XCTAssertEqual(row.agents[0].fiveHour?.percent, 100)
     }
 
+    // MARK: - QuotaBarView 로 넘길 원값
+
+    /// 5h 창이 이미 리셋됐으면 `QuotaDisplay.displayPercent` 가 0을 돌려줘야 하는데,
+    /// 화면이 `isReset5h: false` 를 상수로 넘기면 리셋 전 낡은 %가 계속 보인다.
+    /// 판정은 `now` 기준이므로 표현 계층이 계산해서 실어 보내야 한다.
+    func testRowMarksFiveHourResetWhenResetAtIsPast() throws {
+        let past = UInt64(now.timeIntervalSince1970) - 1
+        let reset = DeviceListPresentation.row(
+            device: device("aa"), status: .online,
+            cached: try cached(agentJSON: #"{"k":0,"r":1,"t5":10,"p5":44,"r5":\#(past),"pj":[]}"#),
+            now: now
+        )
+        XCTAssertTrue(reset.agents[0].isReset5h)
+
+        let future = UInt64(now.timeIntervalSince1970) + 3600
+        let notReset = DeviceListPresentation.row(
+            device: device("aa"), status: .online,
+            cached: try cached(agentJSON: #"{"k":0,"r":1,"t5":10,"p5":44,"r5":\#(future),"pj":[]}"#),
+            now: now
+        )
+        XCTAssertFalse(notReset.agents[0].isReset5h)
+    }
+
+    /// "값이 없다" 와 "조회가 실패했다" 는 다르다 — 전자는 그 플랜에 없는 창이고
+    /// 후자는 한도를 못 읽고 있는 상태라 안내 문구가 달라진다.
+    func testRowMarksUnreadableWhenQuotaErrorPresent() throws {
+        let failing = DeviceListPresentation.row(
+            device: device("aa"), status: .online,
+            cached: try cached(agentJSON: #"{"k":0,"r":1,"t5":10,"p5":44,"e":1,"pj":[]}"#),
+            now: now
+        )
+        XCTAssertTrue(failing.agents[0].unreadable)
+
+        let missing = DeviceListPresentation.row(
+            device: device("aa"), status: .online,
+            cached: try cached(agentJSON: #"{"k":0,"r":1,"t5":10,"pj":[]}"#),
+            now: now
+        )
+        XCTAssertFalse(missing.agents[0].unreadable)
+    }
+
+    /// %가 없는 플랜에서는 `QuotaBarView` 가 토큰 수로 대체 문구를 만든다. 0을 넘기면
+    /// 스냅샷에 들어 있는 실제 값이 버려진다.
+    func testRowCarriesTokens5h() throws {
+        let row = DeviceListPresentation.row(
+            device: device("aa"), status: .online,
+            cached: try cached(agentJSON: #"{"k":0,"r":1,"t5":123456,"pw":60,"pj":[]}"#),
+            now: now
+        )
+        XCTAssertEqual(row.agents[0].tokens5h, 123_456)
+        XCTAssertNil(row.agents[0].usedPct5h)
+        XCTAssertEqual(row.agents[0].usedPctWeekly, 60)
+    }
+
     // MARK: - 에이전트 개수 제한
 
     func testShowsAtMostTwoAgentsAndCountsTheRest() throws {

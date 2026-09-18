@@ -35,7 +35,14 @@ public final class DeviceSession {
         self.transport = transport
     }
 
-    /// 지금 한 번 붙어본다. 종단 상태(재페어링 필요·버전 불일치)면 아무것도 하지 않는다.
+    /// 지금 한 번 **붙어보기만** 한다. 종단 상태(재페어링 필요·버전 불일치)면 아무것도 하지 않는다.
+    ///
+    /// 스트림 소비를 여기서 기다리지 않는 게 핵심이다. 실제 전송의 스냅샷 스트림은 연결이
+    /// 살아 있는 한 끝나지 않으므로, 소비까지 await 하면 이 함수는 online 인 동안 영영
+    /// 반환하지 않는다. 그러면 `DeviceFleet.runRound` 의 동시성 슬롯(4)을 온라인 세션이
+    /// 영구 점유해 5대째부터는 probe 조차 시작하지 못하고, 당겨서 새로고침은 장치가
+    /// 실제로 복구되는 순간 영원히 끝나지 않는다. 슬롯은 dial/인증에만 쓰고, 소비는
+    /// 세션이 자기 `probeTask` 로 들고 간다.
     public func probeNow() async {
         guard !isStopped, !isTerminal else { return }
         // 포어그라운드 복귀처럼 online 인 세션에 다시 probe 가 걸리면, 죽었을 옛 스트림을
@@ -47,28 +54,20 @@ public final class DeviceSession {
         let current = generation
         apply(.probeStarted, generation: current)
 
-        // `await self?.runProbe(...)` 는 결과 타입이 `()?` 라 `Task<Void, Never>` 에 못 담는다.
-        let task = Task { [weak self] in
-            guard let self else { return }
-            await self.runProbe(generation: current)
-        }
-        // 여기서 nil 로 되돌리지 않는다 — 이 호출이 기다리는 동안 새 probe 가 들어와
-        // probeTask 를 갈아끼웠을 수 있고, 그걸 지워버리면 취소 대상을 잃는다.
-        probeTask = task
-        await task.value
-    }
-
-    /// `probeNow()` 의 본문. 취소(CancellationError)는 아래 범용 catch 로 떨어지는데,
-    /// 취소한 쪽이 generation 을 이미 올렸으므로 `guard current == generation` 에서
-    /// 조용히 빠져나간다.
-    private func runProbe(generation current: Int) async {
         do {
             let stream = try await transport.probe(
                 device: device, timeoutSeconds: Self.probeTimeoutSeconds
             )
+            // 늦게 도착한 스트림은 여기서 버려진다 — 아무도 소비하지 않은 스트림은 해제되면서
+            // onTermination 이 불려 연결이 닫힌다.
             guard current == generation else { return }
             apply(.probeSucceeded, generation: current)
-            await consume(stream, generation: current)
+            // 여기서 nil 로 되돌리지 않는다 — 새 probe 가 들어와 probeTask 를 갈아끼웠을 수
+            // 있고, 그걸 지워버리면 취소 대상을 잃는다.
+            probeTask = Task { [weak self] in
+                guard let self else { return }
+                await self.consume(stream, generation: current)
+            }
         } catch let error as DeviceTransportError {
             guard current == generation else { return }
             switch error {

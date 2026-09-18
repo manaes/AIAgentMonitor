@@ -11,6 +11,18 @@ public struct AgentRowModel: Equatable, Sendable {
     public let name: String
     /// 오프라인이면 nil — tok/s 는 지금 이 순간의 값이라 낡으면 의미가 없다.
     public let rateText: String?
+    /// 아래 다섯은 `QuotaBarView.configure` 가 그대로 받는 **원값**이다. 리셋 직후 0% 처리와
+    /// 조회 실패 시 % 숨김은 `QuotaDisplay`/`QuotaBarView` 가 이미 갖고 있는 규칙이므로
+    /// 여기서 다시 계산하지 않는다 — 1:1 앱 `AgentCardView` 와 같은 호출이 되게 한다.
+    public let tokens5h: UInt32
+    public let usedPct5h: Float?
+    public let usedPctWeekly: Float?
+    /// 5h 창이 이미 리셋됐는가. 항상 false 로 넘기면 리셋된 에이전트가 리셋 전 낡은 %를
+    /// 계속 보여준다.
+    public let isReset5h: Bool
+    /// 사용량 조회 자체가 실패 중인가(`quotaError`). 값이 단순히 없는 것과는 다르다.
+    public let unreadable: Bool
+    /// 아래 둘은 % 텍스트가 필요한 곳(테스트·요약 표시)용 파생값이다.
     public let fiveHour: QuotaWindowText?
     public let weekly: QuotaWindowText?
 }
@@ -34,11 +46,17 @@ public enum DeviceListPresentation {
         let isLive = (status == .online)
         let ordered = orderedForDisplay(cached?.snapshot.agents ?? [])
         let shown = ordered.prefix(visibleAgentLimit).map { agent in
-            AgentRowModel(
+            let unreadable = agent.quotaError != nil
+            return AgentRowModel(
                 name: agentName(agent.kind),
                 rateText: isLive ? "\(MirrorFormat.tokensPerSec(agent.ratePerSec)) tok/s" : nil,
-                fiveHour: window(percent: agent.usedPct5h, hasError: agent.quotaError != nil),
-                weekly: window(percent: agent.usedPctWeekly, hasError: agent.quotaError != nil)
+                tokens5h: agent.tokens5h,
+                usedPct5h: agent.usedPct5h,
+                usedPctWeekly: agent.usedPctWeekly,
+                isReset5h: QuotaDisplay.isReset5h(resetAt: agent.r5, now: now),
+                unreadable: unreadable,
+                fiveHour: window(percent: agent.usedPct5h, hasError: unreadable),
+                weekly: window(percent: agent.usedPctWeekly, hasError: unreadable)
             )
         }
 

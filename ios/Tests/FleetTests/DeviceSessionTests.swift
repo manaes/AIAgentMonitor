@@ -71,6 +71,9 @@ final class DeviceSessionTests: XCTestCase {
         let session = DeviceSession(device: makeDevice(), transport: transport)
 
         await session.probeNow()
+        // probeNow 는 이제 dial/인증까지만 기다린다. 스냅샷은 probeTask 가 소비하므로
+        // 도착을 기다린 뒤에 확인한다(단언 자체는 그대로다).
+        await waitUntil { session.latest != nil }
 
         XCTAssertEqual(session.status, .online)
         XCTAssertEqual(session.latest?.agents.first?.ratePerSec, 3)
@@ -88,6 +91,7 @@ final class DeviceSessionTests: XCTestCase {
 
         let before = Date()
         await session.probeNow()
+        await waitUntil { session.latestAt != nil }
         let after = Date()
 
         let latestAt = try XCTUnwrap(session.latestAt)
@@ -145,6 +149,8 @@ final class DeviceSessionTests: XCTestCase {
         let session = DeviceSession(device: makeDevice(), transport: transport)
 
         await session.probeNow()
+        // 스트림 도중의 에러는 probeTask 안에서 처리되므로 종단 상태 도달을 기다린다.
+        await waitUntil { session.status == .versionMismatch }
 
         XCTAssertEqual(session.status, .versionMismatch)
     }
@@ -156,6 +162,7 @@ final class DeviceSessionTests: XCTestCase {
         let session = DeviceSession(device: makeDevice(), transport: transport)
 
         await session.probeNow()
+        await waitUntil { session.status == .needsRepairing }
 
         XCTAssertEqual(session.status, .needsRepairing)
     }
@@ -237,18 +244,36 @@ final class DeviceSessionTests: XCTestCase {
         transport.outcomes = [.openStream(try makeSnapshot(rate: 4), onTerminate: { terminated.fulfill() })]
         let session = DeviceSession(device: makeDevice(), transport: transport)
 
-        // probeNow 의 반환도 기대치로 감싼다 — 그냥 `await probing.value` 로 두면 회귀 시
-        // 테스트가 깔끔히 실패하지 않고 영원히 매달려 스위트 전체를 멈춘다.
-        let returned = expectation(description: "probeNow 반환")
-        let probing = Task { await session.probeNow(); returned.fulfill() }
-        await waitUntil { session.status == .online }
+        await session.probeNow()
         XCTAssertEqual(session.status, .online, "스트림이 열려 online 이어야 이 테스트가 검증할 상황이 된다")
 
         session.stop()
 
-        await fulfillment(of: [terminated, returned], timeout: 1)
+        await fulfillment(of: [terminated], timeout: 1)
         XCTAssertEqual(session.status, .idle)
-        _ = probing
+    }
+
+    /// `probeNow()` 는 스트림이 열린 채로도 **반환해야 한다**. 소비까지 기다리면 실제 전송처럼
+    /// 끝나지 않는 스트림에서 이 함수가 영영 반환하지 않고, 그 결과 `DeviceFleet.runRound` 의
+    /// 동시성 슬롯을 온라인 세션이 영구 점유해 5대째부터 probe 조차 못 하며(B-2) 당겨서
+    /// 새로고침은 장치가 복구되는 순간 끝나지 않는다(B-1).
+    func testProbeNowReturnsWhileStreamStaysOpen() async throws {
+        let transport = FakeTransport()
+        let terminated = expectation(description: "스트림 종료 콜백")
+        transport.outcomes = [.openStream(try makeSnapshot(rate: 5), onTerminate: { terminated.fulfill() })]
+        let session = DeviceSession(device: makeDevice(), transport: transport)
+
+        let returned = expectation(description: "probeNow 반환")
+        Task { await session.probeNow(); returned.fulfill() }
+        await fulfillment(of: [returned], timeout: 1)
+
+        XCTAssertEqual(session.status, .online)
+        // 반환했다고 스트림을 버린 게 아니다 — 세션이 계속 들고 있다가 stop() 에 닫는다.
+        await waitUntil { session.latest != nil }
+        XCTAssertEqual(session.latest?.agents.first?.ratePerSec, 5)
+
+        session.stop()
+        await fulfillment(of: [terminated], timeout: 1)
     }
 
     /// 상태가 바뀔 때까지 기다린다. 고정 sleep 과 달리 느린 CI 에서도 흔들리지 않는다.

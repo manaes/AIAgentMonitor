@@ -46,6 +46,25 @@ final class DeviceSnapshotCacheTests: XCTestCase {
         XCTAssertNil(cache.load(endpointIdHex: "bb"))
     }
 
+    /// 장치를 목록에서 지우면 캐시 파일도 없어져야 한다 — 남으면 고아 파일이 쌓이고,
+    /// 같은 Mac 을 다시 페어링했을 때 연결되기도 전에 낡은 스냅샷이 먼저 보인다.
+    func testRemoveDeletesCachedSnapshot() throws {
+        let cache = DeviceSnapshotCache(directory: directory)
+        cache.save(try makeSnapshot(), fetchedAt: Date(), endpointIdHex: "aa")
+        XCTAssertNotNil(cache.load(endpointIdHex: "aa"))
+
+        cache.remove(endpointIdHex: "aa")
+
+        XCTAssertNil(cache.load(endpointIdHex: "aa"))
+    }
+
+    /// 저장된 적 없는 장치를 지우는 건 정상 경로다(캐시가 비어 있는 상태에서 삭제).
+    func testRemoveIsHarmlessWhenNothingSaved() {
+        let cache = DeviceSnapshotCache(directory: directory)
+        cache.remove(endpointIdHex: "bb")
+        XCTAssertNil(cache.load(endpointIdHex: "bb"))
+    }
+
     /// endpointIdHex 가 파일명이 되므로 경로 조작 문자가 섞이면 안 된다.
     func testNonHexIdentifierIsRejected() throws {
         let cache = DeviceSnapshotCache(directory: directory)
