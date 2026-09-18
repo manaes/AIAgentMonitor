@@ -23,6 +23,12 @@ public final class DeviceSession {
     /// 나중에 새로 걸어온 probeNow() 호출"까지 막지 못한다 — generation 은 그 호출
     /// 자체를 새 세대로 인정해버리기 때문이다. 재사용하려면 새 DeviceSession 을 만든다.
     private var isStopped = false
+    /// 진행 중인 probe/consume 작업. `stop()` 과 재-probe 가 취소해 스트림을 **실제로** 닫는다 —
+    /// 취소는 `for try await` 에서 CancellationError 로 튀어나오고, 그 취소가 스트림의
+    /// onTermination 까지 내려가 QUIC 연결을 닫는다. generation 가드는 늦은 결과를 **무시**만
+    /// 할 수 있고 연결을 닫지는 못한다(다음 스냅샷이 와야 가드에 걸리는데, 조용한 Mac 은
+    /// 그 스냅샷을 영원히 안 보낸다).
+    private var probeTask: Task<Void, Never>?
 
     public init(device: Device, transport: DeviceTransport) {
         self.device = device
@@ -32,11 +38,30 @@ public final class DeviceSession {
     /// 지금 한 번 붙어본다. 종단 상태(재페어링 필요·버전 불일치)면 아무것도 하지 않는다.
     public func probeNow() async {
         guard !isStopped, !isTerminal else { return }
+        // 포어그라운드 복귀처럼 online 인 세션에 다시 probe 가 걸리면, 죽었을 옛 스트림을
+        // 기다리지 말고 바로 끊는다. 아래 generation 증가까지 await 가 없으므로, 취소당한
+        // 옛 작업이 다시 깨어날 때는 이미 새 세대라 가드에 걸린다.
+        probeTask?.cancel()
 
         generation += 1
         let current = generation
         apply(.probeStarted, generation: current)
 
+        // `await self?.runProbe(...)` 는 결과 타입이 `()?` 라 `Task<Void, Never>` 에 못 담는다.
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.runProbe(generation: current)
+        }
+        // 여기서 nil 로 되돌리지 않는다 — 이 호출이 기다리는 동안 새 probe 가 들어와
+        // probeTask 를 갈아끼웠을 수 있고, 그걸 지워버리면 취소 대상을 잃는다.
+        probeTask = task
+        await task.value
+    }
+
+    /// `probeNow()` 의 본문. 취소(CancellationError)는 아래 범용 catch 로 떨어지는데,
+    /// 취소한 쪽이 generation 을 이미 올렸으므로 `guard current == generation` 에서
+    /// 조용히 빠져나간다.
+    private func runProbe(generation current: Int) async {
         do {
             let stream = try await transport.probe(
                 device: device, timeoutSeconds: Self.probeTimeoutSeconds
@@ -75,6 +100,8 @@ public final class DeviceSession {
     public func stop() {
         generation += 1
         isStopped = true
+        probeTask?.cancel()
+        probeTask = nil
         status = .idle
         latest = nil
         latestAt = nil

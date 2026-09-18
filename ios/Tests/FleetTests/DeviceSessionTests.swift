@@ -19,6 +19,11 @@ private final class FakeTransport: DeviceTransport, @unchecked Sendable {
         /// 상태를 만나는 경우를 흉내낸다 — `consume()` 이 그 타입을 무시하고 전부
         /// `connectionLost` 로 뭉개는 회귀를 잡기 위한 픽스처.
         case streamThenFail([MirrorSnapshot], DeviceTransportError)
+        /// 스냅샷 하나를 흘린 뒤 **끝나지 않는** 스트림. 소비자가 끊으면 `onTerminate` 가
+        /// 불린다 — `stop()` 이 스트림을 실제로 닫는지(취소 연쇄) 고정하는 픽스처다.
+        /// generation 가드만으로는 여기서 연결이 닫히지 않는다: 다음 스냅샷이 와야 가드에
+        /// 걸리는데 이 스트림은 더 보내지 않는다(조용한 Mac).
+        case openStream(MirrorSnapshot, onTerminate: @Sendable () -> Void)
     }
     var outcomes: [Outcome] = []
     private(set) var probeCount = 0
@@ -41,6 +46,12 @@ private final class FakeTransport: DeviceTransport, @unchecked Sendable {
             return AsyncThrowingStream { continuation in
                 for s in snapshots { continuation.yield(s) }
                 continuation.finish(throwing: error)
+            }
+        case .openStream(let snapshot, let onTerminate):
+            return AsyncThrowingStream { continuation in
+                continuation.onTermination = { _ in onTerminate() }
+                continuation.yield(snapshot)
+                // finish 하지 않는다 — 소비자가 끊어야만 끝난다.
             }
         }
     }
@@ -213,6 +224,41 @@ final class DeviceSessionTests: XCTestCase {
 
         // 진행 중이던 probe 를 마저 끝내서 태스크가 새지 않게 한다.
         await probeTask.value
+    }
+
+    /// `stop()` 은 진행 중인 스트림을 **실제로 닫아야** 한다. generation 가드는 늦게 도착한
+    /// 결과를 무시할 뿐이라, 스냅샷이 더 오지 않는 조용한 Mac 의 스트림은 영원히 열린 채
+    /// 남는다 — 레지스트리가 바뀔 때마다 fleet 을 다시 만드는 목록 화면에서 이는 QUIC
+    /// 연결 누수가 된다. 취소 연쇄(probeTask.cancel → for try await → onTermination)로만
+    /// 닫히므로 `onTerminate` 콜백으로 고정한다.
+    func testStopCancelsInFlightStreamAndClosesIt() async throws {
+        let transport = FakeTransport()
+        let terminated = expectation(description: "스트림 종료 콜백")
+        transport.outcomes = [.openStream(try makeSnapshot(rate: 4), onTerminate: { terminated.fulfill() })]
+        let session = DeviceSession(device: makeDevice(), transport: transport)
+
+        // probeNow 의 반환도 기대치로 감싼다 — 그냥 `await probing.value` 로 두면 회귀 시
+        // 테스트가 깔끔히 실패하지 않고 영원히 매달려 스위트 전체를 멈춘다.
+        let returned = expectation(description: "probeNow 반환")
+        let probing = Task { await session.probeNow(); returned.fulfill() }
+        await waitUntil { session.status == .online }
+        XCTAssertEqual(session.status, .online, "스트림이 열려 online 이어야 이 테스트가 검증할 상황이 된다")
+
+        session.stop()
+
+        await fulfillment(of: [terminated, returned], timeout: 1)
+        XCTAssertEqual(session.status, .idle)
+        _ = probing
+    }
+
+    /// 상태가 바뀔 때까지 기다린다. 고정 sleep 과 달리 느린 CI 에서도 흔들리지 않는다.
+    private func waitUntil(
+        timeout: TimeInterval = 1, _ condition: () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
 
     func testOfflineDeviceProbesAgainOnRetrigger() async throws {

@@ -16,6 +16,29 @@ private final class CountingTransport: DeviceTransport, @unchecked Sendable {
     }
 }
 
+/// 끝나지 않는 스냅샷 스트림을 돌려주는 가짜 전송. 세션이 online 에 머무는 상황을
+/// 만들어야 `stopAll()` 이 실제로 무언가를 멈추는지 볼 수 있다.
+private final class OpenStreamTransport: DeviceTransport, @unchecked Sendable {
+    private let snapshot: MirrorSnapshot
+
+    init(snapshot: MirrorSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func probe(device: Device, timeoutSeconds: Double) async throws -> AsyncThrowingStream<MirrorSnapshot, Error> {
+        let snapshot = self.snapshot
+        return AsyncThrowingStream { continuation in
+            continuation.yield(snapshot)
+            // finish 하지 않는다 — 소비자가 끊어야만 끝난다.
+        }
+    }
+}
+
+private func makeSnapshot() throws -> MirrorSnapshot {
+    let json = #"{"v":1,"t":1758000000,"a":[{"k":0,"r":1,"t5":0,"pj":[]}]}"#
+    return try JSONDecoder().decode(MirrorSnapshot.self, from: Data(json.utf8))
+}
+
 @MainActor
 final class DeviceFleetTests: XCTestCase {
 
@@ -64,5 +87,40 @@ final class DeviceFleetTests: XCTestCase {
         }
 
         XCTAssertTrue(fleet.sessions.allSatisfy { $0.status == .offline })
+    }
+
+    /// 목록 화면은 레지스트리가 바뀔 때마다 fleet 을 다시 만든다. 옛 fleet 을 멈추지 않으면
+    /// 그 세션들이 `while true` 스트림을 계속 소비해 삭제된 장치의 QUIC 연결이 누수되고
+    /// 남아 있는 장치는 이중 연결이 된다.
+    func testStopAllStopsEverySession() async throws {
+        let transport = OpenStreamTransport(snapshot: try makeSnapshot())
+        // probeConcurrency(4) 이하로 둔다 — 끝나지 않는 스트림이라 대기열에 남으면
+        // 영원히 probe 를 시작하지 못한다.
+        let fleet = DeviceFleet(
+            devices: devices(3),
+            transportFactory: { _ in transport },
+            cache: nil
+        )
+
+        // 스트림이 끝나지 않으므로 startInitialRound 는 stopAll 전에는 반환하지 않는다.
+        let roundFinished = expectation(description: "초기 라운드 종료")
+        let round = Task { await fleet.startInitialRound(); roundFinished.fulfill() }
+        await waitUntil { fleet.sessions.allSatisfy { $0.status == .online } }
+        XCTAssertTrue(fleet.sessions.allSatisfy { $0.status == .online }, "전원 online 이어야 검증할 상황이 된다")
+
+        fleet.stopAll()
+
+        XCTAssertTrue(fleet.sessions.allSatisfy { $0.status == .idle })
+        // 취소가 스트림까지 내려가야 라운드가 끝난다 — 매달리면 연결이 안 닫힌 것이다.
+        await fulfillment(of: [roundFinished], timeout: 1)
+        _ = round
+    }
+
+    /// 조건이 만족될 때까지 기다린다. 고정 sleep 과 달리 느린 CI 에서도 흔들리지 않는다.
+    private func waitUntil(timeout: TimeInterval = 1, _ condition: () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
 }

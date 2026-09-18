@@ -44,6 +44,13 @@ public final class DeviceFleet {
         await runRound(targets) { session in await session.retrigger() }
     }
 
+    /// 화면이 이 fleet 을 버릴 때(레지스트리 변경으로 다시 만들 때) 부른다. 모든 세션의
+    /// 진행 중 작업을 취소해 연결을 닫는다 — 안 부르면 옛 fleet 의 스트림이 계속 살아
+    /// 삭제된 장치의 연결이 누수되고 남은 장치는 이중 연결이 된다.
+    public func stopAll() {
+        for session in sessions { session.stop() }
+    }
+
     /// 동시성 제한 안에서 `action` 을 실행한다. 처음 `probeConcurrency` 개를 띄우고,
     /// 하나가 끝날 때마다 대기열에서 다음 것을 채워 넣는다 — 4개를 띄운 뒤
     /// 전부 끝나길 기다렸다가 다음 4개를 도는 lockstep 방식과는 다르다.
