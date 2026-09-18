@@ -113,26 +113,34 @@ public final class NetworkClient: NSObject {
         public let connection: Connection
         public let channel: SealedChannel
         public let firstSnapshot: MirrorSnapshot
+        /// 이번 인증에서 Mac 이 **새로 발급한** 토큰. 코드로 페어링했을 때(`.openSealedToken`)만
+        /// non-nil 이다. 토큰으로 재연결한 경우엔 nil — 프로토콜상 재연결 경로엔 토큰 회전이 없다.
+        /// AppMulti 는 이 값을 `Device.token` 에 저장한다(QR 의 `code` 는 6자리 페어링 코드일 뿐
+        /// 토큰이 아니라서, 그걸 저장하면 재연결이 항상 needsPairing 으로 거부된다).
+        public let issuedToken: String?
     }
 
     /// dial → 인증 → 첫 스냅샷까지 하고 **연결을 살려둔 채** 반환한다.
     /// 실패 시 재시도하지 않는다 — 재시도 정책은 호출부(DeviceSession)가 정한다.
     ///
     /// `token` 을 넘기면 그 토큰 하나로만 인증하고 전역 Keychain 슬롯은 읽지도 지우지도
-    /// 않는다(AppMulti 는 장치마다 토큰이 다르다). 기본값 `nil` 이면 기존처럼 전역
-    /// 슬롯을 쓴다 — 위젯·1:1 앱의 호출부는 수정 없이 그대로 동작한다.
+    /// 않는다(AppMulti 는 장치마다 토큰이 다르다). 토큰이 없고 `code` 만 있으면 **코드 페어링**
+    /// 이다 — 발급된 토큰은 어디에도 저장하지 않고 `ProbeResult.issuedToken` 으로 돌려준다.
+    /// 둘 다 nil 이면 기존처럼 전역 슬롯을 쓴다 — 위젯·1:1 앱의 호출부는 수정 없이 동작한다.
     public func probe(
         endpointIdHex: String,
         relayUrl: String?,
         addresses: [String],
         timeoutSeconds: Double,
-        token: String? = nil
+        token: String? = nil,
+        code: String? = nil
     ) async throws -> ProbeResult {
-        let tokens: TokenSlot = token.map(TokenSlot.fixed) ?? .shared
+        // 토큰이 코드를 이긴다 — 이미 페어링된 장치는 재연결 경로가 맞다.
+        let tokens: TokenSlot = token.map(TokenSlot.fixed) ?? (code != nil ? .ephemeral : .shared)
         let work = Task { () throws -> ProbeResult in
             try await dialAuthenticateAndOpen(
                 endpointIdHex: endpointIdHex, relayUrl: relayUrl, addresses: addresses,
-                tokens: tokens
+                tokens: tokens, code: code
             )
         }
         let watchdog = Task {
@@ -163,7 +171,8 @@ public final class NetworkClient: NSObject {
     /// 받으면 연결을 닫지 않고 바로 돌려준다 — 호출부가 그대로 스트리밍을
     /// 이어가거나(AppMulti), 즉시 닫는다(위젯, `fetchSnapshotOnce`).
     private func dialAuthenticateAndOpen(
-        endpointIdHex: String, relayUrl: String?, addresses: [String], tokens: TokenSlot
+        endpointIdHex: String, relayUrl: String?, addresses: [String], tokens: TokenSlot,
+        code: String? = nil
     ) async throws -> ProbeResult {
         guard let idBytes = Data(hexString: endpointIdHex) else {
             throw NetworkClientError.needsPairing
@@ -173,9 +182,9 @@ public final class NetworkClient: NSObject {
 
         let ep = try await resolveEndpoint()
         let conn = try await ep.connect(addr: addr, alpn: Self.alpn)
-        // code: nil — 재연결 경로다(이미 저장된 토큰으로 인증). 새 페어링은 여기서
-        // 절대 일어나지 않는다.
-        let channel = try await authenticate(conn: conn, code: nil, tokens: tokens)
+        // code 가 nil 이면 재연결 경로(이미 저장된 토큰으로 인증), non-nil 이면 QR 로 받은
+        // 6자리 코드로 새로 페어링하는 경로다.
+        let (channel, issuedToken) = try await authenticate(conn: conn, code: code, tokens: tokens)
 
         let recv = try await conn.acceptUni()
         var buffer = Data()
@@ -189,7 +198,10 @@ public final class NetworkClient: NSObject {
                 let lineData = Data(buffer[..<newlineIndex])
                 buffer.removeSubrange(buffer.startIndex...newlineIndex)
                 if let snapshot = try decodeSnapshotLine(lineData, channel: channel) {
-                    return ProbeResult(connection: conn, channel: channel, firstSnapshot: snapshot)
+                    return ProbeResult(
+                        connection: conn, channel: channel, firstSnapshot: snapshot,
+                        issuedToken: issuedToken
+                    )
                 }
             }
         }
@@ -266,7 +278,8 @@ public final class NetworkClient: NSObject {
 
             let conn = try await ep.connect(addr: addr, alpn: Self.alpn)
             // 1:1 앱은 예전 그대로 전역 Keychain 슬롯 하나를 쓴다.
-            let channel = try await authenticate(conn: conn, code: code, tokens: .shared)
+            // 1:1 앱은 발급 토큰을 전역 슬롯(.shared)에 그대로 저장하므로 반환값의 채널만 쓴다.
+            let channel = try await authenticate(conn: conn, code: code, tokens: .shared).channel
             guard wantsRunning else { return }
             try await listenForSnapshots(conn: conn, channel: channel)
         } catch NetworkClientError.needsPairing, NetworkClientError.authFailed {
@@ -296,11 +309,16 @@ public final class NetworkClient: NSObject {
     enum TokenSlot {
         case shared
         case fixed(String)
+        /// 코드 페어링 전용. 저장된 토큰이 없고(load → nil), Mac 이 발급한 토큰도 여기엔
+        /// **저장하지 않는다**(save/clear 모두 no-op) — 발급 토큰은 `ProbeResult.issuedToken`
+        /// 으로 호출부에 돌려준다. 전역 슬롯(`.shared`)을 쓰면 1:1 앱의 페어링을 덮어쓴다.
+        case ephemeral
 
         func load() -> String? {
             switch self {
             case .shared: return NetworkTokenStore.loadToken()
             case .fixed(let token): return token
+            case .ephemeral: return nil
             }
         }
 
@@ -309,7 +327,7 @@ public final class NetworkClient: NSObject {
         func clear() {
             switch self {
             case .shared: NetworkTokenStore.clearToken()
-            case .fixed: break
+            case .fixed, .ephemeral: break
             }
         }
 
@@ -318,7 +336,7 @@ public final class NetworkClient: NSObject {
         func save(_ token: String) -> Bool {
             switch self {
             case .shared: return NetworkTokenStore.saveToken(token)
-            case .fixed: return true
+            case .fixed, .ephemeral: return true
             }
         }
     }
@@ -330,10 +348,12 @@ public final class NetworkClient: NSObject {
     /// 재스캔이 맞다).
     ///
     /// 인가되면 이 연결의 봉인 채널을 돌려준다. 이 값 없이는 스냅샷을 한 장도
-    /// 읽을 수 없다.
+    /// 읽을 수 없다. 코드로 페어링한 경우(`.openSealedToken`)에는 Mac 이 발급한 토큰을
+    /// 함께 돌려준다 — `.ephemeral` 슬롯은 그 토큰을 아무데도 저장하지 않으므로,
+    /// 호출부가 여기서 받아 자기 레지스트리에 넣지 않으면 영영 잃어버린다.
     private func authenticate(
         conn: Connection, code: String?, tokens: TokenSlot
-    ) async throws -> SealedChannel {
+    ) async throws -> (channel: SealedChannel, issuedToken: String?) {
         let handshake = V2Handshake()
         // 프레임과 동사를 **한 값으로** 받는다 — 따로 계산하면 조건 하나만
         // 고쳤을 때 서로 어긋나고, 그러면 `AwaitingCode2` 를 `Nonce2` 로 오해해
@@ -378,7 +398,7 @@ public final class NetworkClient: NSObject {
                 if !tokens.save(token) {
                     NSLog("네트워크 페어링 토큰 저장 실패 — 다음 재연결부터 코드를 다시 요구합니다")
                 }
-                return channel
+                return (channel: channel, issuedToken: token)
             case .openSession:
                 guard let token = tokens.load(),
                       let channel = handshake.sessionChannel(tokenHex: token) else {
@@ -386,7 +406,8 @@ public final class NetworkClient: NSObject {
                     stateSubject.send(.needsPairing)
                     throw NetworkClientError.needsPairing
                 }
-                return channel
+                // 재연결 경로 — 프로토콜상 토큰 회전이 없으므로 새로 발급된 토큰은 없다.
+                return (channel: channel, issuedToken: nil)
             case .failed(let left):
                 stateSubject.send(.pairingFailed(left: left))
                 throw NetworkClientError.authFailed
