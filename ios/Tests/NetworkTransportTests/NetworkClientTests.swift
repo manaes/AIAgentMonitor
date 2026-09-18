@@ -177,4 +177,28 @@ final class NetworkClientTests: XCTestCase {
         XCTAssertNil(parsed.macName)
         XCTAssertEqual(parsed.endpointIdHex, "deadbeef")
     }
+
+    // MARK: - probe (연결을 살려둔 채 반환)
+
+    /// probe 는 도달 불가한 대상에 대해 timeoutSeconds 안에 반드시 반환해야 한다.
+    /// (실제 연결 성공 경로는 실기 검증 몫 — Task 15)
+    @MainActor
+    func testProbeTimesOutWithinBudget() async {
+        let client = await NetworkClient()
+        let started = Date()
+
+        do {
+            // 형식은 맞지만 존재하지 않는 EndpointId (32바이트 hex)
+            _ = try await client.probe(
+                endpointIdHex: String(repeating: "ab", count: 32),
+                relayUrl: nil,
+                addresses: [],
+                timeoutSeconds: 1
+            )
+            XCTFail("도달 불가한 대상인데 성공했다")
+        } catch {
+            let elapsed = Date().timeIntervalSince(started)
+            XCTAssertLessThan(elapsed, 4, "타임아웃 예산(1초)+여유를 넘겼다: \(elapsed)초")
+        }
+    }
 }

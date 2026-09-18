@@ -86,33 +86,55 @@ public final class NetworkClient: NSObject {
         )
     }
 
-    /// 위젯 전용. 저장된 페어링 정보로 짧게 한 번만 dial → 인증 → 스냅샷
-    /// 한 장을 받고 끝낸다. `runConnection`(스트리밍, 실패 시 3초 후 무한
-    /// 재시도)과 달리 **재시도하지 않는다** — 실패하면 그대로 던지고,
-    /// 호출부(TimelineProvider/AppIntent)가 캐시 폴백을 결정한다. 이
-    /// 인스턴스의 `state`/`snapshots` 퍼블리셔는 건드리지 않는다 — 위젯
-    /// 프로세스는 화면에 붙이지 않으므로 구독자가 없다.
+    /// 위젯 전용. probe 로 연결을 열고 첫 스냅샷만 받은 뒤 **즉시 닫는다**.
+    /// `runConnection`(스트리밍, 실패 시 3초 후 무한 재시도)과 달리
+    /// **재시도하지 않는다** — 실패하면 그대로 던지고, 호출부
+    /// (TimelineProvider/AppIntent)가 캐시 폴백을 결정한다. 이 인스턴스의
+    /// `state`/`snapshots` 퍼블리셔는 건드리지 않는다 — 위젯 프로세스는
+    /// 화면에 붙이지 않으므로 구독자가 없다.
     public func fetchSnapshotOnce(timeoutSeconds: Double) async throws -> MirrorSnapshot {
         guard let endpointHex = NetworkTokenStore.loadEndpointIdHex() else {
             throw NetworkClientError.needsPairing
         }
-        let relayUrl = NetworkTokenStore.loadRelayUrl()
-        let addresses = NetworkTokenStore.loadAddresses()
+        let result = try await probe(
+            endpointIdHex: endpointHex,
+            relayUrl: NetworkTokenStore.loadRelayUrl(),
+            addresses: NetworkTokenStore.loadAddresses(),
+            timeoutSeconds: timeoutSeconds
+        )
+        // 스냅샷은 이미 받았다 — 닫기 실패가 위젯 결과에 영향을 주면 안 된다.
+        try? result.connection.close(errorCode: 0, reason: Data())
+        return result.firstSnapshot
+    }
 
-        let fetchTask = Task { [weak self] () -> MirrorSnapshot in
-            guard let self else { throw NetworkClientError.needsPairing }
-            return try await self.dialAuthenticateAndReadOne(
-                endpointIdHex: endpointHex, relayUrl: relayUrl, addresses: addresses
+    /// probe 결과. 연결을 **닫지 않고** 돌려준다 — 호출부가 그대로 스트리밍으로
+    /// 이어가거나(AppMulti), 즉시 닫는다(위젯).
+    public struct ProbeResult {
+        public let connection: Connection
+        public let channel: SealedChannel
+        public let firstSnapshot: MirrorSnapshot
+    }
+
+    /// dial → 인증 → 첫 스냅샷까지 하고 **연결을 살려둔 채** 반환한다.
+    /// 실패 시 재시도하지 않는다 — 재시도 정책은 호출부(DeviceSession)가 정한다.
+    public func probe(
+        endpointIdHex: String,
+        relayUrl: String?,
+        addresses: [String],
+        timeoutSeconds: Double
+    ) async throws -> ProbeResult {
+        let work = Task { () throws -> ProbeResult in
+            try await dialAuthenticateAndOpen(
+                endpointIdHex: endpointIdHex, relayUrl: relayUrl, addresses: addresses
             )
         }
         let watchdog = Task {
             try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-            fetchTask.cancel()
+            work.cancel()
         }
         defer { watchdog.cancel() }
-
         do {
-            return try await fetchTask.value
+            return try await work.value
         } catch is CancellationError {
             throw NetworkClientError.fetchTimedOut
         }
@@ -128,12 +150,14 @@ public final class NetworkClient: NSObject {
         return try await builder.bind()
     }
 
+    /// dial → 인증 → 첫 스냅샷까지 하고 **연결을 살려둔 채** 반환한다.
     /// `runConnection`/`listenForSnapshots`와 같은 저수준 조각(`authenticate`,
     /// `classifyLine`)을 재사용하되, 무한 루프 대신 **첫 유효 프레임 하나**를
-    /// 받으면 바로 돌려준다.
-    private func dialAuthenticateAndReadOne(
+    /// 받으면 연결을 닫지 않고 바로 돌려준다 — 호출부가 그대로 스트리밍을
+    /// 이어가거나(AppMulti), 즉시 닫는다(위젯, `fetchSnapshotOnce`).
+    private func dialAuthenticateAndOpen(
         endpointIdHex: String, relayUrl: String?, addresses: [String]
-    ) async throws -> MirrorSnapshot {
+    ) async throws -> ProbeResult {
         guard let idBytes = Data(hexString: endpointIdHex) else {
             throw NetworkClientError.needsPairing
         }
@@ -141,32 +165,38 @@ public final class NetworkClient: NSObject {
         let addr = EndpointAddr(id: endpointId, relayUrl: relayUrl, addresses: addresses)
 
         let ep = try await resolveEndpoint()
-
         let conn = try await ep.connect(addr: addr, alpn: Self.alpn)
-        // code: nil — 위젯은 항상 재연결 경로다(이미 저장된 토큰으로 인증),
-        // 새 페어링(코드 입력)은 여기서 절대 일어나지 않는다.
+        // code: nil — 재연결 경로다(이미 저장된 토큰으로 인증). 새 페어링은 여기서
+        // 절대 일어나지 않는다.
         let channel = try await authenticate(conn: conn, code: nil)
 
         let recv = try await conn.acceptUni()
         var buffer = Data()
         while true {
-            // 워치독이 `fetchTask.cancel()`을 걸어도 uniffi 브리지가 자체적으로
-            // 취소를 감지한다는 보장이 없다 — 매 반복 최소 한 번은 취소 지점을
-            // 만들어 무한정 도는 걸 막는다.
+            // 워치독이 cancel() 을 걸어도 uniffi 브리지가 자체적으로 취소를 감지한다는
+            // 보장이 없다 — 매 반복 최소 한 번은 취소 지점을 만들어 무한정 도는 걸 막는다.
             try Task.checkCancellation()
             let chunk = try await recv.read(sizeLimit: Self.snapshotChunkSizeLimit)
             buffer.append(chunk)
             while let newlineIndex = buffer.firstIndex(of: 0x0A) {
                 let lineData = Data(buffer[..<newlineIndex])
                 buffer.removeSubrange(buffer.startIndex...newlineIndex)
-
-                guard case .sealed(let frame) = Self.classifyLine(lineData) else { continue }
-                guard let plaintext = try? channel.open(frame) else { continue }
-                guard let snap = try? JSONDecoder().decode(MirrorSnapshot.self, from: plaintext) else { continue }
-                guard snap.isSupportedVersion else { throw NetworkClientError.versionMismatch }
-                return snap
+                if let snapshot = try decodeSnapshotLine(lineData, channel: channel) {
+                    return ProbeResult(connection: conn, channel: channel, firstSnapshot: snapshot)
+                }
             }
         }
+    }
+
+    /// 스냅샷 스트림 한 줄을 복호화·디코딩한다. 유효한 스냅샷이 아니면(다른
+    /// 형식의 줄, 열기 실패, 디코딩 실패) `nil` 을 돌려줘 호출부가 다음 줄로
+    /// 넘어가게 한다 — 지원하지 않는 버전만 예외로 던진다.
+    private func decodeSnapshotLine(_ line: Data, channel: SealedChannel) throws -> MirrorSnapshot? {
+        guard case .sealed(let frame) = Self.classifyLine(line) else { return nil }
+        guard let plaintext = try? channel.open(frame) else { return nil }
+        guard let snap = try? JSONDecoder().decode(MirrorSnapshot.self, from: plaintext) else { return nil }
+        guard snap.isSupportedVersion else { throw NetworkClientError.versionMismatch }
+        return snap
     }
 
     /// QR 로 받은 페어링 정보. 이름은 표시용이라 optional 이다 — 구버전 Mac 은 보내지 않는다.
