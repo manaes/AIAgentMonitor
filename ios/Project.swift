@@ -295,6 +295,53 @@ let project = Project(
                 "CURRENT_PROJECT_VERSION": currentProjectVersion,
             ])
         ),
+        // 다중 Mac(최대 16대) 모니터링 앱. App/AppBLE 과 달리 App Group·Keychain
+        // Sharing 이 필요 없어 엔타이틀먼트를 안 준다(Fleet 이 자체 Keychain 서비스
+        // 이름으로 레지스트리를 관리한다, KeychainRegistryStore 참고).
+        .target(
+            name: "AppMulti",
+            destinations: .iOS,
+            product: .app,
+            bundleId: "co.kr.wannypark.aiagentmonitor.multi",
+            deploymentTargets: iOS,
+            infoPlist: .extendingDefault(with: [
+                "UILaunchScreen": [:],
+                "CFBundleDisplayName": "AI Monitor Multi",
+                "NSCameraUsageDescription":
+                    "Mac 화면에 뜬 페어링 QR 코드를 스캔해 장치를 추가합니다.",
+                // 없으면 iOS 가 로컬 네트워크(사설 IP) 소켓 연결마다 물어보는 권한
+                // 팝업이 제대로 안 뜬다 — 기존 App 과 같은 이유다.
+                "NSLocalNetworkUsageDescription":
+                    "Mac과 같은 네트워크에서 QUIC(iroh)로 직접 연결하기 위해 필요합니다.",
+                "ITSAppUsesNonExemptEncryption": false,
+                "CFBundleShortVersionString": "$(MARKETING_VERSION)",
+                "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
+                "UIApplicationSceneManifest": [
+                    "UIApplicationSupportsMultipleScenes": false,
+                    "UISceneConfigurations": [
+                        "UIWindowSceneSessionRoleApplication": [[
+                            "UISceneConfigurationName": "Default",
+                            "UISceneDelegateClassName": "$(PRODUCT_MODULE_NAME).SceneDelegate",
+                        ]]
+                    ],
+                ],
+            ]),
+            sources: ["Sources/AppMulti/**"],
+            dependencies: [
+                .target(name: "Fleet"),
+                .target(name: "NetworkTransport"),
+                .target(name: "DesignSystem"),
+                .target(name: "MirrorFormat"),
+                .target(name: "Wire"),
+                .external(name: "SnapKit"),
+            ],
+            settings: .settings(base: [
+                "DEVELOPMENT_TEAM": "LC8PY3D283",
+                "CODE_SIGN_STYLE": "Automatic",
+                "MARKETING_VERSION": marketingVersion,
+                "CURRENT_PROJECT_VERSION": currentProjectVersion,
+            ])
+        ),
     ],
     schemes: [
         // Tuist 4.158.2 는 테스트 타겟용 스킴을 자동 생성하지 않고 의존 대상(Wire)의
