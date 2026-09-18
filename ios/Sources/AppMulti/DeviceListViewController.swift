@@ -12,6 +12,18 @@ final class DeviceListViewController: UIViewController {
     private var dataSource: UICollectionViewDiffableDataSource<Section, String>!
     private var reprobeTimer: Timer?
 
+    /// 마지막으로 그린 행. 내용이 그대로인 셀까지 reconfigure 하지 않기 위한 비교 기준이다 —
+    /// 16대가 초당 한 장씩 흘리면 갱신 하나마다 보이는 셀 전부를 다시 그리게 된다.
+    private var renderedRows: [String: DeviceRowModel] = [:]
+    /// 오프라인 장치의 디스크 캐시 읽기 결과. 메인 스레드 동기 I/O 라 장치당 한 번만 읽는다.
+    /// 값이 없다는 사실도 기억해야 하므로 옵셔널을 두 겹으로 둔다.
+    private var cachedSnapshots: [String: CachedSnapshot?] = [:]
+    /// onChange 코얼레싱 상태.
+    private var needsApply = false
+    private var applyScheduled = false
+    /// 레지스트리 손상 알림은 한 번만 띄운다(`makeFleet()` 은 삭제할 때마다 다시 불린다).
+    private var hasShownRegistryError = false
+
     init(environment: AppEnvironment) {
         self.environment = environment
         super.init(nibName: nil, bundle: nil)
@@ -21,7 +33,6 @@ final class DeviceListViewController: UIViewController {
     required init?(coder: NSCoder) { fatalError("init(coder:) 는 쓰지 않는다") }
 
     deinit {
-        // 타이머는 target 을 강하게 잡으므로(여기서는 블록) 화면이 사라질 때 직접 멈춘다.
         reprobeTimer?.invalidate()
     }
 
@@ -36,7 +47,17 @@ final class DeviceListViewController: UIViewController {
 
         configureCollectionView()
         startFleet()
+        observeAppLifecycle()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // 콜드런치에서는 willEnterForeground 알림이 이 화면이 뜨기 전에 지나가므로
+        // 여기서 타이머를 건다. startReprobeTimer 가 중복 생성을 막는다.
         startReprobeTimer()
+        // viewDidLoad 에서는 안 된다 — 아직 윈도우에 붙기 전이라 present 가 먹지 않고,
+        // registryError 는 startFleet() 안의 makeFleet() 이 세팅한다.
+        presentRegistryErrorIfNeeded()
     }
 
     // MARK: - 구성
@@ -62,7 +83,7 @@ final class DeviceListViewController: UIViewController {
         view.addSubview(collectionView)
 
         let registration = UICollectionView.CellRegistration<DeviceCell, String> { [weak self] cell, _, id in
-            guard let self, let model = self.rowModel(for: id) else { return }
+            guard let self, let model = self.renderedRows[id] ?? self.rowModel(for: id) else { return }
             cell.configure(model)
         }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { view, indexPath, id in
@@ -74,19 +95,38 @@ final class DeviceListViewController: UIViewController {
         collectionView.refreshControl = refresh
     }
 
+    private func observeAppLifecycle() {
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(startReprobeTimer),
+            name: UIApplication.willEnterForegroundNotification, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(stopReprobeTimer),
+            name: UIApplication.didEnterBackgroundNotification, object: nil
+        )
+    }
+
     private func startFleet() {
-        // 옛 fleet 의 스트림을 먼저 끊는다 — 안 그러면 삭제된 장치의 연결이 누수되고 남은
+        // 콜백을 먼저 끊는다 — stopAll() 은 세션마다 onChange 를 발사하므로, 그대로 두면
+        // 삭제된 행이 아직 들어 있는 스냅샷을 세션 수만큼 적용하게 된다.
+        fleet?.onChange = nil
+        // 옛 fleet 의 스트림을 끊는다 — 안 그러면 삭제된 장치의 연결이 누수되고 남은
         // 장치는 이중 연결이 된다.
         fleet?.stopAll()
+        cachedSnapshots.removeAll()
+        renderedRows.removeAll()
+
         let fleet = environment.makeFleet()
-        fleet.onChange = { [weak self] in self?.applySnapshot() }
+        fleet.onChange = { [weak self] in self?.scheduleApply() }
         self.fleet = fleet
         applySnapshot()
         Task { await fleet.startInitialRound() }
     }
 
-    /// 포어그라운드 상태에서만 돈다(suspend 되면 타이머도 멈춘다). 오프라인 장치만 다시 확인한다.
-    private func startReprobeTimer() {
+    /// 포어그라운드에서만 돈다. 오프라인 장치만 다시 확인한다.
+    @objc private func startReprobeTimer() {
+        // 중복 생성 금지 — viewDidAppear 와 willEnterForeground 양쪽에서 불린다.
+        reprobeTimer?.invalidate()
         reprobeTimer = Timer.scheduledTimer(
             withTimeInterval: DeviceFleet.reprobeInterval, repeats: true
         ) { [weak self] _ in
@@ -97,7 +137,27 @@ final class DeviceListViewController: UIViewController {
         }
     }
 
+    @objc private func stopReprobeTimer() {
+        reprobeTimer?.invalidate()
+        reprobeTimer = nil
+    }
+
     // MARK: - 데이터
+
+    /// onChange 는 스냅샷마다 온다. 런루프 한 틱에 한 번만 적용해 초당 수십 번의
+    /// diffable 적용을 막는다.
+    private func scheduleApply() {
+        needsApply = true
+        guard !applyScheduled else { return }
+        applyScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.applyScheduled = false
+            guard self.needsApply else { return }
+            self.needsApply = false
+            self.applySnapshot()
+        }
+    }
 
     private func rowModel(for id: String) -> DeviceRowModel? {
         guard let session = fleet?.sessions.first(where: { $0.device.endpointIdHex == id }) else {
@@ -108,10 +168,19 @@ final class DeviceListViewController: UIViewController {
         let live = session.latest.flatMap { snapshot in
             session.latestAt.map { CachedSnapshot(snapshot: snapshot, fetchedAt: $0) }
         }
-        let cached = live ?? environment.cache.load(endpointIdHex: id)
+        let cached = live ?? diskSnapshot(for: id)
         return DeviceListPresentation.row(
             device: session.device, status: session.status, cached: cached, now: Date()
         )
+    }
+
+    /// 디스크 캐시는 장치당 한 번만 읽는다 — `load` 는 메인 스레드에서 파일 읽기 + JSON
+    /// 디코드를 하므로 갱신마다 부르면 안 된다. fleet 을 다시 만들 때 비운다.
+    private func diskSnapshot(for id: String) -> CachedSnapshot? {
+        if let memo = cachedSnapshots[id] { return memo }
+        let loaded = environment.cache.load(endpointIdHex: id)
+        cachedSnapshots[id] = loaded
+        return loaded
     }
 
     private func applySnapshot() {
@@ -120,15 +189,25 @@ final class DeviceListViewController: UIViewController {
             fleet.sessions.map { ($0.device, $0.status) }
         )
         let ids = ordered.map(\.endpointIdHex)
+        let previous = Set(dataSource.snapshot().itemIdentifiers)
+
+        var models: [String: DeviceRowModel] = [:]
+        var changed: [String] = []
+        for id in ids {
+            guard let model = rowModel(for: id) else { continue }
+            models[id] = model
+            // 이미 화면에 있고 내용까지 그대로면 건드리지 않는다. 새로 삽입되는 id 를
+            // 여기 넣으면 삽입과 갱신이 같은 스냅샷에서 겹쳐 적용이 거부된다.
+            if previous.contains(id), renderedRows[id] != model { changed.append(id) }
+        }
+        renderedRows = models
+
         var snapshot = NSDiffableDataSourceSnapshot<Section, String>()
         snapshot.appendSections([.main])
         snapshot.appendItems(ids)
-        // 식별자는 그대로인데 내용(상태·tok/s·사용량)만 바뀌는 게 대부분이라 diff 만으로는
-        // 셀이 갱신되지 않는다. 이미 있던 항목만 reconfigure 한다 — 새로 추가되는 항목까지
-        // 넣으면 삽입과 갱신이 겹쳐 적용이 거부된다.
-        let existing = Set(dataSource.snapshot().itemIdentifiers)
-        snapshot.reconfigureItems(ids.filter(existing.contains))
-        dataSource.apply(snapshot, animatingDifferences: true)
+        snapshot.reconfigureItems(changed)
+        // 구성이 그대로면 애니메이션할 것이 없다 — 스트리밍 중 매 갱신마다 셀이 깜빡인다.
+        dataSource.apply(snapshot, animatingDifferences: previous != Set(ids))
     }
 
     // MARK: - 동작
@@ -136,6 +215,11 @@ final class DeviceListViewController: UIViewController {
     func reconnectAll() {
         guard let fleet else { return }
         Task { await fleet.startInitialRound() }
+    }
+
+    /// 캐시 쓰기는 스로틀돼 있으므로 백그라운드 전환 시 마지막 상태를 흘려 넣는다.
+    func flushCache() {
+        fleet?.flushCache()
     }
 
     @objc private func pulledToRefresh() {
@@ -156,6 +240,9 @@ final class DeviceListViewController: UIViewController {
     private func removeDevice(endpointIdHex: String) {
         do {
             _ = try environment.registry.remove(endpointIdHex: endpointIdHex)
+            // 캐시 파일도 지운다 — 남으면 고아 파일이 쌓이고, 같은 Mac 을 다시 페어링했을 때
+            // 연결되기도 전에 낡은 스냅샷이 먼저 보인다.
+            environment.cache.remove(endpointIdHex: endpointIdHex)
             // startFleet() 이 옛 fleet 전체를 stopAll() 하므로 지운 장치의 세션도 여기서 멈춘다.
             // 이 함수는 메인 액터에서 await 없이 이어지므로 그 사이에 늦은 결과가 끼어들 틈이 없다.
             startFleet()
@@ -166,6 +253,21 @@ final class DeviceListViewController: UIViewController {
             alert.addAction(UIAlertAction(title: "확인", style: .default))
             present(alert, animated: true)
         }
+    }
+
+    /// 레지스트리를 읽지 못했으면 빈 목록으로 조용히 시작하지 않는다 — 사용자가
+    /// "페어링된 장치 없음"으로 오해하고 다시 스캔하면, 읽지 못했을 뿐 살아 있던
+    /// 목록을 덮어쓴다.
+    private func presentRegistryErrorIfNeeded() {
+        guard !hasShownRegistryError, let error = environment.registryError else { return }
+        hasShownRegistryError = true
+        let alert = UIAlertController(
+            title: "저장된 장치 목록을 읽지 못했습니다",
+            message: "\(error.localizedDescription)\n\n새로 페어링하면 기존 목록을 덮어씁니다.",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "확인", style: .default))
+        present(alert, animated: true)
     }
 }
 

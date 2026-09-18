@@ -6,8 +6,6 @@ import UIKit
 /// Mac 한 대. 에이전트는 최대 2개까지 보여주고 나머지는 "+N" 으로 접는다 —
 /// 16대까지 쓰므로 가변 높이면 한 화면에 3~4대밖에 못 넣는다.
 final class DeviceCell: UICollectionViewListCell {
-    static let reuseIdentifier = "DeviceCell"
-
     private let titleLabel = UILabel()
     private let statusLabel = UILabel()
     private let freshnessLabel = UILabel()
@@ -61,6 +59,8 @@ final class DeviceCell: UICollectionViewListCell {
         for agent in model.agents {
             agentStack.addArrangedSubview(makeAgentRow(agent))
         }
+        // 빈 스택을 남겨두면 에이전트가 없는 행에도 루트 스택의 간격 8pt 가 붙는다.
+        agentStack.isHidden = model.agents.isEmpty
 
         moreLabel.text = model.hiddenAgentCount > 0 ? "+\(model.hiddenAgentCount)" : nil
         moreLabel.isHidden = model.hiddenAgentCount == 0
@@ -78,13 +78,15 @@ final class DeviceCell: UICollectionViewListCell {
         rate.text = agent.rateText          // 오프라인이면 nil → 빈 칸
         rate.textAlignment = .right
 
+        // 원값을 그대로 넘긴다 — 리셋 직후 0% 처리와 조회 실패 시 % 숨김은 QuotaDisplay /
+        // QuotaBarView 가 이미 갖고 있는 규칙이다. 1:1 앱 AgentCardView 와 같은 호출이다.
         let quota = QuotaBarView()
         quota.configure(
-            tokens5h: 0,
-            autoPct: agent.fiveHour?.percent,
-            weeklyPct: agent.weekly?.percent,
-            isReset5h: false,
-            unreadable: agent.fiveHour == nil && agent.weekly == nil
+            tokens5h: agent.tokens5h,
+            autoPct: agent.usedPct5h,
+            weeklyPct: agent.usedPctWeekly,
+            isReset5h: agent.isReset5h,
+            unreadable: agent.unreadable
         )
 
         let header = UIStackView(arrangedSubviews: [name, rate])
