@@ -39,6 +39,24 @@ private final class OpenStreamTransport: DeviceTransport, @unchecked Sendable {
     }
 }
 
+/// 스냅샷을 흘린 뒤 **연결 끊김**으로 끝나는 가짜 전송. online 이던 세션이 마지막
+/// 스냅샷을 그대로 든 채 unstable 로 떨어지는 상황을 만든다.
+private final class DroppingStreamTransport: DeviceTransport, @unchecked Sendable {
+    private let snapshots: [MirrorSnapshot]
+
+    init(snapshots: [MirrorSnapshot]) {
+        self.snapshots = snapshots
+    }
+
+    func probe(device: Device, timeoutSeconds: Double) async throws -> AsyncThrowingStream<MirrorSnapshot, Error> {
+        let snapshots = self.snapshots
+        return AsyncThrowingStream { continuation in
+            for snapshot in snapshots { continuation.yield(snapshot) }
+            continuation.finish(throwing: DeviceTransportError.unreachable)
+        }
+    }
+}
+
 private func makeSnapshot(rate: Float = 1) throws -> MirrorSnapshot {
     let json = #"{"v":1,"t":1758000000,"a":[{"k":0,"r":\#(rate),"t5":0,"pj":[]}]}"#
     return try JSONDecoder().decode(MirrorSnapshot.self, from: Data(json.utf8))
@@ -194,6 +212,44 @@ final class DeviceFleetTests: XCTestCase {
         fleet.flushCache()
 
         XCTAssertEqual(cache.load(endpointIdHex: "00")?.snapshot, second, "flushCache 가 마지막 상태를 쓰지 않았다")
+
+        fleet.stopAll()
+    }
+
+    /// flushCache 는 상태로 거르지 않는다. 방금 연결이 끊겨 unstable 로 떨어진 장치도
+    /// 마지막 성공 스냅샷을 그대로 들고 있고, 목록 화면은 오프라인 장치에 바로 그 캐시를
+    /// 보여준다 — online 만 쓰면 가장 쓸모 있는 스냅샷이 통째로 버려진다.
+    func testFlushCacheWritesSessionThatIsNoLongerOnline() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fleet-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = DeviceSnapshotCache(directory: directory)
+
+        let first = try makeSnapshot(rate: 1)
+        let second = try makeSnapshot(rate: 2)
+        let fleet = DeviceFleet(
+            devices: devices(1),
+            transportFactory: { _ in DroppingStreamTransport(snapshots: [first, second]) },
+            cache: cache
+        )
+
+        await fleet.startInitialRound()
+        // 두 번째 스냅샷까지 받고 연결이 끊겨 online 에서 내려온 상태를 기다린다.
+        await waitUntil { fleet.sessions[0].latest == second && fleet.sessions[0].status != .online }
+
+        XCTAssertNotEqual(fleet.sessions[0].status, .online, "끊긴 뒤에도 online 이면 검증할 상황이 아니다")
+        XCTAssertEqual(fleet.sessions[0].latest, second, "마지막 스냅샷이 남아 있어야 한다")
+        XCTAssertEqual(
+            cache.load(endpointIdHex: "00")?.snapshot, first,
+            "스로틀 간격 안인데 두 번째 스냅샷까지 썼다"
+        )
+
+        fleet.flushCache()
+
+        XCTAssertEqual(
+            cache.load(endpointIdHex: "00")?.snapshot, second,
+            "online 이 아니라는 이유로 마지막 스냅샷을 버렸다"
+        )
 
         fleet.stopAll()
     }

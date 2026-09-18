@@ -107,6 +107,9 @@ final class DeviceListViewController: UIViewController {
     }
 
     private func startFleet() {
+        // 버리기 전에 캐시를 흘려 넣는다. 쓰기가 30초 스로틀이라 마지막 스냅샷이 아직
+        // 디스크에 없을 수 있고, stopAll() 이 세션의 latest 를 비우면 그대로 사라진다.
+        fleet?.flushCache()
         // 콜백을 먼저 끊는다 — stopAll() 은 세션마다 onChange 를 발사하므로, 그대로 두면
         // 삭제된 행이 아직 들어 있는 스냅샷을 세션 수만큼 적용하게 된다.
         fleet?.onChange = nil
@@ -125,8 +128,10 @@ final class DeviceListViewController: UIViewController {
 
     /// 포어그라운드에서만 돈다. 오프라인 장치만 다시 확인한다.
     @objc private func startReprobeTimer() {
-        // 중복 생성 금지 — viewDidAppear 와 willEnterForeground 양쪽에서 불린다.
-        reprobeTimer?.invalidate()
+        // 이미 돌고 있으면 그대로 둔다 — viewDidAppear 와 willEnterForeground 양쪽에서
+        // 불리는데, 매번 다시 만들면 3분 카운트가 0으로 되돌아간다. 상세 화면을 오갈 때마다
+        // viewDidAppear 가 불리므로 타이머는 영원히 발사되지 않는다.
+        guard reprobeTimer == nil else { return }
         reprobeTimer = Timer.scheduledTimer(
             withTimeInterval: DeviceFleet.reprobeInterval, repeats: true
         ) { [weak self] _ in

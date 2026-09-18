@@ -50,12 +50,17 @@ public final class DeviceFleet {
         await runRound(targets) { session in await session.retrigger() }
     }
 
-    /// 백그라운드 전환·종료 시점에 부른다. 스로틀을 무시하고 지금 온라인인 세션의
-    /// 마지막 스냅샷을 즉시 쓴다 — 스로틀 때문에 최대 `cacheWriteInterval` 만큼
-    /// 뒤처져 있을 수 있기 때문이다.
+    /// 백그라운드 전환·종료 시점, 그리고 fleet 을 버리기 직전에 부른다. 스로틀을 무시하고
+    /// 마지막 스냅샷을 가진 **모든** 세션을 즉시 쓴다 — 스로틀 때문에 최대
+    /// `cacheWriteInterval` 만큼 뒤처져 있을 수 있기 때문이다.
+    ///
+    /// 상태로 거르지 않는다. 방금 unstable·offline 으로 떨어진 장치도 마지막 성공
+    /// 스냅샷을 그대로 들고 있고, 목록 화면은 오프라인 장치에 바로 그 캐시를 보여준다.
+    /// online 만 쓰면 "연결이 끊긴 직후 백그라운드로 간" 경우에 가장 쓸모 있는 스냅샷이
+    /// 통째로 버려진다.
     public func flushCache() {
         let now = Date()
-        for session in sessions where session.status == .online {
+        for session in sessions {
             guard let snapshot = session.latest else { continue }
             let id = session.device.endpointIdHex
             lastCacheWriteAt[id] = now
