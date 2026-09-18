@@ -325,17 +325,19 @@ async fn save_paired_peers(pairing: &SharedPairing) -> Result<(), String> {
     peers::PeerStore::save_to(&peers::PeerStore::path(), &stored).map_err(|e| e.to_string())
 }
 
-/// QR 페이로드를 만든다. 네트워크 공유가 켜져 있을 때만 부른다.
-async fn build_qr_payload(handle: &NetworkHandle, code: &str) -> String {
-    // iOS 의 EndpointId 는 raw 32바이트로만 만들 수 있어(fromBytes) hex 로
-    // 인코딩한다 — iroh 의 z32 Display 포맷을 Swift 쪽에서 다시 파싱할 필요가
-    // 없어지고, 기존 PairingClient.swift 의 Data(hexString:) 를 그대로 재사용한다.
-    // relay URL/주소 문자열도 같은 이유로 전부 hex 로 실어 퍼센트 인코딩을
-    // 아예 피한다.
-    let endpoint_id_hex = hex_encode(handle.endpoint.id().as_bytes());
-    let addr = wait_for_addr(&handle.endpoint).await;
-    let mut params = vec![format!("endpoint={endpoint_id_hex}"), format!("code={code}")];
-    for a in &addr.addrs {
+/// QR 쿼리 문자열을 조립한다. `build_qr_payload` 에서 I/O 를 걷어낸 부분이라
+/// 단위 테스트가 가능하다.
+fn qr_params_with_name(
+    endpoint_id_hex: &str,
+    code: &str,
+    addrs: &std::collections::BTreeSet<iroh::TransportAddr>,
+    hostname: Option<String>,
+) -> String {
+    let mut params = vec![
+        format!("endpoint={endpoint_id_hex}"),
+        format!("code={code}"),
+    ];
+    for a in addrs {
         match a {
             iroh::TransportAddr::Relay(url) => {
                 params.push(format!("relay={}", hex_encode(url.to_string().as_bytes())));
@@ -346,7 +348,38 @@ async fn build_qr_payload(handle: &NetworkHandle, code: &str) -> String {
             _ => {}
         }
     }
+    // 이름은 iOS 가 표시용으로만 쓴다. 못 읽어도 페어링 자체는 성립해야 하므로
+    // Option 이고, 없으면 파라미터를 아예 넣지 않는다.
+    if let Some(name) = hostname {
+        if !name.is_empty() {
+            params.push(format!("name={}", hex_encode(name.as_bytes())));
+        }
+    }
     format!("aim://pair?{}", params.join("&"))
+}
+
+/// 표시용 Mac 이름. `scutil --get ComputerName` 이 사용자가 설정에서 정한 이름이라
+/// `gethostname()`(네트워크 호스트명, 보통 "-" 가 섞임)보다 읽기 좋다.
+fn hostname_for_display() -> Option<String> {
+    let out = std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()?;
+    let name = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+/// QR 페이로드를 만든다. 네트워크 공유가 켜져 있을 때만 부른다.
+async fn build_qr_payload(handle: &NetworkHandle, code: &str) -> String {
+    // iOS 의 EndpointId 는 raw 32바이트로만 만들 수 있어(fromBytes) hex 로
+    // 인코딩한다 — iroh 의 z32 Display 포맷을 Swift 쪽에서 다시 파싱할 필요가
+    // 없어지고, 기존 PairingClient.swift 의 Data(hexString:) 를 그대로 재사용한다.
+    // relay URL/주소 문자열도 같은 이유로 전부 hex 로 실어 퍼센트 인코딩을
+    // 아예 피한다.
+    let endpoint_id_hex = hex_encode(handle.endpoint.id().as_bytes());
+    let addr = wait_for_addr(&handle.endpoint).await;
+    let hostname = hostname_for_display();
+    qr_params_with_name(&endpoint_id_hex, code, &addr.addrs, hostname)
 }
 
 /// 공유 페어링 상태를 읽는다. 창도 기기 목록도 하나뿐이라 전송별 status 와
@@ -1679,5 +1712,25 @@ mod tests {
         let reset_at = now - Duration::from_secs(1);
         let (_, reset) = quota_pct_for_tick(Some(100.0), Some(reset_at), now);
         assert_eq!(reset, None);
+    }
+
+    #[test]
+    fn qr_payload_carries_hex_encoded_hostname() {
+        let empty_addrs = std::collections::BTreeSet::new();
+        let payload = qr_params_with_name(
+            "deadbeef",
+            "123456",
+            &empty_addrs,
+            Some("wanny-macbook".to_string()),
+        );
+        // "wanny-macbook" 의 UTF-8 hex
+        assert!(payload.contains("name=77616e6e792d6d6163626f6f6b"));
+    }
+
+    #[test]
+    fn qr_payload_omits_name_when_hostname_is_unavailable() {
+        let empty_addrs = std::collections::BTreeSet::new();
+        let payload = qr_params_with_name("deadbeef", "123456", &empty_addrs, None);
+        assert!(!payload.contains("name="));
     }
 }
