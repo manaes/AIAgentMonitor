@@ -72,4 +72,27 @@ final class DeviceStatusTests: XCTestCase {
         // 카운트가 보존됐으니 다음 실패로 곧장 offline 에 도달해야 한다.
         XCTAssertEqual(next(next(status, .probeStarted), .probeFailed), .offline)
     }
+
+    /// .unstable 이 아닌 상태에서는 probeStarted 가 그대로 .probing 으로 전이돼야
+    /// 한다. testProbeStartedPreservesUnstableFailureCount 는 "unstable 은 보존"만
+    /// 고정하므로, 나머지 절반("그 외는 probing 으로 전이")도 따로 고정해야
+    /// 나중에 이 분기가 no-op 으로 퇴화해도 테스트가 잡아낼 수 있다.
+    func testProbeStartedBecomesProbingFromNonUnstableStates() {
+        XCTAssertEqual(next(.idle, .probeStarted), .probing)
+        XCTAssertEqual(next(.online, .probeStarted), .probing)
+
+        // .offline 에서도 probeStarted 는 .probing 으로 전이한다 — 이것이
+        // "오프라인 탈출은 retriggered 로만 일어난다"는 제약을 어기는 게 아니다.
+        // 실제 탈출 게이트는 DeviceSession.retrigger() 쪽에 있다: 그 함수는
+        // DeviceStatusMachine.next(status, on: .retriggered) 결과를 상태에
+        // 대입하는 게 아니라 "재탐색을 허용할지" 판단하는 가드로만 쓰고, 실제로
+        // 상태를 .offline 에서 옮기는 건 그 뒤에 이어지는 probeNow() 호출이
+        // 발생시키는 probeStarted 이벤트다. 만약 여기서 probeStarted 가
+        // .offline 을 그대로 유지해버리면, 트리거로 재탐색을 허용해놓고도
+        // 실제로 프로빙하는 동안 화면에는 계속 "오프라인"이 떠 있게 된다.
+        // 즉 "트리거 없이는 재탐색 자체가 시작되지 않는다"는 게이트는 이
+        // 상태기계가 아니라 세션의 retrigger() 가드에 있고, 여기서는 이미
+        // 시작된 프로빙을 상태에 반영하기만 하면 된다.
+        XCTAssertEqual(next(.offline, .probeStarted), .probing)
+    }
 }
