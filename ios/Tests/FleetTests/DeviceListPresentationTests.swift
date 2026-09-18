@@ -76,6 +76,31 @@ final class DeviceListPresentationTests: XCTestCase {
         XCTAssertNil(row.agents[0].fiveHour)
     }
 
+    /// weekly 도 fiveHour 와 같은 quotaError 를 공유한다 — `pw` 가 있어도 `e` 가 있으면
+    /// "데이터가 애초에 없어서" 가 아니라 "에러라서" nil 이어야 한다.
+    func testQuotaErrorHidesWeeklyPercentToo() throws {
+        let row = DeviceListPresentation.row(
+            device: device("aa"),
+            status: .online,
+            cached: try cached(agentJSON: #"{"k":0,"r":1,"t5":0,"p5":44,"pw":60,"e":1,"pj":[]}"#),
+            now: now
+        )
+        XCTAssertNil(row.agents[0].fiveHour)
+        XCTAssertNil(row.agents[0].weekly)
+    }
+
+    /// 100% 를 넘는 값이 들어와도(맥 쪽 반올림/경계 오차 등) 화면에는 100% 로 clamp 한다.
+    func testQuotaPercentClampsAt100() throws {
+        let row = DeviceListPresentation.row(
+            device: device("aa"),
+            status: .online,
+            cached: try cached(agentJSON: #"{"k":0,"r":1,"t5":0,"p5":150,"pj":[]}"#),
+            now: now
+        )
+        XCTAssertEqual(row.agents[0].fiveHour?.percentText, "100%")
+        XCTAssertEqual(row.agents[0].fiveHour?.percent, 100)
+    }
+
     // MARK: - 에이전트 개수 제한
 
     func testShowsAtMostTwoAgentsAndCountsTheRest() throws {
@@ -86,6 +111,36 @@ final class DeviceListPresentationTests: XCTestCase {
 
         XCTAssertEqual(row.agents.count, 2)
         XCTAssertEqual(row.hiddenAgentCount, 1)
+    }
+
+    /// 입력 순서를 일부러 뒤집는다(k:2 → k:1 → k:0) — `testShowsAtMostTwoAgentsAndCountsTheRest`
+    /// 는 이미 claude→codex→기타 순으로 들어와서, orderedForDisplay 를 통과로 바꿔치기해도
+    /// 통과했을 것이다. 여기서는 재정렬이 실제로 일어나는지를 확인한다.
+    func testOrdersAgentsClaudeFirstThenCodexRegardlessOfInputOrder() throws {
+        let agents = #"{"k":2,"r":3,"t5":0,"pj":[]},{"k":1,"r":2,"t5":0,"pj":[]},{"k":0,"r":1,"t5":0,"pj":[]}"#
+        let row = DeviceListPresentation.row(
+            device: device("aa"), status: .online, cached: try cached(agentJSON: agents), now: now
+        )
+
+        XCTAssertEqual(row.agents.map(\.name), ["Claude Code", "Codex"])
+        XCTAssertEqual(row.hiddenAgentCount, 1)
+    }
+
+    // MARK: - 신선도
+
+    /// `freshness()` 가 Date → epoch 변환을 거쳐 `MirrorFormat.relativeTime` 에 넘기는 접합부.
+    /// 12분 전 케이스는 구현을 바꿔도(수동 계산 vs relativeTime) 값이 같아서 이 접합부 자체를
+    /// 못 짚는다 — "N초 전" 구간은 두 방식이 갈리므로 여기서 고정한다.
+    func testFreshnessShowsSecondsTierUnderAMinute() throws {
+        let json = #"{"v":1,"t":1758000000,"a":[{"k":0,"r":1,"t5":0,"pj":[]}]}"#
+        let snapshot = try JSONDecoder().decode(MirrorSnapshot.self, from: Data(json.utf8))
+        let cachedSnapshot = CachedSnapshot(snapshot: snapshot, fetchedAt: now.addingTimeInterval(-30))
+
+        let row = DeviceListPresentation.row(
+            device: device("aa"), status: .offline, cached: cachedSnapshot, now: now
+        )
+
+        XCTAssertEqual(row.freshnessText, "30초 전")
     }
 
     // MARK: - 정렬
