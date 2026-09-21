@@ -1,17 +1,22 @@
 import XCTest
 import Wire
+import os
 @testable import Fleet
 
 /// 동시에 몇 개가 실행 중이었는지 관찰하는 가짜 전송.
+///
+/// 잠금이 `NSLock` 이 아니라 `OSAllocatedUnfairLock` 인 이유: `probe` 가 async 라
+/// `NSLock.lock()/unlock()` 은 "비동기 컨텍스트에서 사용 불가" 경고를 내고 Swift 6
+/// 언어 모드에서는 에러다.
 private final class CountingTransport: DeviceTransport, @unchecked Sendable {
-    private let lock = NSLock()
-    private var active = 0
-    private(set) var maxConcurrent = 0
+    private struct Counts { var active = 0; var maxConcurrent = 0 }
+    private let counts = OSAllocatedUnfairLock(initialState: Counts())
+    var maxConcurrent: Int { counts.withLock { $0.maxConcurrent } }
 
     func probe(device: Device, timeoutSeconds: Double) async throws -> AsyncThrowingStream<MirrorSnapshot, Error> {
-        lock.lock(); active += 1; maxConcurrent = max(maxConcurrent, active); lock.unlock()
+        counts.withLock { $0.active += 1; $0.maxConcurrent = max($0.maxConcurrent, $0.active) }
         try await Task.sleep(nanoseconds: 50_000_000)
-        lock.lock(); active -= 1; lock.unlock()
+        counts.withLock { $0.active -= 1 }
         throw DeviceTransportError.unreachable
     }
 }
@@ -62,23 +67,20 @@ private final class DroppingStreamTransport: DeviceTransport, @unchecked Sendabl
 /// 붙지도 못하므로, 재탐색이 실제로 걸리면 실패 카운트가 쌓여 `.offline` 로 진행해야 한다.
 private final class DropThenUnreachableTransport: DeviceTransport, @unchecked Sendable {
     private let snapshots: [MirrorSnapshot]
-    private let lock = NSLock()
-    private var _probeCount = 0
+    /// `CountingTransport` 와 같은 이유로 `OSAllocatedUnfairLock` 을 쓴다(async 안전).
+    private let counter = OSAllocatedUnfairLock(initialState: 0)
     /// 재탐색이 실제로 걸렸는지는 상태값보다 probe 호출 수가 확실한 증거다.
-    var probeCount: Int {
-        lock.lock(); defer { lock.unlock() }
-        return _probeCount
-    }
+    var probeCount: Int { counter.withLock { $0 } }
 
     init(snapshots: [MirrorSnapshot]) {
         self.snapshots = snapshots
     }
 
     func probe(device: Device, timeoutSeconds: Double) async throws -> AsyncThrowingStream<MirrorSnapshot, Error> {
-        lock.lock()
-        _probeCount += 1
-        let isFirst = _probeCount == 1
-        lock.unlock()
+        let isFirst = counter.withLock { count -> Bool in
+            count += 1
+            return count == 1
+        }
         guard isFirst else { throw DeviceTransportError.unreachable }
         let snapshots = self.snapshots
         return AsyncThrowingStream { continuation in
@@ -393,6 +395,43 @@ final class DeviceFleetTests: XCTestCase {
         XCTAssertNotNil(cache.load(endpointIdHex: "00"), "남은 장치의 캐시는 그대로여야 한다")
 
         new.stopAll()
+    }
+
+    /// Ruling 38 — 드래그 재정렬은 **연결을 끊지 않고** 표시 순서만 바꾼다.
+    ///
+    /// 레지스트리에 새 sortIndex 를 저장한 뒤 fleet 을 다시 만들면 16대의 QUIC 연결이
+    /// 전부 끊긴다. 그래서 저장된 순서를 살아 있는 세션에 그대로 얹는다 — 그러지 않으면
+    /// 다음 갱신(스트리밍 중에는 매초)에서 옛 sortIndex 로 다시 정렬돼 방금 옮긴 자리가
+    /// 튕겨 돌아간다.
+    func testApplySortOrderUpdatesLiveSessionsWithoutStoppingThem() async throws {
+        let transport = OpenStreamTransport(snapshots: [try makeSnapshot()])
+        let fleet = DeviceFleet(
+            devices: devices(3),
+            transportFactory: { _ in transport },
+            cache: nil
+        )
+        await fleet.startInitialRound()
+        await waitUntil { fleet.sessions.allSatisfy { $0.status == .online } }
+
+        // 화면이 "02, 00, 01" 로 끌어다 놓았고 레지스트리가 그 순서로 0..2 를 매겼다.
+        var reordered = devices(3)
+        reordered[2].sortIndex = 0
+        reordered[0].sortIndex = 1
+        reordered[1].sortIndex = 2
+
+        fleet.applySortOrder(reordered)
+
+        XCTAssertEqual(
+            DeviceListPresentation.sorted(fleet.sessions.map { ($0.device, $0.status) })
+                .map(\.endpointIdHex),
+            ["02", "00", "01"]
+        )
+        XCTAssertTrue(
+            fleet.sessions.allSatisfy { $0.status == .online },
+            "재정렬이 연결을 끊었다 — 순서만 바꿔야 한다"
+        )
+
+        fleet.stopAll()
     }
 
     /// Ruling 23 — 상세 화면은 `DeviceSession.onChange` 를 덮어쓰지 않고 fleet 이 주는

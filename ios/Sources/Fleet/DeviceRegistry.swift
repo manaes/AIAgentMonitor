@@ -65,6 +65,35 @@ public final class DeviceRegistry {
         return devices
     }
 
+    /// 드래그 재정렬(스펙 §6.1). `orderedHexes` 순서대로 `sortIndex` 를 0..n-1 로 다시 매긴다.
+    ///
+    /// - `orderedHexes` 에 있지만 등록돼 있지 않은 hex 는 무시한다. 화면이 순서를 넘기는
+    ///   사이에 다른 경로로 장치가 지워졌을 수 있고, 그때 없는 장치를 되살리면 안 된다.
+    /// - 등록돼 있지만 `orderedHexes` 에 없는 장치는 **지우지 않고** 기존 상대 순서를
+    ///   유지한 채 뒤에 이어 붙인다. 레지스트리는 페어링 전체라 목록 일부만 받았다고
+    ///   나머지를 잃으면 안 된다.
+    /// - 저장이 실패하면 던진다 — 호출부가 순서를 되돌리고 사용자에게 알려야 한다.
+    ///
+    /// 반환값은 새 `sortIndex` 가 반영된 전체 목록이다. 화면은 이걸 살아 있는 세션에
+    /// 얹는다(`DeviceFleet.applySortOrder`) — fleet 을 다시 만들면 연결이 전부 끊긴다.
+    @discardableResult
+    public func reorder(_ orderedHexes: [String]) throws -> [Device] {
+        let devices = try load()
+        var byHex = Dictionary(uniqueKeysWithValues: devices.map { ($0.endpointIdHex, $0) })
+
+        var ordered: [Device] = []
+        for hex in orderedHexes {
+            guard let device = byHex.removeValue(forKey: hex) else { continue }
+            ordered.append(device)
+        }
+        // 남은 장치는 원래 목록 순서 그대로 뒤에 붙인다.
+        ordered.append(contentsOf: devices.filter { byHex[$0.endpointIdHex] != nil })
+
+        for index in ordered.indices { ordered[index].sortIndex = index }
+        try persist(ordered)
+        return ordered
+    }
+
     @discardableResult
     public func remove(endpointIdHex: String) throws -> [Device] {
         var devices = try load()

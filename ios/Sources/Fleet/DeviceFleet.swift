@@ -74,6 +74,22 @@ public final class DeviceFleet {
         }
     }
 
+    /// 레지스트리에 새로 매겨진 정렬 순서를 **살아 있는** 세션에 얹는다(스펙 §6.1 드래그
+    /// 재정렬). fleet 을 다시 만들면 16대의 QUIC 연결이 전부 끊기므로, 순서만 바꾸는
+    /// 재정렬에는 쓸 수 없다. 이걸 안 하면 다음 갱신(스트리밍 중에는 매초)에서 옛
+    /// sortIndex 로 다시 정렬돼 방금 옮긴 자리가 튕겨 돌아간다.
+    ///
+    /// 목록 갱신은 호출부가 한다 — 재정렬은 사용자 조작이라 어차피 그 자리에서 다시 그린다.
+    public func applySortOrder(_ devices: [Device]) {
+        let indexByHex = Dictionary(
+            devices.map { ($0.endpointIdHex, $0.sortIndex) }, uniquingKeysWith: { first, _ in first }
+        )
+        for session in sessions {
+            guard let index = indexByHex[session.device.endpointIdHex] else { continue }
+            session.updateSortIndex(index)
+        }
+    }
+
     /// 화면이 이 fleet 을 버릴 때(레지스트리 변경으로 다시 만들 때) 부른다. 모든 세션의
     /// 진행 중 작업을 취소해 연결을 닫는다 — 안 부르면 옛 fleet 의 스트림이 계속 살아
     /// 삭제된 장치의 연결이 누수되고 남은 장치는 이중 연결이 된다.

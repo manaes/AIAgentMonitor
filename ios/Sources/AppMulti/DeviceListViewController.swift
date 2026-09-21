@@ -79,6 +79,10 @@ final class DeviceListViewController: UIViewController {
         collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: layout)
         collectionView.backgroundColor = Palette.windowBackground
         collectionView.delegate = self
+        // 스펙 §6.1 — 그룹 안에서는 사용자가 끌어다 놓은 순서(sortIndex)를 따른다.
+        collectionView.dragDelegate = self
+        collectionView.dropDelegate = self
+        collectionView.dragInteractionEnabled = true
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(collectionView)
 
@@ -88,6 +92,12 @@ final class DeviceListViewController: UIViewController {
         }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { view, indexPath, id in
             view.dequeueConfiguredReusableCell(using: registration, for: indexPath, item: id)
+        }
+        dataSource.reorderingHandlers.canReorderItem = { _ in true }
+        // 놓은 뒤에만 저장한다 — 드래그 도중의 중간 순서를 Keychain 에 쓰면 손가락을 뗄
+        // 때까지 쓰기가 계속 일어난다.
+        dataSource.reorderingHandlers.didReorder = { [weak self] transaction in
+            self?.persistOrder(transaction.finalSnapshot.itemIdentifiers)
         }
 
         let refresh = UIRefreshControl()
@@ -336,6 +346,78 @@ extension DeviceListViewController: UICollectionViewDelegate {
                 session: session, fleet: fleet, cache: environment.cache
             )
             navigationController?.pushViewController(detail, animated: true)
+        }
+    }
+}
+
+// MARK: - 드래그 재정렬 (스펙 §6.1)
+
+extension DeviceListViewController: UICollectionViewDragDelegate {
+    func collectionView(
+        _ collectionView: UICollectionView, itemsForBeginning session: UIDragSession,
+        at indexPath: IndexPath
+    ) -> [UIDragItem] {
+        guard let id = dataSource.itemIdentifier(for: indexPath) else { return [] }
+        // 앱 밖으로 끌어낼 일이 없으므로 페이로드는 비워 두고 localObject 로만 식별한다.
+        let item = UIDragItem(itemProvider: NSItemProvider())
+        item.localObject = id
+        return [item]
+    }
+}
+
+extension DeviceListViewController: UICollectionViewDropDelegate {
+    /// 상태 그룹을 가로지르는 이동은 막는다. 표시 순서는 상태 그룹이 1차 키라, 그룹을
+    /// 넘겨 놓아봐야 `DeviceListPresentation.sorted` 가 곧바로 원래 그룹으로 돌려보낸다 —
+    /// 사용자에게는 "드래그가 먹지 않는" 것으로 보이므로 아예 못 놓게 한다.
+    func collectionView(
+        _ collectionView: UICollectionView, dropSessionDidUpdate session: UIDropSession,
+        withDestinationIndexPath destinationIndexPath: IndexPath?
+    ) -> UICollectionViewDropProposal {
+        guard session.localDragSession != nil else {
+            return UICollectionViewDropProposal(operation: .forbidden)
+        }
+        guard let destinationIndexPath,
+              let draggedId = session.localDragSession?.items.first?.localObject as? String,
+              let destinationId = dataSource.itemIdentifier(for: destinationIndexPath),
+              let from = status(of: draggedId), let to = status(of: destinationId),
+              DeviceListPresentation.allowsReorder(from: from, to: to) else {
+            return UICollectionViewDropProposal(operation: .cancel)
+        }
+        return UICollectionViewDropProposal(
+            operation: .move, intent: .insertAtDestinationIndexPath
+        )
+    }
+
+    /// 실제 항목 이동은 diffable 데이터소스의 `reorderingHandlers` 가 처리한다 —
+    /// 여기서 또 옮기면 이중 적용이 된다.
+    func collectionView(
+        _ collectionView: UICollectionView, performDropWith coordinator: UICollectionViewDropCoordinator
+    ) {}
+
+    private func status(of id: String) -> DeviceStatus? {
+        fleet?.sessions.first(where: { $0.device.endpointIdHex == id })?.status
+    }
+
+    /// 놓인 순서를 레지스트리에 저장하고, 살아 있는 세션에 그대로 얹는다.
+    ///
+    /// fleet 을 다시 만들지 않는 게 핵심이다 — 순서만 바뀐 건데 다시 만들면 16대의 QUIC
+    /// 연결이 전부 끊긴다. 세션에 반영하지 않으면 다음 갱신(스트리밍 중에는 매초)에서
+    /// 옛 sortIndex 로 다시 정렬돼 방금 옮긴 자리가 튕겨 돌아간다.
+    private func persistOrder(_ orderedIds: [String]) {
+        do {
+            let devices = try environment.registry.reorder(orderedIds)
+            fleet?.applySortOrder(devices)
+            // renderedRows 는 그대로 쓸 수 있다 — 내용은 안 바뀌고 순서만 바뀐다.
+            applySnapshot()
+        } catch {
+            // 저장이 실패했는데 화면만 새 순서로 두면 다음 실행에서 조용히 되돌아간다.
+            let alert = UIAlertController(
+                title: nil, message: "순서를 저장하지 못했습니다", preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "확인", style: .default))
+            present(alert, animated: true)
+            // 저장된 순서(옛 sortIndex)로 다시 그려 화면과 저장 상태를 맞춘다.
+            applySnapshot()
         }
     }
 }

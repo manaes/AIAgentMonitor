@@ -116,6 +116,17 @@ public enum DeviceListPresentation {
         }.map(\.0)
     }
 
+    /// 드래그로 옮길 수 있는 자리인가(스펙 §6.1). 표시 순서는 상태 그룹이 1차 키고
+    /// `sortIndex` 는 2차 키라, 그룹을 넘는 이동은 놓는 순간 `sorted` 가 곧바로 원래
+    /// 그룹으로 돌려보낸다 — 사용자에게는 "드래그가 먹지 않는" 것으로 보인다.
+    /// 그래서 놓기 전에 막는다.
+    ///
+    /// `tapDestination`·`acceptsScannedDevice` 와 같은 이유로 화면 밖에 있다 —
+    /// AppMultiTests 타겟이 없어 화면 안에 두면 자동 테스트를 걸 수단이 없다.
+    public static func allowsReorder(from: DeviceStatus, to: DeviceStatus) -> Bool {
+        groupRank(from) == groupRank(to)
+    }
+
     private static func groupRank(_ status: DeviceStatus) -> Int {
         switch status {
         case .online: return 0

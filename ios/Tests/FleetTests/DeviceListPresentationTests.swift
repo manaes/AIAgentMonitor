@@ -262,4 +262,31 @@ final class DeviceListPresentationTests: XCTestCase {
 
         XCTAssertEqual(sorted.map(\.endpointIdHex), ["bb", "aa"])
     }
+
+    // MARK: - 드래그 재정렬 (스펙 §6.1)
+
+    /// 표시 순서는 상태 그룹이 1차 키고 sortIndex 는 2차 키다. 그룹을 넘는 드래그를
+    /// 허용하면 놓는 순간 `sorted` 가 곧바로 원래 그룹으로 돌려보내, 사용자에게는
+    /// "드래그가 먹지 않는" 것으로 보인다. 그래서 놓기 전에 막는다.
+    ///
+    /// `tapDestination`·`acceptsScannedDevice` 와 같은 이유로 화면 밖에 있다 —
+    /// AppMultiTests 타겟이 없어 화면 안에 두면 자동 테스트를 걸 수단이 없다.
+    func testAllowsReorderOnlyWithinTheSameStatusGroup() {
+        // 같은 그룹
+        XCTAssertTrue(DeviceListPresentation.allowsReorder(from: .online, to: .online))
+        XCTAssertTrue(DeviceListPresentation.allowsReorder(from: .offline, to: .idle))
+        XCTAssertTrue(
+            DeviceListPresentation.allowsReorder(from: .probing, to: .unstable(failureCount: 2))
+        )
+        XCTAssertTrue(
+            DeviceListPresentation.allowsReorder(from: .needsRepairing, to: .versionMismatch)
+        )
+
+        // 그룹이 다르다
+        XCTAssertFalse(DeviceListPresentation.allowsReorder(from: .online, to: .offline))
+        XCTAssertFalse(
+            DeviceListPresentation.allowsReorder(from: .unstable(failureCount: 1), to: .online)
+        )
+        XCTAssertFalse(DeviceListPresentation.allowsReorder(from: .offline, to: .needsRepairing))
+    }
 }

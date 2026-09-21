@@ -165,4 +165,71 @@ final class DeviceRegistryTests: XCTestCase {
 
         XCTAssertEqual(devices.map(\.endpointIdHex), ["bb"])
     }
+
+    // MARK: - 드래그 재정렬 (스펙 §6.1)
+
+    /// 스펙 §6.1 은 그룹 안 정렬을 "sortIndex(드래그) 순" 으로 못 박는다. 드롭 시점에
+    /// 화면이 보이는 순서 전체를 넘기면 그 순서대로 0..n-1 이 다시 매겨져야 한다.
+    func testReorderAssignsSortIndexInGivenOrder() throws {
+        let registry = DeviceRegistry(store: MemoryStore())
+        for hex in ["aa", "bb", "cc"] { _ = try registry.upsert(makeDevice(hex)) }
+
+        let devices = try registry.reorder(["cc", "aa", "bb"])
+
+        XCTAssertEqual(devices.map(\.endpointIdHex), ["cc", "aa", "bb"])
+        XCTAssertEqual(devices.map(\.sortIndex), [0, 1, 2])
+        // 저장까지 됐는지는 새 인스턴스로 다시 읽어 확인한다.
+        XCTAssertEqual(
+            try registry.load().sorted { $0.sortIndex < $1.sortIndex }.map(\.endpointIdHex),
+            ["cc", "aa", "bb"]
+        )
+    }
+
+    /// 목록에 없는 hex 는 무시한다 — 화면이 넘긴 순서와 레지스트리가 어긋날 수 있고
+    /// (드롭 도중 다른 경로로 장치가 지워졌다), 그때 없는 장치를 되살리면 안 된다.
+    func testReorderIgnoresUnknownHexes() throws {
+        let registry = DeviceRegistry(store: MemoryStore())
+        for hex in ["aa", "bb"] { _ = try registry.upsert(makeDevice(hex)) }
+
+        let devices = try registry.reorder(["bb", "ff", "aa"])
+
+        XCTAssertEqual(devices.map(\.endpointIdHex), ["bb", "aa"])
+        XCTAssertEqual(devices.map(\.sortIndex), [0, 1])
+    }
+
+    /// 순서에 안 들어 있는 등록 장치는 지우지 않고 뒤에 이어 붙인다. 화면이 일부만
+    /// 넘기더라도 장치가 사라지면 안 된다 — 레지스트리는 16대 페어링 전체다.
+    func testReorderKeepsUnnamedDevicesAfterTheNamedOnes() throws {
+        let registry = DeviceRegistry(store: MemoryStore())
+        for hex in ["aa", "bb", "cc"] { _ = try registry.upsert(makeDevice(hex)) }
+
+        let devices = try registry.reorder(["cc"])
+
+        XCTAssertEqual(devices.map(\.endpointIdHex), ["cc", "aa", "bb"])
+        XCTAssertEqual(devices.map(\.sortIndex), [0, 1, 2])
+    }
+
+    /// 저장이 실패하면 조용히 넘어가지 않는다 — 호출부가 순서를 되돌리고 알릴 수 있어야 한다.
+    func testReorderThrowsWhenPersistFails() throws {
+        let store = FailingWriteStore()
+        let registry = DeviceRegistry(store: store)
+        store.allowWrites = true
+        for hex in ["aa", "bb"] { _ = try registry.upsert(makeDevice(hex)) }
+        store.allowWrites = false
+
+        XCTAssertThrowsError(try registry.reorder(["bb", "aa"]))
+    }
+}
+
+/// 쓰기를 실패시킬 수 있는 저장소. Keychain 쓰기 실패(용량·권한)를 흉내낸다.
+private final class FailingWriteStore: DeviceRegistryStore {
+    struct WriteFailed: Error {}
+    var data: Data?
+    var allowWrites = true
+
+    func read() throws -> Data? { data }
+    func write(_ data: Data) throws {
+        guard allowWrites else { throw WriteFailed() }
+        self.data = data
+    }
 }

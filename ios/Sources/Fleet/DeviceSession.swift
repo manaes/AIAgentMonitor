@@ -7,7 +7,9 @@ import Wire
 public final class DeviceSession {
     public static let probeTimeoutSeconds: Double = 3
 
-    public let device: Device
+    /// `sortIndex` 만 드래그 재정렬로 바뀐다(`updateSortIndex`). 나머지 필드는 세션
+    /// 수명 동안 고정이다 — 연결 정보가 바뀌면 fleet 을 다시 만든다.
+    public private(set) var device: Device
     public private(set) var status: DeviceStatus = .idle
     public private(set) var latest: MirrorSnapshot?
     /// `latest` 가 도착한 시각. 오프라인 장치도 마지막 스냅샷을 계속 들고 있으므로,
@@ -97,6 +99,12 @@ public final class DeviceSession {
         // 한 줄로 읽히게 두는 편이 낫다.
         guard status.isRetriggerable else { return }
         await probeNow()
+    }
+
+    /// 드래그 재정렬이 저장한 순서를 반영한다. 표시 순서만 바꾸는 것이라 연결·상태는
+    /// 건드리지 않는다 — 여기서 세션을 다시 만들면 16대의 QUIC 연결이 전부 끊긴다.
+    public func updateSortIndex(_ newValue: Int) {
+        device.sortIndex = newValue
     }
 
     public func stop() {
