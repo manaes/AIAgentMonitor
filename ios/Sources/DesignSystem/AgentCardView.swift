@@ -20,6 +20,8 @@ public final class AgentCardView: UIView {
     public var nameText: String? { nameLabel.text }
     public var modelText: String? { modelLabel.text }
     public var rateText: String? { rateLabel.text }
+    /// tok/s 단위. 오프라인(`isLive: false`)이면 숫자와 함께 사라지므로 nil.
+    public var unitText: String? { unitLabel.isHidden ? nil : unitLabel.text }
     public var projectText: String? { projectLabel.text }
     public var countdownText: String? { countdownLabel.isHidden ? nil : countdownLabel.text }
     /// 사용량을 못 읽는 중일 때 뜨는 한 줄. 정상이면 nil.
@@ -137,7 +139,11 @@ public final class AgentCardView: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) 는 쓰지 않는다") }
 
-    public func configure(agent: MirrorAgent, now: Date) {
+    /// `isLive` 가 false 면 tok/s 를 감춘다. 한도 %와 막대는 몇 분 지나도 여전히 유효하지만
+    /// tok/s 는 지금 이 순간의 값이라 낡으면 의미가 없다 — 다중 장치 앱의 오프라인 장치 표시
+    /// 규칙이고, 목록 화면(`DeviceListPresentation` 의 `rateText`)이 이미 같은 규칙을 쓴다.
+    /// 1:1 앱은 보고 있는 화면이 곧 연결 상태라 기본값(true)으로 지금까지와 똑같이 동작한다.
+    public func configure(agent: MirrorAgent, now: Date, isLive: Bool = true) {
         switch agent.kind {
         case .claude:
             nameLabel.text = "Claude Code"
@@ -157,10 +163,21 @@ public final class AgentCardView: UIView {
         let primary = agent.projects.first(where: { $0.status == .active }) ?? agent.projects.first
         modelLabel.text = primary?.model ?? "—"
         projectLabel.text = primary?.name ?? "no active session"
-        rateLabel.text = MirrorFormat.tokensPerSec(agent.ratePerSec)
-        // tok/s가 높을수록 빠르게, 유휴에도 느린 숨쉬기로 계속 움직인다
-        // (AgentCard.svelte의 pulseDurationS와 동일한 공식 — 맥과 같은 체감 속도).
-        dot.setPulseDuration(max(0.35, 2.2 - Double(agent.ratePerSec) / 40.0))
+        if isLive {
+            rateLabel.text = MirrorFormat.tokensPerSec(agent.ratePerSec)
+            unitLabel.isHidden = false
+            // tok/s가 높을수록 빠르게, 유휴에도 느린 숨쉬기로 계속 움직인다
+            // (AgentCard.svelte의 pulseDurationS와 동일한 공식 — 맥과 같은 체감 속도).
+            dot.setPulseDuration(max(0.35, 2.2 - Double(agent.ratePerSec) / 40.0))
+        } else {
+            // 이 카드는 스택뷰가 아니라 제약으로 쌓여 있어서, 숫자 라벨을 숨겨도 그 자리는
+            // 그대로 비어 남는다. 그래서 감추는 대신 "값 없음"을 뜻하는 대시를 넣는다 —
+            // 모델명이 없을 때 쓰는 표시와 같은 기호다.
+            rateLabel.text = "—"
+            unitLabel.isHidden = true
+            // 낡은 값으로 박자를 정할 수 없으니 가장 느린 숨쉬기로 고정한다.
+            dot.setPulseDuration(2.2)
+        }
 
         let quotaError = agent.quotaError
         if let quotaError {

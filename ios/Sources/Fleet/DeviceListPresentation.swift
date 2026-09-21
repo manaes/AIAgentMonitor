@@ -123,8 +123,9 @@ public enum DeviceListPresentation {
         }
     }
 
-    /// 기존 앱 `MirrorViewController.orderedForDisplay` 와 같은 순서.
-    private static func orderedForDisplay(_ agents: [MirrorAgent]) -> [MirrorAgent] {
+    /// 기존 앱 `MirrorViewController.orderedForDisplay` 와 같은 순서. 상세 화면도 같은 순서로
+    /// 카드를 쌓아야 목록과 상세에서 에이전트 자리가 뒤바뀌지 않으므로 공개한다.
+    public static func orderedForDisplay(_ agents: [MirrorAgent]) -> [MirrorAgent] {
         let claude = agents.filter { $0.kind == .claude }
         let codex = agents.filter { $0.kind == .codex }
         let others = agents.filter { $0.kind != .claude && $0.kind != .codex }

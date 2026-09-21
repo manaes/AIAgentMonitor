@@ -308,6 +308,16 @@ final class DeviceListViewController: UIViewController {
 extension DeviceListViewController: UICollectionViewDelegate {
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: true)
-        // Task 16 에서 채운다.
+        guard let id = dataSource.itemIdentifier(for: indexPath),
+              let fleet,
+              let session = fleet.sessions.first(where: { $0.device.endpointIdHex == id }) else {
+            return
+        }
+        // 다른 세션은 끊지 않는다 — 목록으로 돌아왔을 때 즉시 최신값이 보여야 하고,
+        // 끊었다 다시 붙이면 probe 승격으로 아끼려던 비용을 그대로 다시 낸다(스펙 §4.4).
+        let detail = DeviceDetailViewController(
+            session: session, fleet: fleet, cache: environment.cache
+        )
+        navigationController?.pushViewController(detail, animated: true)
     }
 }

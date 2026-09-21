@@ -45,6 +45,27 @@ final class AgentCardViewTests: XCTestCase {
         XCTAssertEqual(v.dotColor, Palette.claudeDot)
     }
 
+    /// 다중 장치 앱의 오프라인 규칙(스펙 §7): 한도 %와 막대는 몇 분 지나도 유효하니 남기고,
+    /// tok/s 는 지금 이 순간의 값이라 낡으면 의미가 없으니 감춘다. 기본값은 true 라
+    /// 1:1 앱은 지금까지와 똑같이 동작한다.
+    func testOfflineCardHidesRateButKeepsQuota() {
+        let agent = Fixture.agent(r: 1234, p5: 62)
+
+        let live = AgentCardView()
+        live.configure(agent: agent, now: now)
+        XCTAssertEqual(live.rateText, "1.2k")
+        XCTAssertEqual(live.unitText, "tok/s")
+
+        let stale = AgentCardView()
+        stale.configure(agent: agent, now: now, isLive: false)
+        XCTAssertEqual(stale.rateText, "—", "낡은 tok/s 를 그대로 보여줬다")
+        XCTAssertNil(stale.unitText, "숫자를 감췄는데 단위만 남았다")
+        XCTAssertEqual(
+            stale.quotaFivePercentText, live.quotaFivePercentText,
+            "한도 %는 오프라인에도 남아야 한다"
+        )
+    }
+
     func testCodexHeader() {
         let v = AgentCardView()
         v.configure(agent: Fixture.agent(k: 1), now: now)
