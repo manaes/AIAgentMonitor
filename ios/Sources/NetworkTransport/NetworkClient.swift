@@ -4,6 +4,26 @@ import Foundation
 import IrohLib
 import Wire
 
+/// 토큰 전역 슬롯 접근의 이음매. 프로덕션은 Keychain(`NetworkTokenStore`) 그대로다.
+/// 테스트가 "`.ephemeral`/`.fixed` 는 전역 슬롯을 읽지도 쓰지도 지우지도 않는다" 를
+/// **관측**할 수 있어야 한다 — 값만 보면 `.ephemeral` 이 전역에 써도 load 가 nil 이라 통과해버린다.
+protocol SharedTokenStoring {
+    func load() -> String?
+    func save(_ token: String) -> Bool
+    func clear()
+}
+
+/// 프로덕션 구현. 기존 호출을 그대로 포워딩할 뿐 동작을 바꾸지 않는다.
+struct KeychainSharedTokenStore: SharedTokenStoring {
+    func load() -> String? { NetworkTokenStore.loadToken() }
+    func save(_ token: String) -> Bool { NetworkTokenStore.saveToken(token) }
+    func clear() { NetworkTokenStore.clearToken() }
+}
+
+/// 전역 슬롯 구현체의 주입 지점. 바꾸는 쪽은 테스트뿐이고, `TokenSlot` 은 메인 액터 밖에서도
+/// 불리므로 `nonisolated(unsafe)` 로 둔다.
+nonisolated(unsafe) var sharedTokenStore: SharedTokenStoring = KeychainSharedTokenStore()
+
 /// iroh(QUIC) 기반 미러 전송. `BLEClient` 와 같은 `MirrorTransport` 모양을 갖지만
 /// GATT 대신 QR 로 전달받은 `EndpointId` 로 직접 dial 한다. 페어링 인증 프로토콜은
 /// `BLEClient.decide`/`PairingClient` 를 그대로 재사용한다 — 전송만 다를 뿐 Mac
@@ -316,7 +336,7 @@ public final class NetworkClient: NSObject {
 
         func load() -> String? {
             switch self {
-            case .shared: return NetworkTokenStore.loadToken()
+            case .shared: return sharedTokenStore.load()
             case .fixed(let token): return token
             case .ephemeral: return nil
             }
@@ -326,7 +346,7 @@ public final class NetworkClient: NSObject {
         /// 1:1 앱의 페어링 토큰까지 같이 날려버린다.
         func clear() {
             switch self {
-            case .shared: NetworkTokenStore.clearToken()
+            case .shared: sharedTokenStore.clear()
             case .fixed, .ephemeral: break
             }
         }
@@ -335,7 +355,7 @@ public final class NetworkClient: NSObject {
         /// false 를 내면 호출부가 쓸데없이 "토큰 저장 실패" 경고를 남긴다.
         func save(_ token: String) -> Bool {
             switch self {
-            case .shared: return NetworkTokenStore.saveToken(token)
+            case .shared: return sharedTokenStore.save(token)
             case .fixed, .ephemeral: return true
             }
         }
