@@ -54,8 +54,8 @@ final class DeviceRegistryTests: XCTestCase {
         XCTAssertEqual(devices[0].token, "새-토큰")
     }
 
-    /// 재스캔은 연결 정보만 갱신하고 사용자가 붙인 이름은 보존해야 한다.
-    func testRescanKeepsUserLabel() throws {
+    /// 이름을 비워 보내면(nil) 재스캔은 연결 정보만 갱신하고 기존 이름을 보존한다.
+    func testUpsertKeepsExistingLabelWhenIncomingIsNil() throws {
         let registry = DeviceRegistry(store: MemoryStore())
         var first = makeDevice("aa")
         first.userLabel = "작업실"
@@ -65,6 +65,23 @@ final class DeviceRegistryTests: XCTestCase {
 
         XCTAssertEqual(devices[0].userLabel, "작업실")
         XCTAssertEqual(devices[0].macHostname, "새-호스트명")
+    }
+
+    /// 재스캔은 이름을 고치는 **유일한** 경로다(앱 어디에도 이름 변경 화면이 없다).
+    /// 기존 이름이 무조건 이기면 한 번 잘못 지은 이름을 영영 못 고친다.
+    func testUpsertOverwritesLabelWhenIncomingIsProvided() throws {
+        let registry = DeviceRegistry(store: MemoryStore())
+        var first = makeDevice("aa")
+        first.userLabel = "작업실"
+        let insertedSortIndex = try registry.upsert(first)[0].sortIndex
+
+        var rescanned = makeDevice("aa")
+        rescanned.userLabel = "거실 맥"
+        let devices = try registry.upsert(rescanned)
+
+        XCTAssertEqual(devices[0].userLabel, "거실 맥")
+        // 이름이 바뀌어도 정렬 순서는 그대로여야 한다 — 목록에서 자리가 튀면 안 된다.
+        XCTAssertEqual(devices[0].sortIndex, insertedSortIndex)
     }
 
     func testDeviceLimitIsEnforced() throws {

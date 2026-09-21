@@ -5,6 +5,13 @@ public enum DeviceRegistryError: Error, Equatable {
     case corrupted
 }
 
+public extension DeviceRegistryError {
+    /// 레지스트리 손상 안내(Ruling 18). 목록 화면과 장치 추가 화면이 같은 사고를 서로 다른
+    /// 말로 설명하지 않도록 문구를 한 곳에 둔다.
+    static let corruptedTitle = "저장된 장치 목록을 읽지 못했습니다"
+    static let corruptedAdvice = "새로 페어링하면 기존 목록을 덮어씁니다."
+}
+
 /// 레지스트리 바이트를 어디에 둘지. 실제 앱은 Keychain, 테스트는 인메모리를 쓴다.
 public protocol DeviceRegistryStore {
     func read() throws -> Data?
@@ -34,14 +41,16 @@ public final class DeviceRegistry {
         }
     }
 
-    /// 같은 `endpointIdHex` 가 이미 있으면 연결 정보만 갱신하고, 사용자가 붙인
-    /// 이름(`userLabel`)과 정렬 순서는 보존한다.
+    /// 같은 `endpointIdHex` 가 이미 있으면 연결 정보를 갱신하고 정렬 순서는 보존한다.
     @discardableResult
     public func upsert(_ device: Device) throws -> [Device] {
         var devices = try load()
         if let index = devices.firstIndex(where: { $0.endpointIdHex == device.endpointIdHex }) {
             var merged = device
-            merged.userLabel = devices[index].userLabel ?? device.userLabel
+            // 들어온 이름이 있으면 그게 이긴다. 재스캔은 "이름을 고치는" 유일한 경로라
+            // 기존 이름이 무조건 이기면 사용자가 한 번 잘못 지은 이름을 영영 못 고친다.
+            // 이름을 비워 보내면(nil) 기존 이름을 보존한다.
+            merged.userLabel = device.userLabel ?? devices[index].userLabel
             merged.sortIndex = devices[index].sortIndex
             devices[index] = merged
         } else {
