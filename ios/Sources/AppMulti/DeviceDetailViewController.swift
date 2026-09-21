@@ -73,10 +73,12 @@ final class DeviceDetailViewController: UIViewController {
         // 첫 그리기는 viewWillAppear 가 한다 — push 되는 화면은 여기 다음에 반드시 그게
         // 불리므로, 여기서도 부르면 첫 표시에 render 가 두 번 돈다.
 
-        // 오프라인 장치에 들어왔다면 사용자 의도가 명확하므로 즉시 1회 재시도한다(스펙 §6.2).
+        // 붙어 있지 않은 장치에 들어왔다면 사용자 의도가 명확하므로 즉시 1회 재시도한다(스펙 §6.2).
+        // 판정은 `DeviceStatus.isRetriggerable` 을 그대로 쓴다 — 여기에 조건을 따로 적었다가
+        // `.unstable` 이 빠져 "재연결 중" 장치는 상세에 들어와도 재시도가 안 걸렸다.
         // self 가 아니라 session 만 캡처한다 — 재시도는 화면을 닫아도 끝까지 도는 게 맞지만,
         // 그 3초 동안 화면을 붙들고 있을 이유는 없다.
-        if session.status == .offline || session.status == .idle {
+        if session.status.isRetriggerable {
             Task { [session] in await session.retrigger() }
         }
     }
