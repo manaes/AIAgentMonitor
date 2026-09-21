@@ -9,6 +9,16 @@ public final class DeviceFleet {
     public static let probeConcurrency = 4
     /// 포어그라운드 상태에서 오프라인 장치를 다시 확인하는 주기.
     public static let reprobeInterval: TimeInterval = 180
+    /// 실패한 직후 다시 붙어보는 간격. 이게 없으면 **한 번의 일시적 실패가 최대 3분간
+    /// "재연결 중" 으로 남는다** — 3분 타이머나 당겨서 새로고침 말고는 다시 볼 기회가 없기 때문이다.
+    /// 페어링 직후가 가장 잘 보인다. 페어링은 연결을 닫자마자 fleet 이 곧바로 같은 Mac 에
+    /// 다시 dial 하는데, 그 순간의 dial 은 3초 안에 안 끝나기 쉽고(맥이 직전 연결을 정리하는 중,
+    /// hole-punch 를 다시 뚫는 중) 몇 초 뒤 재시도는 대개 성공한다.
+    ///
+    /// 이 간격이 "연속 3회 실패 → 오프라인" 을 빠르게 소진시키는 것은 의도한 것이다.
+    /// 꺼져 있는 Mac 이 9분이 아니라 십여 초 만에 "오프라인" 으로 정착하는 편이 정직하고,
+    /// 오프라인이 된 뒤에도 3분 타이머가 계속 다시 확인한다. 테스트가 줄일 수 있도록 var 다.
+    public static var quickRetryDelays: [TimeInterval] = [2, 6]
     /// 장치별 스냅샷 캐시 쓰기 최소 간격. 캐시는 "다음 실행 때 목록을 미리 채우는" 용도라
     /// 최신일 필요가 없는데, 스트리밍 중에는 스냅샷이 초당 들어와 그때마다 원자적 파일
     /// 쓰기가 일어난다. 테스트가 줄일 수 있도록 var 로 둔다.
@@ -24,6 +34,8 @@ public final class DeviceFleet {
     private let cache: DeviceSnapshotCache?
     /// 장치별 마지막 캐시 쓰기 시각. `cacheWriteInterval` 스로틀의 기준점.
     private var lastCacheWriteAt: [String: Date] = [:]
+    /// 진행 중인 짧은 재시도. 라운드마다 갈아끼우고 `stopAll()` 에서 끊는다.
+    private var quickRetryTask: Task<Void, Never>?
 
     public init(
         devices: [Device],
@@ -46,6 +58,7 @@ public final class DeviceFleet {
     /// iOS 가 앱을 suspend 하면 QUIC 연결이 전부 조용히 끊기기 때문이다.
     public func startInitialRound() async {
         await runRound(sessions) { session in await session.probeNow() }
+        scheduleQuickRetries()
     }
 
     /// 타이머(3분)/당겨서 새로고침. **붙어 있지 않은 모든 세션**(미탐색·재연결 중·오프라인)을
@@ -54,6 +67,7 @@ public final class DeviceFleet {
     public func retriggerOffline() async {
         let targets = sessions.filter { $0.status.isRetriggerable }
         await runRound(targets) { session in await session.retrigger() }
+        scheduleQuickRetries()
     }
 
     /// 백그라운드 전환·종료 시점, 그리고 fleet 을 버리기 직전에 부른다. 스로틀을 무시하고
@@ -94,7 +108,29 @@ public final class DeviceFleet {
     /// 진행 중 작업을 취소해 연결을 닫는다 — 안 부르면 옛 fleet 의 스트림이 계속 살아
     /// 삭제된 장치의 연결이 누수되고 남은 장치는 이중 연결이 된다.
     public func stopAll() {
+        quickRetryTask?.cancel()
+        quickRetryTask = nil
         for session in sessions { session.stop() }
+    }
+
+    /// 방금 실패한 세션(`.unstable`)만 짧은 간격으로 다시 붙어본다.
+    /// `.offline` 은 대상이 아니다 — 거긴 이미 3회 실패로 정착한 상태라 3분 타이머의 몫이고,
+    /// 여기서까지 계속 두드리면 꺼진 Mac 16대에 끝없이 dial 하게 된다.
+    private func scheduleQuickRetries() {
+        quickRetryTask?.cancel()
+        quickRetryTask = Task { [weak self] in
+            for delay in Self.quickRetryDelays {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                let targets = self.sessions.filter {
+                    if case .unstable = $0.status { return true }
+                    return false
+                }
+                // 더 볼 게 없으면 남은 간격까지 기다리지 않고 끝낸다.
+                guard !targets.isEmpty else { return }
+                await self.runRound(targets) { session in await session.retrigger() }
+            }
+        }
     }
 
     /// 동시성 제한 안에서 `action` 을 실행한다. 처음 `probeConcurrency` 개를 띄우고,

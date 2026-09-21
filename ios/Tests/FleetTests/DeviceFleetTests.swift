@@ -90,6 +90,27 @@ private final class DropThenUnreachableTransport: DeviceTransport, @unchecked Se
     }
 }
 
+/// 첫 probe 만 실패하고 그 뒤로는 끝나지 않는 스트림을 돌려준다. 실기에서 관찰된
+/// "페어링 직후 첫 dial 만 실패하는" 상황을 재현한다 — 맥이 방금 닫은 연결을 정리하는
+/// 중이거나 hole-punch 를 다시 뚫는 중이면 3초 예산 안에 끝나지 않는다.
+private final class FailThenStreamTransport: DeviceTransport, @unchecked Sendable {
+    private let snapshots: [MirrorSnapshot]
+    private let calls = OSAllocatedUnfairLock(initialState: 0)
+    var probeCount: Int { calls.withLock { $0 } }
+
+    init(snapshots: [MirrorSnapshot]) { self.snapshots = snapshots }
+
+    func probe(device: Device, timeoutSeconds: Double) async throws -> AsyncThrowingStream<MirrorSnapshot, Error> {
+        let attempt = calls.withLock { $0 += 1; return $0 }
+        guard attempt > 1 else { throw DeviceTransportError.unreachable }
+        let snapshots = self.snapshots
+        return AsyncThrowingStream { continuation in
+            for snapshot in snapshots { continuation.yield(snapshot) }
+            // finish 하지 않는다 — 실제 전송처럼 연결이 살아 있는 한 끝나지 않는다.
+        }
+    }
+}
+
 private func makeSnapshot(rate: Float = 1) throws -> MirrorSnapshot {
     let json = #"{"v":1,"t":1758000000,"a":[{"k":0,"r":\#(rate),"t5":0,"pj":[]}]}"#
     return try JSONDecoder().decode(MirrorSnapshot.self, from: Data(json.utf8))
@@ -468,6 +489,54 @@ final class DeviceFleetTests: XCTestCase {
     }
 
     /// 조건이 만족될 때까지 기다린다. 고정 sleep 과 달리 느린 CI 에서도 흔들리지 않는다.
+    /// 실기 QA 에서 나온 버그: 페어링에 성공했는데 목록에 "재연결 중" 으로 남았고,
+    /// 사용자가 당겨서 새로고침해야 비로소 온라인이 됐다.
+    ///
+    /// 페어링은 연결을 닫자마자 fleet 이 같은 Mac 에 곧바로 다시 dial 하는데, 그 첫 dial 이
+    /// 실패하면 다시 볼 기회가 **3분 타이머밖에 없었다**. 한 번의 일시적 실패가 3분짜리
+    /// "재연결 중" 이 되던 셈이다.
+    func testTransientFirstFailureRecoversWithoutWaitingForTheTimer() async throws {
+        let original = DeviceFleet.quickRetryDelays
+        DeviceFleet.quickRetryDelays = [0.2]
+        defer { DeviceFleet.quickRetryDelays = original }
+
+        let transport = FailThenStreamTransport(snapshots: [try makeSnapshot()])
+        let fleet = DeviceFleet(devices: devices(1), transportFactory: { _ in transport }, cache: nil)
+
+        await fleet.startInitialRound()
+        XCTAssertEqual(
+            fleet.sessions[0].status, .unstable(failureCount: 1),
+            "첫 probe 가 실패해야 이 테스트가 의미를 가진다"
+        )
+
+        await waitUntil(timeout: 2) { fleet.sessions[0].status == .online }
+
+        XCTAssertEqual(
+            fleet.sessions[0].status, .online,
+            "짧은 재시도가 없어 3분 타이머 전까지 '재연결 중' 에 머물렀다"
+        )
+        XCTAssertEqual(transport.probeCount, 2, "재시도가 정확히 한 번 더 붙어봤어야 한다")
+
+        fleet.stopAll()
+    }
+
+    /// 꺼져 있는 Mac 을 끝없이 두드리지 않는다 — `.offline` 은 3회 실패로 이미 정착한
+    /// 상태라 3분 타이머의 몫이고, 짧은 재시도의 대상이 아니다.
+    func testQuickRetriesStopOnceDeviceSettlesOffline() async throws {
+        let original = DeviceFleet.quickRetryDelays
+        DeviceFleet.quickRetryDelays = [0.05, 0.05, 0.05]
+        defer { DeviceFleet.quickRetryDelays = original }
+
+        let transport = CountingTransport()
+        let fleet = DeviceFleet(devices: devices(1), transportFactory: { _ in transport }, cache: nil)
+
+        await fleet.startInitialRound()
+        await waitUntil(timeout: 2) { fleet.sessions[0].status == .offline }
+
+        XCTAssertEqual(fleet.sessions[0].status, .offline, "연속 실패가 오프라인으로 정착하지 않았다")
+        fleet.stopAll()
+    }
+
     private func waitUntil(timeout: TimeInterval = 1, _ condition: () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition(), Date() < deadline {
