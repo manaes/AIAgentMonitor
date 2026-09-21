@@ -40,8 +40,11 @@ extension NetworkClient {
 @MainActor
 public final class NetworkClient: NSObject {
     /// `IrohEndpointProvider` 도 같은 값으로 bind 해야 하므로 모듈 내부에 공개한다.
-    static let alpnData = Data("aim/mirror/1".utf8)
-    private static var alpn: Data { alpnData }
+    /// `nonisolated` 인 이유: 이 타입은 `@MainActor` 라 static 도 메인 액터에 격리되는데,
+    /// `IrohEndpointProvider`(별도 액터)가 bind 할 때 이 값을 읽는다. 격리된 채로 두면
+    /// Swift 6 언어 모드에서 컴파일 에러다. 둘 다 상수라 격리가 필요 없다.
+    nonisolated static let alpnData = Data("aim/mirror/1".utf8)
+    nonisolated private static var alpn: Data { alpnData }
     /// 제어 메시지 하나의 최대 크기. 실제 응답은 수십 바이트 수준이라 넉넉히 잡는다.
     private static let controlSizeLimit: UInt32 = 4096
     private static let snapshotChunkSizeLimit: UInt32 = 65536
