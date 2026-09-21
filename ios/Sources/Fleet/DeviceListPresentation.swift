@@ -145,7 +145,9 @@ public enum DeviceListPresentation {
         )
     }
 
-    private static func statusText(_ status: DeviceStatus) -> String {
+    /// 통합 보기의 장치 행(`UnifiedPresentation.deviceRow`)도 같은 문구를 써야 하므로
+    /// 모듈 안에 연다. 복제하면 두 화면의 상태 표기가 갈린다.
+    static func statusText(_ status: DeviceStatus) -> String {
         switch status {
         case .idle: return "대기"
         case .probing: return "확인 중"
@@ -162,7 +164,9 @@ public enum DeviceListPresentation {
         return MirrorFormat.relativeTime(UInt64(max(0, fetchedAt.timeIntervalSince1970)), now: now)
     }
 
-    private static func agentName(_ kind: AgentKindCode) -> String {
+    /// `orderedForDisplay` 와 같은 이유로 모듈 안에 연다 — 통합 보기가 같은 표기를
+    /// 써야 하고, 이름 규칙을 두 곳에 적으면 곧 갈라진다.
+    static func agentName(_ kind: AgentKindCode) -> String {
         switch kind {
         case .claude: return "Claude Code"
         case .codex: return "Codex"
