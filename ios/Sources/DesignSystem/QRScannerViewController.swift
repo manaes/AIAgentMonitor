@@ -7,6 +7,11 @@ import UIKit
 public final class QRScannerViewController: UIViewController {
     public var onScan: ((String) -> Void)?
 
+    /// 모달로 직접 떠 있을 때만 스스로 닫고 닫기 버튼을 그린다. 자식으로 embed 된
+    /// 경우(AppMulti 의 장치 추가 화면)에 `dismiss` 를 부르면 스캐너가 아니라 그걸 담고
+    /// 있는 모달 전체가 닫혀, 스캔 직후 화면이 통째로 사라진다.
+    private var isStandalone: Bool { parent == nil }
+
     private let captureSession = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var didScan = false
@@ -15,7 +20,7 @@ public final class QRScannerViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .black
         setUpCamera()
-        setUpCloseButton()
+        if isStandalone { setUpCloseButton() }
     }
 
     public override func viewDidAppear(_ animated: Bool) {
@@ -56,6 +61,13 @@ public final class QRScannerViewController: UIViewController {
         dismiss(animated: true)
     }
 
+    /// 스캔 잠금을 푼다. 한 번 성공하면 콜백을 더 이상 내지 않는데(카메라는 같은 코드를
+    /// 초당 여러 번 던지므로 필요한 잠금이다), 페어링이 실패해 **같은 화면에서** 다시
+    /// 스캔해야 하는 경우에는 호출부가 직접 풀어줘야 한다.
+    public func resumeScanning() {
+        didScan = false
+    }
+
     private func setUpCamera() {
         guard let device = AVCaptureDevice.default(for: .video),
               let input = try? AVCaptureDeviceInput(device: device),
@@ -88,6 +100,7 @@ extension QRScannerViewController: AVCaptureMetadataOutputObjectsDelegate {
               let value = object.stringValue else { return }
         didScan = true
         onScan?(value)
-        dismiss(animated: true)
+        // embed 된 경우엔 닫지 않는다 — 호출부가 같은 화면에서 이름 입력·페어링을 이어간다.
+        if isStandalone { dismiss(animated: true) }
     }
 }

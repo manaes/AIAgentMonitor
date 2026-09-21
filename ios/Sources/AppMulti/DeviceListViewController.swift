@@ -239,7 +239,17 @@ final class DeviceListViewController: UIViewController {
     }
 
     @objc private func addDeviceTapped() {
-        // Task 15 에서 채운다.
+        let add = AddDeviceViewController(registry: environment.registry)
+        add.onAdded = { [weak self] _ in
+            // 레지스트리가 바뀌었으므로 fleet 을 다시 만든다(startFleet 이 옛 fleet 을
+            // flushCache 한 뒤 stopAll 한다 — Ruling 17).
+            self?.startFleet()
+        }
+        let nav = UINavigationController(rootViewController: add)
+        // Palette 은 고정 다크 팔레트인데 앱이 인터페이스 스타일을 강제하지 않는다. 라이트
+        // 모드에서는 내비 타이틀이 검정으로 그려져 스캐너의 검은 배경 위에서 안 보인다.
+        nav.overrideUserInterfaceStyle = .dark
+        present(nav, animated: true)
     }
 
     private func removeDevice(endpointIdHex: String) {
