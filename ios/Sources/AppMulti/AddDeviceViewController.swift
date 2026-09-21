@@ -58,7 +58,7 @@ final class AddDeviceViewController: UIViewController {
     /// 풀지 않으면 콜백이 영영 다시 오지 않는다.
     private func resumeScanning() {
         hasHandledScan = false
-        scanner.resumeScanning()
+        scanner.unlockScanResult()
     }
 
     private func handle(_ payload: String) {
@@ -68,10 +68,15 @@ final class AddDeviceViewController: UIViewController {
             }, animated: true)
             return
         }
-        askForName(defaultName: parsed.macName ?? "", parsed: parsed)
+        askForName(parsed: parsed)
     }
 
-    private func askForName(defaultName: String, parsed: NetworkClient.ParsedPairingPayload) {
+    private func askForName(parsed: NetworkClient.ParsedPairingPayload) {
+        // 이미 등록된 장치를 재스캔한 경우엔 사용자가 붙여 둔 이름을 먼저 보여준다.
+        // Mac 호스트명을 채우면 "내가 지은 이름이 사라졌다"로 보이고, 그대로 확인을 누르면
+        // 그 호스트명이 이름이 된다(upsert 는 들어온 이름이 이긴다).
+        let existing = (try? registry.load())?.first { $0.endpointIdHex == parsed.endpointIdHex }
+        let defaultName = existing?.userLabel ?? parsed.macName ?? ""
         let sheet = UIAlertController(
             title: "장치 이름", message: "목록에 표시할 이름입니다.", preferredStyle: .alert
         )
@@ -94,7 +99,18 @@ final class AddDeviceViewController: UIViewController {
     private static let pairingTimeoutSeconds: Double = 10
 
     private func pairAndSave(parsed: NetworkClient.ParsedPairingPayload, userLabel: String?) {
-        let waiting = UIAlertController(title: nil, message: "Mac 에 연결하는 중…", preferredStyle: .alert)
+        // 최대 10초 떠 있는 알림이다. 스피너가 없으면 멈춘 화면과 구별되지 않는다.
+        let waiting = UIAlertController(
+            title: nil, message: "\nMac 에 연결하는 중…\n\n", preferredStyle: .alert
+        )
+        let spinner = UIActivityIndicatorView(style: .medium)
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.startAnimating()
+        waiting.view.addSubview(spinner)
+        NSLayoutConstraint.activate([
+            spinner.centerXAnchor.constraint(equalTo: waiting.view.centerXAnchor),
+            spinner.bottomAnchor.constraint(equalTo: waiting.view.bottomAnchor, constant: -20),
+        ])
         present(waiting, animated: true)
         Task { [weak self] in
             guard let self else { return }
@@ -112,8 +128,11 @@ final class AddDeviceViewController: UIViewController {
                 // hole-punch 가 한 번 더 들지만 페어링은 장치당 한 번이다.
                 try? result.connection.close(errorCode: 0, reason: Data())
                 guard let token = result.issuedToken else {
-                    // 코드로 인증했는데 토큰이 안 왔다 = Mac 이 이미 이 기기를 알고 있어
-                    // 재연결 경로로 갔다는 뜻이다. AppMulti 는 그 토큰을 모르므로 저장할 수 없다.
+                    // 프로토콜상 도달 불가능한 방어 가드다. 코드 페어링은 `.ephemeral` 슬롯을
+                    // 쓰고 그 슬롯은 load 가 항상 nil 이라 언제나 HELLO2 로 시작하는데,
+                    // issuedToken 이 nil 인 `.openSession` 은 PROOF2 를 보낸 뒤에만 나온다.
+                    // 그래도 남겨 둔다 — 비용이 0 이고, 토큰 없이 저장하면 그 장치는 영영
+                    // needsPairing 으로만 거부된다.
                     throw NetworkClientError.needsPairing
                 }
                 outcome = .success(token)
@@ -148,13 +167,24 @@ final class AddDeviceViewController: UIViewController {
             sortIndex: 0    // upsert 가 max+1 로 덮어쓴다
         )
         do {
-            _ = try registry.upsert(device)
-            onAdded?(device)
+            let saved = try registry.upsert(device)
+            // 로컬 device 가 아니라 **저장된** 값을 넘긴다 — sortIndex 는 upsert 가 매기고
+            // userLabel 도 병합을 거친 뒤라야 목록과 같은 값이 된다.
+            onAdded?(saved.first { $0.endpointIdHex == device.endpointIdHex } ?? device)
             dismiss(animated: true)
         } catch DeviceRegistryError.deviceLimitReached {
             present(alert("장치는 최대 \(DeviceRegistry.maxDevices)대까지 추가할 수 있습니다") { [weak self] in
                 self?.resumeScanning()
             }, animated: true)
+        } catch DeviceRegistryError.corrupted {
+            // 목록 화면(Ruling 18)과 같은 말을 해야 한다 — 같은 사고를 두 가지로 설명하면
+            // 사용자는 둘 중 하나를 다른 문제로 읽는다.
+            present(
+                alert("\(DeviceRegistryError.corruptedTitle)\n\n\(DeviceRegistryError.corruptedAdvice)") {
+                    [weak self] in self?.resumeScanning()
+                },
+                animated: true
+            )
         } catch {
             present(alert("저장하지 못했습니다: \(error.localizedDescription)") { [weak self] in
                 self?.resumeScanning()
