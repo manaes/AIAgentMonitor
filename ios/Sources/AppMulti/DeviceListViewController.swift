@@ -313,11 +313,20 @@ extension DeviceListViewController: UICollectionViewDelegate {
               let session = fleet.sessions.first(where: { $0.device.endpointIdHex == id }) else {
             return
         }
-        // 다른 세션은 끊지 않는다 — 목록으로 돌아왔을 때 즉시 최신값이 보여야 하고,
-        // 끊었다 다시 붙이면 probe 승격으로 아끼려던 비용을 그대로 다시 낸다(스펙 §4.4).
-        let detail = DeviceDetailViewController(
-            session: session, fleet: fleet, cache: environment.cache
-        )
-        navigationController?.pushViewController(detail, animated: true)
+        switch DeviceListPresentation.tapDestination(for: session.status) {
+        case .rePair:
+            // 재페어링 필요는 상세로 보내봐야 할 수 있는 게 없다 — 토큰이 폐기된 상태라 재시도도
+            // 막혀 있다(종단 상태). 스펙 §7 대로 그 장치를 다시 스캔하는 경로로 보낸다.
+            // 재스캔은 endpointIdHex 로 병합되므로(Ruling 25) 이름·정렬순서는 보존되고 토큰만 갱신된다.
+            // 16대 사전 안내(Ruling 28)는 여기서 하지 않는다 — 기존 장치 갱신이라 한도와 무관하다.
+            presentAddDevice()
+        case .detail:
+            // 다른 세션은 끊지 않는다 — 목록으로 돌아왔을 때 즉시 최신값이 보여야 하고,
+            // 끊었다 다시 붙이면 probe 승격으로 아끼려던 비용을 그대로 다시 낸다(스펙 §4.4).
+            let detail = DeviceDetailViewController(
+                session: session, fleet: fleet, cache: environment.cache
+            )
+            navigationController?.pushViewController(detail, animated: true)
+        }
     }
 }

@@ -27,6 +27,13 @@ public struct AgentRowModel: Equatable, Sendable {
     public let weekly: QuotaWindowText?
 }
 
+/// 목록에서 셀을 탭했을 때 어디로 갈지.
+public enum DeviceTapDestination: Equatable, Sendable {
+    case detail
+    /// 그 장치를 다시 스캔하는 화면. 재페어링 필요 상태에서만 나온다.
+    case rePair
+}
+
 public struct DeviceRowModel: Equatable, Sendable {
     public let id: String
     public let title: String
@@ -68,6 +75,18 @@ public enum DeviceListPresentation {
             agents: Array(shown),
             hiddenAgentCount: max(0, ordered.count - visibleAgentLimit)
         )
+    }
+
+    /// 셀을 탭했을 때 상세로 갈지, 재페어링(재스캔)으로 갈지. 스펙 §7 — "재페어링 필요는
+    /// 탭하면 그 장치용 QR 스캐너". 토큰이 폐기된 종단 상태라 상세로 보내봐야 재시도조차
+    /// 막혀 있는 막다른 화면이 된다.
+    ///
+    /// `.versionMismatch` 는 여기 넣지 않는다 — 같은 종단 상태지만 다시 스캔해도 Mac 앱
+    /// 버전이 바뀌지 않으므로, 상세에서 무엇이 문제인지 안내하는 편이 맞다.
+    ///
+    /// 화면 밖으로 뺀 이유는 화면 코드에 자동 테스트를 걸 수단이 없어서다(AppMultiTests 타겟 없음).
+    public static func tapDestination(for status: DeviceStatus) -> DeviceTapDestination {
+        status == .needsRepairing ? .rePair : .detail
     }
 
     /// `온라인 → 불안정 → 오프라인` 그룹, 그룹 안에서는 sortIndex 순.

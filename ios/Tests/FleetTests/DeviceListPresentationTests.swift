@@ -197,6 +197,30 @@ final class DeviceListPresentationTests: XCTestCase {
         XCTAssertEqual(row.freshnessText, "30초 전")
     }
 
+    // MARK: - 탭 목적지
+
+    /// 스펙 §7 — "재페어링 필요는 탭하면 그 장치용 QR 스캐너". 그 상태만 재스캔으로 가고
+    /// 나머지는 전부 상세다. 특히 `.versionMismatch` 는 같은 종단 상태지만 재스캔해도
+    /// Mac 앱 버전이 바뀌지 않으므로 상세에서 안내해야 한다.
+    ///
+    /// 화면(`didSelectItemAt`)에는 테스트를 걸 수단이 없어서(AppMultiTests 타겟 없음)
+    /// 판정만 순수 함수로 빼 두고 여기서 전 케이스를 고정한다.
+    func testOnlyNeedsRepairingTapsIntoRePairing() {
+        XCTAssertEqual(DeviceListPresentation.tapDestination(for: .needsRepairing), .rePair)
+
+        let goesToDetail: [DeviceStatus] = [
+            .idle, .probing, .online, .unstable(failureCount: 1),
+            .unstable(failureCount: DeviceStatusMachine.failureThreshold - 1),
+            .offline, .versionMismatch,
+        ]
+        for status in goesToDetail {
+            XCTAssertEqual(
+                DeviceListPresentation.tapDestination(for: status), .detail,
+                "\(status) 를 재스캔으로 보냈다"
+            )
+        }
+    }
+
     // MARK: - 정렬
 
     func testSortsOnlineThenUnstableThenOffline() {
