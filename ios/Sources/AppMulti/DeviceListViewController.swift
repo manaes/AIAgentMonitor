@@ -209,6 +209,9 @@ final class DeviceListViewController: UIViewController {
             }
         case .unified:
             config.headerMode = .supplementary
+            // 에이전트·장치 카드 사이의 구분선을 뺀다 — 셀마다 카드 배경이 있어 경계가
+            // 이미 드러나는데 선까지 그으면 촘촘해 보인다(사용자 요청).
+            config.showsSeparators = false
         }
         return UICollectionViewCompositionalLayout.list(using: config)
     }

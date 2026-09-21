@@ -181,7 +181,7 @@ final class UnifiedPresentationTests: XCTestCase {
         XCTAssertEqual(row.statusText, "연결됨")
         // 개별 보기와 같은 순서 — Claude 가 먼저다.
         XCTAssertEqual(row.rates.map(\.name), ["Claude Code", "Codex"])
-        XCTAssertEqual(row.rates.map(\.rateText), ["13 tok/s", "3 tok/s"])
+        XCTAssertEqual(row.rates.map(\.rateValueText), ["13", "3"], "단위는 화면이 붙인다 — 여기는 숫자만")
     }
 
     /// 스냅샷을 아직 한 번도 못 받은 온라인 장치는 빈 배열이다.

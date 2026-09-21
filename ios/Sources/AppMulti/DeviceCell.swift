@@ -31,7 +31,9 @@ final class DeviceCell: UICollectionViewListCell {
         // 에이전트 블록(이름+tok/s 줄 + 한도 막대 두 줄)끼리 붙어 있으면 어디까지가 한
         // 에이전트인지 구분이 안 된다는 지적이 있었다(실기). 막대 사이 간격(6)보다
         // 확실히 넓혀 블록 경계를 만든다.
-        agentStack.spacing = 14
+        // 에이전트 블록 하나가 3줄(이름/5h/주간)이라, 블록 안 간격(3~6pt)과 확실히 차이가
+        // 나야 어디서 끊기는지 읽힌다. 14 로는 부족하다는 실기 피드백.
+        agentStack.spacing = 22
 
         let header = UIStackView(arrangedSubviews: [titleLabel, statusLabel, UIView(), freshnessLabel])
         header.axis = .horizontal

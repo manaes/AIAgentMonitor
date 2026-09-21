@@ -40,11 +40,13 @@ public struct UnifiedAgentRow: Equatable, Sendable {
 /// 자동 합성이 안 되므로 작은 구조체로 둔다.
 public struct UnifiedRate: Equatable, Sendable {
     public let name: String
-    public let rateText: String
+    /// 숫자만("34.7k"). 단위는 화면이 따로 그린다 — 숫자를 크게, 단위를 작게 두기 때문이다
+    /// (1:1 앱 `AgentCardView` 가 rateLabel/unitLabel 을 나눠 둔 것과 같은 이유).
+    public let rateValueText: String
 
-    public init(name: String, rateText: String) {
+    public init(name: String, rateValueText: String) {
         self.name = name
-        self.rateText = rateText
+        self.rateValueText = rateValueText
     }
 }
 
@@ -123,7 +125,7 @@ public enum UnifiedPresentation {
             rates: agents.map { agent in
                 UnifiedRate(
                     name: DeviceListPresentation.agentName(agent.kind),
-                    rateText: "\(MirrorFormat.tokensPerSec(agent.ratePerSec)) tok/s"
+                    rateValueText: MirrorFormat.tokensPerSec(agent.ratePerSec)
                 )
             }
         )
