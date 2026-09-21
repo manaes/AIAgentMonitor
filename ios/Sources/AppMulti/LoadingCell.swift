@@ -46,13 +46,16 @@ final class LoadingCell: UICollectionViewListCell {
         contentView.addSubview(container)
         container.snp.makeConstraints { make in
             make.edges.equalToSuperview().inset(UIEdgeInsets(top: 5, left: 0, bottom: 5, right: 0))
-            // 높이를 명시하지 않으면 셀이 내용 높이(라벨 한 줄)까지만 줄어든다.
-            make.height.equalTo(148)
         }
         container.addSubview(content)
+        // 높이를 고정하지 않는다. 리스트 셀은 자동 크기 계산 중에 임시로 높이 제약을
+        // required 우선순위로 걸어두는데, 여기서 고정 높이를 required 로 주면 둘이 충돌해
+        // UIKit 이 내 제약을 깨고 기본 높이(≈44pt)로 그려버린다 — 라벨 한 줄 높이로만
+        // 보이던 원인이다. 위아래 여백만 넉넉히 줘서 **내용이 높이를 만들게** 한다.
         content.snp.makeConstraints { make in
-            make.center.equalToSuperview()
             make.leading.trailing.equalToSuperview().inset(16)
+            make.top.equalToSuperview().offset(44)
+            make.bottom.equalToSuperview().offset(-44)
         }
     }
 
