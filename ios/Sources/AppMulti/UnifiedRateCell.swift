@@ -86,7 +86,10 @@ final class UnifiedRateCell: UICollectionViewListCell {
 
     /// 카드 하나 = 에이전트 하나. 이름 위, 숫자 가운데, 단위 아래로 쌓아 **정사각형**으로 둔다.
     /// 단위를 숫자 옆이 아니라 아래로 내리면 필요한 폭이 줄어 정사각형이 나온다.
-    private static let cardSide: CGFloat = 118
+    ///
+    /// 폭은 숫자 크기를 따라간다 — "34.7k" 를 51pt 로 그리면 글자만 135pt 라, 카드가 작으면
+    /// 자동 축소가 걸려 키운 효과가 그대로 사라진다.
+    private static let cardSide: CGFloat = 160
 
     private func makeRateCard(_ rate: UnifiedRate) -> UIView {
         let card = UIView()

@@ -6,9 +6,9 @@ public enum Typography {
     public static let bigRate = monospacedDigit(ofSize: 22, weight: .bold)
     /// 통합 보기의 속도 카드처럼 숫자 하나가 카드의 주인공일 때. 맥 쪽에는 대응이 없고
     /// iOS 위젯 관례(값을 크게, 단위를 작게)를 따른다.
-    public static let hugeRate = monospacedDigit(ofSize: 34, weight: .bold)
+    public static let hugeRate = monospacedDigit(ofSize: 51, weight: .bold)
     /// `hugeRate` 옆에 붙는 단위. 숫자에 눌리지 않게 label 보다 크고 medium 굵기다.
-    public static let hugeRateUnit = UIFont.systemFont(ofSize: 15, weight: .semibold)
+    public static let hugeRateUnit = UIFont.systemFont(ofSize: 17, weight: .semibold)
     public static let percent = monospacedDigit(ofSize: 13, weight: .bold)
     public static let body = UIFont.systemFont(ofSize: 11)
     public static let rate = monospacedDigit(ofSize: 11, weight: .semibold)
