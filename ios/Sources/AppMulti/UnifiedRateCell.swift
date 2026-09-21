@@ -8,12 +8,16 @@ import UIKit
 ///
 /// ```
 /// [이름] ................ [연결됨]
-/// Claude Code      Codex
-/// 34.7k tok/s      0 tok/s
+/// ┌──────────────┐ ┌──────────────┐
+/// │ Claude Code  │ │ Codex        │
+/// │ 34.7k tok/s  │ │ 0 tok/s      │
+/// └──────────────┘ └──────────────┘
+/// 카드가 넘치면 가로로 스크롤한다.
 /// ```
 final class UnifiedRateCell: UICollectionViewListCell {
     private let titleLabel = UILabel()
     private let statusLabel = UILabel()
+    private let rateScroll = UIScrollView()
     private let rateStack = UIStackView()
 
     override init(frame: CGRect) {
@@ -27,19 +31,24 @@ final class UnifiedRateCell: UICollectionViewListCell {
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleLabel.lineBreakMode = .byTruncatingTail
 
-        // 에이전트를 세로로 쌓지 않고 **가로로 나란히** 둔다. 속도만 보여주는 카드라
-        // 한 줄에 다 들어오고, 그래야 tok/s 숫자에 높이를 크게 줄 수 있다.
+        // 에이전트마다 작은 카드를 만들어 **가로로 쭉 나열**한다. 칸을 균등 분할하지 않고
+        // 카드 폭을 고정한 뒤 넘치면 가로로 스크롤한다 — 균등 분할이면 에이전트가 늘수록
+        // 칸이 좁아져 주인공인 숫자를 키울 수 없다.
         rateStack.axis = .horizontal
-        rateStack.distribution = .fillEqually
         rateStack.alignment = .top
-        rateStack.spacing = 12
+        rateStack.spacing = 10
+        rateScroll.showsHorizontalScrollIndicator = false
+        rateScroll.addSubview(rateStack)
+        rateStack.snp.makeConstraints { $0.edges.equalToSuperview() }
+        // 스크롤 뷰 높이는 카드 높이를 그대로 따라간다(세로 스크롤은 없다).
+        rateScroll.snp.makeConstraints { $0.height.equalTo(rateStack.snp.height) }
 
         let header = UIStackView(arrangedSubviews: [titleLabel, UIView(), statusLabel])
         header.axis = .horizontal
         header.spacing = 6
         header.alignment = .firstBaseline
 
-        let root = UIStackView(arrangedSubviews: [header, rateStack])
+        let root = UIStackView(arrangedSubviews: [header, rateScroll])
         root.axis = .vertical
         root.spacing = 10
 
@@ -68,42 +77,58 @@ final class UnifiedRateCell: UICollectionViewListCell {
         // arrangedSubviews 에서 빼는 것만으로는 뷰가 남으므로 superview 에서 떼어낸다.
         rateStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for rate in model.rates {
-            rateStack.addArrangedSubview(makeRateColumn(rate))
+            rateStack.addArrangedSubview(makeRateCard(rate))
         }
         // 오프라인이면 rates 가 비어 있다 — 빈 스택을 남기면 루트 스택의 간격 8pt 만 붙는다.
-        rateStack.isHidden = model.rates.isEmpty
+        rateScroll.isHidden = model.rates.isEmpty
     }
 
-    /// 한 칸 = 에이전트 하나. 이름은 작게 위에, tok/s 는 크게 아래에.
-    private func makeRateColumn(_ rate: UnifiedRate) -> UIView {
+    /// 카드 하나 = 에이전트 하나. 이름을 작게 위에, tok/s 를 크게 아래에 둔다.
+    private static let cardWidth: CGFloat = 142
+
+    private func makeRateCard(_ rate: UnifiedRate) -> UIView {
+        let card = UIView()
+        // 장치 카드(cardBackground) 위에 한 단계 어두운 카드를 얹어 경계를 낸다 —
+        // 한도 막대의 트랙과 같은 색이라 화면 전체의 "값이 놓이는 자리" 톤이 일관된다.
+        card.backgroundColor = Palette.barTrack
+        card.layer.cornerRadius = 14
+        card.layer.masksToBounds = true
+
         let name = UILabel()
-        name.font = Typography.label
+        name.font = Typography.medium
         name.textColor = Palette.subtle
         name.text = rate.name
         name.lineBreakMode = .byTruncatingTail
 
         let value = UILabel()
-        value.font = Typography.bigRate
+        value.font = Typography.hugeRate
         value.textColor = Palette.rate
         value.text = rate.rateValueText
-        // 에이전트가 셋 이상이면 칸이 좁아진다 — 자르기보다 줄여서 보여준다.
+        // "1.2M" 처럼 길어져도 자르지 않고 줄여서 보여준다.
         value.adjustsFontSizeToFitWidth = true
-        value.minimumScaleFactor = 0.6
+        value.minimumScaleFactor = 0.5
 
         let unit = UILabel()
-        unit.font = Typography.label
+        unit.font = Typography.hugeRateUnit
         unit.textColor = Palette.subtle
         unit.text = "tok/s"
+        unit.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        // 단위를 숫자의 baseline 에 맞춰 붙인다(1:1 앱 카드와 같은 모양).
-        let valueRow = UIStackView(arrangedSubviews: [value, unit, UIView()])
+        // 단위를 숫자의 baseline 에 맞춰 붙인다(레퍼런스의 "999.9 GB" 와 같은 모양).
+        let valueRow = UIStackView(arrangedSubviews: [value, unit])
         valueRow.axis = .horizontal
         valueRow.spacing = 4
         valueRow.alignment = .firstBaseline
 
-        let column = UIStackView(arrangedSubviews: [name, valueRow])
-        column.axis = .vertical
-        column.spacing = 2
-        return column
+        let content = UIStackView(arrangedSubviews: [name, valueRow])
+        content.axis = .vertical
+        content.spacing = 4
+
+        card.addSubview(content)
+        content.snp.makeConstraints { make in
+            make.edges.equalToSuperview().inset(UIEdgeInsets(top: 12, left: 14, bottom: 12, right: 14))
+        }
+        card.snp.makeConstraints { $0.width.equalTo(Self.cardWidth) }
+        return card
     }
 }
