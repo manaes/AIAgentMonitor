@@ -145,6 +145,16 @@ public final class NetworkClient: NSObject {
         public let connection: Connection
         public let channel: SealedChannel
         public let firstSnapshot: MirrorSnapshot
+        /// probe 가 **이미 연** 수신 스트림에서 다음 덩어리를 읽는다.
+        ///
+        /// 맥은 연결당 uni 스트림을 **하나만** 연다. probe 가 그걸 받아 첫 스냅샷을 읽고도
+        /// 스트림을 넘겨주지 않으면, 이어받는 쪽이 `acceptUni()` 를 다시 불러 **오지 않을
+        /// 두 번째 스트림을 영원히 기다린다** — 첫 스냅샷만 찍히고 tok/s 가 멈춘 채로
+        /// 화면이 얼어붙는다(실기에서 관찰).
+        let readChunk: () async throws -> Data
+        /// 첫 스냅샷 줄을 떼어내고 남은 바이트. 버리면 다음 줄의 앞부분이 잘려
+        /// 그 스냅샷 하나를 통째로 잃는다.
+        let pendingBuffer: Data
         /// 이번 인증에서 Mac 이 **새로 발급한** 토큰. 코드로 페어링했을 때(`.openSealedToken`)만
         /// non-nil 이다. 토큰으로 재연결한 경우엔 nil — 프로토콜상 재연결 경로엔 토큰 회전이 없다.
         /// AppMulti 는 이 값을 `Device.token` 에 저장한다(QR 의 `code` 는 6자리 페어링 코드일 뿐
@@ -236,6 +246,8 @@ public final class NetworkClient: NSObject {
                     if let snapshot = try decodeSnapshotLine(lineData, channel: channel) {
                         return ProbeResult(
                             connection: conn, channel: channel, firstSnapshot: snapshot,
+                            readChunk: { try await recv.read(sizeLimit: Self.snapshotChunkSizeLimit) },
+                            pendingBuffer: buffer,
                             issuedToken: issuedToken
                         )
                     }
@@ -513,9 +525,13 @@ public final class NetworkClient: NSObject {
     /// 정지, 버전 불일치 시 상태 전송만 담당한다 — 기존 앱의 동작은 그대로다.
     private func listenForSnapshots(conn: Connection, channel: SealedChannel) async throws {
         stateSubject.send(.streaming)
+        // 이 경로는 probe 를 거치지 않으므로 여기서 직접 받는다(맥이 여는 그 하나뿐인 스트림).
+        let recv = try await conn.acceptUni()
         do {
             try await streamSnapshots(
-                conn: conn, channel: channel,
+                readChunk: { try await recv.read(sizeLimit: Self.snapshotChunkSizeLimit) },
+                initialBuffer: Data(),
+                channel: channel,
                 shouldContinue: { [weak self] in self?.wantsRunning ?? false }
             ) { [weak self] snapshot in
                 self?.snapshotSubject.send(snapshot)
@@ -541,19 +557,23 @@ public final class NetworkClient: NSObject {
     /// 잡아 자기 방식대로 처리한다(`listenForSnapshots`는 흡수하고, `snapshotStream`은
     /// 그대로 던진다).
     private func streamSnapshots(
-        conn: Connection, channel: SealedChannel,
+        readChunk: () async throws -> Data,
+        initialBuffer: Data,
+        channel: SealedChannel,
         shouldContinue: () -> Bool,
         onSnapshot: (MirrorSnapshot) -> Void
     ) async throws {
-        let recv = try await conn.acceptUni()
-        var buffer = Data()
+        // `Connection` 을 받지 않는다 — 여기서 `acceptUni()` 를 부를 수 있으면 probe 가 이미
+        // 연 스트림을 두고 두 번째 스트림을 기다리는 실수를 다시 저지를 수 있다. 읽기 경로는
+        // 호출부가 넘긴다.
+        var buffer = initialBuffer
         while shouldContinue() {
             // `dialAuthenticateAndOpen` 과 같은 이유 — uniffi 브리지가 취소를 스스로
             // 감지한다는 보장이 없어서, onTermination 의 task.cancel() 만으로는
             // recv.read() 에서 빠져나온다는 보장이 없다. 1:1 경로에도 무해하다
             // (`wantsRunning` 이 먼저 걸린다).
             try Task.checkCancellation()
-            let chunk = try await recv.read(sizeLimit: Self.snapshotChunkSizeLimit)
+            let chunk = try await readChunk()
             buffer.append(chunk)
             while let newlineIndex = buffer.firstIndex(of: 0x0A) {
                 let lineData = Data(buffer[..<newlineIndex])
@@ -612,7 +632,9 @@ public final class NetworkClient: NSObject {
                 continuation.yield(result.firstSnapshot)
                 do {
                     try await self.streamSnapshots(
-                        conn: result.connection, channel: result.channel,
+                        readChunk: result.readChunk,
+                        initialBuffer: result.pendingBuffer,
+                        channel: result.channel,
                         shouldContinue: { true }
                     ) { snapshot in
                         continuation.yield(snapshot)
