@@ -17,6 +17,15 @@ public final class QRScannerViewController: UIViewController {
     private var didScan = false
     /// 카메라를 못 얻었을 때 대신 보여주는 안내. 두 번 붙이지 않으려고 참조를 들고 있는다.
     private var guidanceView: UIView?
+    /// "설정 열기" 로 나갔다가 권한을 켜고 돌아오는 경우를 잡는 관찰자. 안내를 걷을 때와
+    /// deinit 에서 해제한다.
+    private var didBecomeActiveObserver: NSObjectProtocol?
+
+    deinit {
+        if let didBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(didBecomeActiveObserver)
+        }
+    }
 
     public override func viewDidLoad() {
         super.viewDidLoad()
@@ -131,6 +140,8 @@ public final class QRScannerViewController: UIViewController {
 
     private func showGuidance(message: String, showsSettingsButton: Bool) {
         guard guidanceView == nil else { return }
+        // 권한 문제일 때만 복귀를 지켜본다. "카메라를 사용할 수 없습니다" 는 설정으로 풀리지 않는다.
+        if showsSettingsButton { observeReturnFromSettings() }
         let stack = UIStackView()
         stack.axis = .vertical
         stack.alignment = .center
@@ -164,6 +175,35 @@ public final class QRScannerViewController: UIViewController {
     @objc private func openSettingsTapped() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
+    }
+
+    private func observeReturnFromSettings() {
+        guard didBecomeActiveObserver == nil else { return }
+        didBecomeActiveObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.retryAfterPermissionChange()
+        }
+    }
+
+    /// 설정에서 권한을 켜고 돌아온 경우. 이미 돌고 있으면 아무것도 하지 않는다 — 카메라 권한을
+    /// 바꾸면 iOS 가 앱을 죽이는 게 보통이라 대개는 콜드런치로 돌아오지만, 살아서 돌아왔는데도
+    /// 안내 화면에 갇히면 장치를 추가할 방법이 없어진다.
+    private func retryAfterPermissionChange() {
+        guard !captureSession.isRunning,
+              AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { return }
+        removeGuidance()
+        if captureSession.inputs.isEmpty { configureCaptureSession() }
+        if view.window != nil { startCaptureSession() }
+    }
+
+    private func removeGuidance() {
+        guidanceView?.removeFromSuperview()
+        guidanceView = nil
+        if let didBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(didBecomeActiveObserver)
+            self.didBecomeActiveObserver = nil
+        }
     }
 }
 
