@@ -55,7 +55,10 @@ final class UnifiedRateCell: UICollectionViewListCell {
 
         automaticallyUpdatesBackgroundConfiguration = false
         configurationUpdateHandler = { cell, state in
-            var background = UIBackgroundConfiguration.listGroupedCell()
+            // `listGroupedCell()` 은 **섹션 안의 위치에 따라** 모서리를 깎는다(첫 셀은 위만,
+            // 마지막 셀은 아래만). 장치마다 독립된 카드로 보이려면 그 규칙이 없는 빈 배경에서
+            // 직접 구성해야 한다 — 안 그러면 첫 장치의 아래, 다음 장치의 위가 각진다.
+            var background = UIBackgroundConfiguration.clear()
             background.backgroundColor = state.isHighlighted
                 ? Palette.separator   // 눌린 동안만 한 단계 밝게
                 : Palette.cardBackground
@@ -93,9 +96,9 @@ final class UnifiedRateCell: UICollectionViewListCell {
     /// 카드 하나 = 에이전트 하나. 이름 위, 숫자 가운데, 단위 아래로 쌓아 **정사각형**으로 둔다.
     /// 단위를 숫자 옆이 아니라 아래로 내리면 필요한 폭이 줄어 정사각형이 나온다.
     ///
-    /// 폭은 숫자 크기를 따라간다 — "34.7k" 를 51pt 로 그리면 글자만 135pt 라, 카드가 작으면
-    /// 자동 축소가 걸려 키운 효과가 그대로 사라진다.
-    private static let cardSide: CGFloat = 160
+    /// 폭과 숫자 크기는 함께 움직인다 — 카드를 줄이면 그 안의 숫자도 같이 줄여야 자동 축소에
+    /// 걸리지 않는다. "34.7k"(5글자)가 여백 안에 들어가는 조합으로 맞춘 값이다.
+    private static let cardSide: CGFloat = 96
 
     private func makeRateCard(_ rate: UnifiedRate) -> UIView {
         let card = UIView()
@@ -138,12 +141,12 @@ final class UnifiedRateCell: UICollectionViewListCell {
         card.addSubview(valueStack)
         // 가운데 정렬은 위아래로 빈 띠를 만든다 — 이름은 위, 값은 아래에 고정한다.
         name.snp.makeConstraints { make in
-            make.top.equalToSuperview().offset(12)
-            make.leading.trailing.equalToSuperview().inset(12)
+            make.top.equalToSuperview().offset(10)
+            make.leading.trailing.equalToSuperview().inset(10)
         }
         valueStack.snp.makeConstraints { make in
-            make.leading.trailing.equalToSuperview().inset(12)
-            make.bottom.equalToSuperview().offset(-12)
+            make.leading.trailing.equalToSuperview().inset(10)
+            make.bottom.equalToSuperview().offset(-10)
             make.top.greaterThanOrEqualTo(name.snp.bottom).offset(6)
         }
         card.snp.makeConstraints { make in
