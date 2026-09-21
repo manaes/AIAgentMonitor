@@ -57,6 +57,37 @@ private final class DroppingStreamTransport: DeviceTransport, @unchecked Sendabl
     }
 }
 
+/// 첫 probe 는 스냅샷을 흘린 뒤 끊기고(online → unstable(1)), 이후 probe 는 dial 자체가
+/// 실패한다. 실기의 "보고 있던 Mac 이 잠들었다" 를 재현한다 — 한 번 끊긴 뒤에는 다시
+/// 붙지도 못하므로, 재탐색이 실제로 걸리면 실패 카운트가 쌓여 `.offline` 로 진행해야 한다.
+private final class DropThenUnreachableTransport: DeviceTransport, @unchecked Sendable {
+    private let snapshots: [MirrorSnapshot]
+    private let lock = NSLock()
+    private var _probeCount = 0
+    /// 재탐색이 실제로 걸렸는지는 상태값보다 probe 호출 수가 확실한 증거다.
+    var probeCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _probeCount
+    }
+
+    init(snapshots: [MirrorSnapshot]) {
+        self.snapshots = snapshots
+    }
+
+    func probe(device: Device, timeoutSeconds: Double) async throws -> AsyncThrowingStream<MirrorSnapshot, Error> {
+        lock.lock()
+        _probeCount += 1
+        let isFirst = _probeCount == 1
+        lock.unlock()
+        guard isFirst else { throw DeviceTransportError.unreachable }
+        let snapshots = self.snapshots
+        return AsyncThrowingStream { continuation in
+            for snapshot in snapshots { continuation.yield(snapshot) }
+            continuation.finish(throwing: DeviceTransportError.unreachable)
+        }
+    }
+}
+
 private func makeSnapshot(rate: Float = 1) throws -> MirrorSnapshot {
     let json = #"{"v":1,"t":1758000000,"a":[{"k":0,"r":\#(rate),"t5":0,"pj":[]}]}"#
     return try JSONDecoder().decode(MirrorSnapshot.self, from: Data(json.utf8))
@@ -184,6 +215,37 @@ final class DeviceFleetTests: XCTestCase {
         fleet.stopAll()
     }
 
+    /// Ruling 33 — 3분 타이머·당겨서 새로고침은 `.unstable` 세션도 대상으로 삼아야 한다.
+    ///
+    /// 스트림이 끊겨 `.unstable(1)` 이 된 장치를 여기서 빼면 그 장치를 다시 probe 하는
+    /// 주체가 앱 안에 하나도 남지 않는다 — 실패 카운트가 안 올라 `.offline` 로도 못 가고
+    /// "재연결 중"에 영구 정지한다.
+    func testRetriggerOfflineIncludesUnstableSessions() async throws {
+        let transport = DropThenUnreachableTransport(snapshots: [try makeSnapshot()])
+        let fleet = DeviceFleet(
+            devices: devices(1),
+            transportFactory: { _ in transport },
+            cache: nil
+        )
+
+        await fleet.startInitialRound()
+        // 스트림 종료(에러)는 세션의 probeTask 안에서 처리되므로 전이를 기다린다.
+        await waitUntil { fleet.sessions[0].status == .unstable(failureCount: 1) }
+        XCTAssertEqual(fleet.sessions[0].status, .unstable(failureCount: 1))
+        XCTAssertEqual(transport.probeCount, 1)
+
+        await fleet.retriggerOffline()
+
+        XCTAssertEqual(transport.probeCount, 2, ".unstable 세션이 재탐색 대상에서 빠졌다")
+        await waitUntil { fleet.sessions[0].status == .unstable(failureCount: 2) }
+        XCTAssertEqual(
+            fleet.sessions[0].status, .unstable(failureCount: 2),
+            "재시도가 실패 카운트를 초기화했다 — 이러면 .offline 에 영영 도달하지 못한다"
+        )
+
+        fleet.stopAll()
+    }
+
     /// 스펙 §5.2 — 캐시 쓰기는 스로틀한다. 스트리밍 중에는 스냅샷이 초당 들어오는데
     /// 그때마다 원자적 파일 쓰기를 하면 16대분 디스크 I/O 가 그대로 쌓인다.
     func testCacheWritesAreThrottledAndFlushedOnDemand() async throws {
@@ -252,6 +314,85 @@ final class DeviceFleetTests: XCTestCase {
         )
 
         fleet.stopAll()
+    }
+
+    /// Ruling 34 — `flushCache()` 는 **자기가 가진 세션**을 무조건 다시 쓴다. 방금 지운
+    /// 캐시 파일이라도 예외가 아니다.
+    ///
+    /// 장치 삭제 경로(`DeviceListViewController.removeDevice`)가 이 성질에 걸려 있다.
+    /// `cache.remove(...)` 를 먼저 하고 `startFleet()` 을 부르면, `startFleet()` 첫 줄의
+    /// `flushCache()` 가 **아직 그 장치의 세션을 들고 있는 옛 fleet** 에서 돌아 방금 지운
+    /// 파일을 되살린다. 그래서 순서가 `startFleet()` → `cache.remove(...)` 여야 한다 —
+    /// 그 시점의 새 fleet 에는 그 장치가 없으므로 이후 어떤 flush 도 파일을 되살리지 못한다.
+    func testFlushCacheRewritesEverySessionItOwnsEvenAfterCacheRemoval() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fleet-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = DeviceSnapshotCache(directory: directory)
+
+        let snapshot = try makeSnapshot(rate: 7)
+        let fleet = DeviceFleet(
+            devices: devices(1),
+            transportFactory: { _ in OpenStreamTransport(snapshots: [snapshot]) },
+            cache: cache
+        )
+
+        await fleet.startInitialRound()
+        await waitUntil { fleet.sessions[0].latest == snapshot }
+
+        cache.remove(endpointIdHex: "00")
+        XCTAssertNil(cache.load(endpointIdHex: "00"), "삭제가 먹지 않았다면 이 테스트는 의미가 없다")
+
+        fleet.flushCache()
+
+        XCTAssertEqual(
+            cache.load(endpointIdHex: "00")?.snapshot, snapshot,
+            "세션을 아직 들고 있는 fleet 의 flushCache 가 파일을 되살리지 않았다 — 삭제 순서 제약의 근거가 사라졌다"
+        )
+
+        fleet.stopAll()
+    }
+
+    /// Ruling 34 — 그 장치를 더 이상 갖지 않는 fleet 의 `flushCache()` 는 파일을 되살리지
+    /// 않는다. 삭제 순서를 뒤집었을 때 실제로 안전해지는 이유가 이것이다.
+    func testFlushCacheDoesNotRewriteDeviceTheFleetNoLongerHas() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fleet-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = DeviceSnapshotCache(directory: directory)
+
+        let snapshot = try makeSnapshot(rate: 7)
+        let old = DeviceFleet(
+            devices: devices(2),
+            transportFactory: { _ in OpenStreamTransport(snapshots: [snapshot]) },
+            cache: cache
+        )
+        await old.startInitialRound()
+        await waitUntil { old.sessions.allSatisfy { $0.latest == snapshot } }
+        old.flushCache()
+        XCTAssertNotNil(cache.load(endpointIdHex: "01"))
+
+        // 삭제 흐름: 남은 장치(00)만으로 새 fleet 을 만들고 옛 fleet 을 정리한 뒤,
+        // **그 다음에** 캐시 파일을 지운다.
+        let new = DeviceFleet(
+            devices: Array(devices(2).prefix(1)),
+            transportFactory: { _ in OpenStreamTransport(snapshots: [snapshot]) },
+            cache: cache
+        )
+        old.flushCache()
+        old.onChange = nil
+        old.stopAll()
+        cache.remove(endpointIdHex: "01")
+
+        new.flushCache()
+
+        XCTAssertNil(
+            cache.load(endpointIdHex: "01"),
+            "새 fleet 이 갖지도 않은 장치의 캐시 파일이 되살아났다"
+        )
+        XCTAssertNotNil(cache.load(endpointIdHex: "00"), "남은 장치의 캐시는 그대로여야 한다")
+
+        new.stopAll()
     }
 
     /// Ruling 23 — 상세 화면은 `DeviceSession.onChange` 를 덮어쓰지 않고 fleet 이 주는

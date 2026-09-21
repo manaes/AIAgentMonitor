@@ -278,12 +278,17 @@ final class DeviceListViewController: UIViewController {
     private func removeDevice(endpointIdHex: String) {
         do {
             _ = try environment.registry.remove(endpointIdHex: endpointIdHex)
-            // 캐시 파일도 지운다 — 남으면 고아 파일이 쌓이고, 같은 Mac 을 다시 페어링했을 때
-            // 연결되기도 전에 낡은 스냅샷이 먼저 보인다.
-            environment.cache.remove(endpointIdHex: endpointIdHex)
             // startFleet() 이 옛 fleet 전체를 stopAll() 하므로 지운 장치의 세션도 여기서 멈춘다.
             // 이 함수는 메인 액터에서 await 없이 이어지므로 그 사이에 늦은 결과가 끼어들 틈이 없다.
             startFleet()
+            // 캐시 파일 삭제는 **반드시 startFleet() 뒤**여야 한다(Ruling 34).
+            // startFleet() 첫 줄이 옛 fleet 의 flushCache() 인데, 그 옛 fleet 은 방금 지운
+            // 장치의 세션을 아직 들고 있고 그 세션의 latest 도 살아 있다 — 먼저 지우면
+            // 그 flush 가 파일을 그대로 되살린다. 여기서 지우면 새 fleet 에는 그 장치가
+            // 없으므로 이후 어떤 flush 도 파일을 다시 만들지 못한다.
+            // 남기면 고아 파일이 쌓이고, 같은 Mac 을 다시 페어링했을 때 연결되기도 전에
+            // 낡은 스냅샷이 먼저 보인다.
+            environment.cache.remove(endpointIdHex: endpointIdHex)
         } catch {
             let alert = UIAlertController(
                 title: nil, message: "삭제하지 못했습니다", preferredStyle: .alert
