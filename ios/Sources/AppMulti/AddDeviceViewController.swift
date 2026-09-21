@@ -2,6 +2,7 @@ import DesignSystem
 import Fleet
 import Foundation
 import NetworkTransport
+import ScannerUI
 import UIKit
 
 /// QR 스캔 → 이름 확인 → **코드로 연결해 토큰 발급** → 레지스트리 저장. 저장까지 끝나면

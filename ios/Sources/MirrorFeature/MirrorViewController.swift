@@ -12,6 +12,7 @@ import NetworkTransport
 import WidgetKit
 import WidgetShared
 #endif
+import ScannerUI
 import SnapKit
 import UIKit
 import Wire

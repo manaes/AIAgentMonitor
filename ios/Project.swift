@@ -75,6 +75,14 @@ let project = Project(
         unitTests("BLETransportTests", for: "BLETransport"),
         framework("DesignSystem", deps: [.target(name: "MirrorFormat"), .target(name: "Wire"), .external(name: "SnapKit")]),
         unitTests("DesignSystemTests", for: "DesignSystem"),
+        // QR 스캐너 화면만 담는 초경량 프레임워크. 의존은 UIKit + AVFoundation 뿐이다.
+        //
+        // ⚠️ DesignSystem 에 두면 안 된다 — `AIMonitorWidget` 이 DesignSystem 에 의존하므로
+        // 이미 출시 중인 위젯 바이너리에 AVFoundation 카메라 심볼이 그대로 링크된다.
+        // 위젯 plist 에는 NSCameraUsageDescription 이 없고(쓰지도 않는 권한을 선언하는 건
+        // 거짓이다), Apple 의 정적 스캔은 실행 경로가 아니라 심볼 존재 여부만 본다 —
+        // ITMS-90683 반려 경로다. 카메라를 실제로 쓰는 타겟만 이 프레임워크에 의존한다.
+        framework("ScannerUI"),
         framework("WidgetShared", deps: [.target(name: "Wire"), .target(name: "MirrorFormat")]),
         unitTests("WidgetSharedTests", for: "WidgetShared"),
         framework("Fleet", deps: [.target(name: "Wire"), .target(name: "MirrorFormat"), .target(name: "NetworkTransport")], deploymentTargets: iOS),
@@ -92,6 +100,7 @@ let project = Project(
                 .target(name: "BLETransport"),
                 .target(name: "NetworkTransport"),
                 .target(name: "DesignSystem"),
+                .target(name: "ScannerUI"),
                 .target(name: "MirrorFormat"),
                 .target(name: "WidgetShared"),
                 .external(name: "SnapKit"),
@@ -112,6 +121,7 @@ let project = Project(
             dependencies: [
                 .target(name: "BLETransport"),
                 .target(name: "DesignSystem"),
+                .target(name: "ScannerUI"),
                 .target(name: "MirrorFormat"),
                 .external(name: "SnapKit"),
             ]
@@ -202,9 +212,9 @@ let project = Project(
         // 전용 기능이니 권한 문구를 안 둬도 된다"는 예전 가정이 틀렸다(2026-09-17
         // App Store Connect ITMS-90683 반려로 확인). `MirrorFeatureBLE` 도
         // `MirrorFeature` 와 같은 소스 폴더(Sources/MirrorFeature/**)를 컴파일
-        // 하는데, 그 안의 QRScannerViewController.swift(AVFoundation 카메라 API)
-        // 자체는 `#if NETWORK_TRANSPORT` 로 감싸져 있지 않아 BLE 전용 바이너리
-        // 에도 카메라 API 심볼이 그대로 링크된다 — Apple 의 정적 바이너리 스캔은
+        // 하는데, 그 소스가 `ScannerUI`(QRScannerViewController, AVFoundation
+        // 카메라 API)를 조건 없이 import 하므로 BLE 전용 바이너리에도 카메라 API
+        // 심볼이 그대로 링크된다 — Apple 의 정적 바이너리 스캔은
         // 실제 실행 경로가 아니라 심볼 존재 여부만 보므로, 실행 중 절대 안 쓰여도
         // 권한 문구가 있어야 통과한다.
         .target(
@@ -331,6 +341,7 @@ let project = Project(
                 .target(name: "Fleet"),
                 .target(name: "NetworkTransport"),
                 .target(name: "DesignSystem"),
+                .target(name: "ScannerUI"),
                 .target(name: "MirrorFormat"),
                 .target(name: "Wire"),
                 .external(name: "SnapKit"),
