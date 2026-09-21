@@ -214,28 +214,36 @@ public final class NetworkClient: NSObject {
 
         let ep = try await resolveEndpoint()
         let conn = try await ep.connect(addr: addr, alpn: Self.alpn)
-        // code 가 nil 이면 재연결 경로(이미 저장된 토큰으로 인증), non-nil 이면 QR 로 받은
-        // 6자리 코드로 새로 페어링하는 경로다.
-        let (channel, issuedToken) = try await authenticate(conn: conn, code: code, tokens: tokens)
+        // 연결이 열린 뒤로는 어떤 경로로 실패해도 연결을 닫고 나가야 한다. 인증 거부·버전
+        // 불일치는 장치마다 **반드시** 이 경로를 밟으므로, 안 닫으면 16대에서 실패가
+        // 장치 수만큼 쌓인다. 성공 경로는 연결을 살려둔 채 반환하므로 여기서 닫지 않는다.
+        do {
+            // code 가 nil 이면 재연결 경로(이미 저장된 토큰으로 인증), non-nil 이면 QR 로 받은
+            // 6자리 코드로 새로 페어링하는 경로다.
+            let (channel, issuedToken) = try await authenticate(conn: conn, code: code, tokens: tokens)
 
-        let recv = try await conn.acceptUni()
-        var buffer = Data()
-        while true {
-            // 워치독이 cancel() 을 걸어도 uniffi 브리지가 자체적으로 취소를 감지한다는
-            // 보장이 없다 — 매 반복 최소 한 번은 취소 지점을 만들어 무한정 도는 걸 막는다.
-            try Task.checkCancellation()
-            let chunk = try await recv.read(sizeLimit: Self.snapshotChunkSizeLimit)
-            buffer.append(chunk)
-            while let newlineIndex = buffer.firstIndex(of: 0x0A) {
-                let lineData = Data(buffer[..<newlineIndex])
-                buffer.removeSubrange(buffer.startIndex...newlineIndex)
-                if let snapshot = try decodeSnapshotLine(lineData, channel: channel) {
-                    return ProbeResult(
-                        connection: conn, channel: channel, firstSnapshot: snapshot,
-                        issuedToken: issuedToken
-                    )
+            let recv = try await conn.acceptUni()
+            var buffer = Data()
+            while true {
+                // 워치독이 cancel() 을 걸어도 uniffi 브리지가 자체적으로 취소를 감지한다는
+                // 보장이 없다 — 매 반복 최소 한 번은 취소 지점을 만들어 무한정 도는 걸 막는다.
+                try Task.checkCancellation()
+                let chunk = try await recv.read(sizeLimit: Self.snapshotChunkSizeLimit)
+                buffer.append(chunk)
+                while let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                    let lineData = Data(buffer[..<newlineIndex])
+                    buffer.removeSubrange(buffer.startIndex...newlineIndex)
+                    if let snapshot = try decodeSnapshotLine(lineData, channel: channel) {
+                        return ProbeResult(
+                            connection: conn, channel: channel, firstSnapshot: snapshot,
+                            issuedToken: issuedToken
+                        )
+                    }
                 }
             }
+        } catch {
+            try? conn.close(errorCode: 0, reason: Data())
+            throw error
         }
     }
 
