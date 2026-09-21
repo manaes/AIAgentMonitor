@@ -95,6 +95,25 @@ final class DeviceRegistryTests: XCTestCase {
         }
     }
 
+    /// 한도에 도달했어도 기존 장치는 **실제로 갱신까지** 돼야 한다. 재스캔은 이름과 연결
+    /// 정보를 고치는 유일한 경로라(Ruling 25/28), 16대를 채운 사용자가 여기서 막히면
+    /// 장치를 하나 지웠다 다시 페어링하는 막다른 길밖에 남지 않는다.
+    func testUpsertAtLimitStillUpdatesExistingDevice() throws {
+        let registry = DeviceRegistry(store: MemoryStore())
+        for i in 0..<DeviceRegistry.maxDevices {
+            _ = try registry.upsert(makeDevice(String(format: "%02x", i)))
+        }
+
+        var rescanned = makeDevice("00", name: "새-호스트명")
+        rescanned.userLabel = "작업실 맥"
+        let devices = try registry.upsert(rescanned)
+
+        XCTAssertEqual(devices.count, DeviceRegistry.maxDevices, "갱신이 항목을 늘리면 안 된다")
+        let updated = try XCTUnwrap(devices.first { $0.endpointIdHex == "00" })
+        XCTAssertEqual(updated.userLabel, "작업실 맥")
+        XCTAssertEqual(updated.macHostname, "새-호스트명")
+    }
+
     /// 한도에 도달했어도 **기존 장치 갱신**은 허용돼야 한다.
     func testLimitDoesNotBlockUpdatingAnExistingDevice() throws {
         let registry = DeviceRegistry(store: MemoryStore())
@@ -113,6 +132,28 @@ final class DeviceRegistryTests: XCTestCase {
         XCTAssertThrowsError(try DeviceRegistry(store: store).load()) { error in
             XCTAssertEqual(error as? DeviceRegistryError, .corrupted)
         }
+    }
+
+    // MARK: - 사전 판정(페어링 전)
+
+    /// 페어링을 돌리기 전에 새 장치를 거절할 수 있어야 한다. 끝까지 돌린 뒤 거절하면
+    /// 사용자는 10초를 버리고 Mac 은 이미 코드를 소비해 토큰을 발급해버린다.
+    func testRejectsNewDeviceWhenFull() throws {
+        let devices = (0..<DeviceRegistry.maxDevices).map { makeDevice(String(format: "%02x", $0)) }
+
+        XCTAssertTrue(devices.rejectsNewDevice(endpointIdHex: "ff"))
+    }
+
+    /// 가득 차 있어도 **이미 등록된** 장치는 통과해야 한다. 재스캔이 이름과 연결 정보를
+    /// 고치는 유일한 경로라, 여기서 막으면 16대를 채운 사용자는 이름을 영영 못 고친다.
+    func testAcceptsKnownDeviceWhenFull() throws {
+        let devices = (0..<DeviceRegistry.maxDevices).map { makeDevice(String(format: "%02x", $0)) }
+
+        XCTAssertFalse(devices.rejectsNewDevice(endpointIdHex: "00"))
+    }
+
+    func testAcceptsNewDeviceBelowLimit() throws {
+        XCTAssertFalse([makeDevice("aa")].rejectsNewDevice(endpointIdHex: "bb"))
     }
 
     func testRemoveDeletesOnlyTheNamedDevice() throws {

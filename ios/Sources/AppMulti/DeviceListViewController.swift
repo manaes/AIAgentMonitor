@@ -239,20 +239,27 @@ final class DeviceListViewController: UIViewController {
     }
 
     @objc private func addDeviceTapped() {
-        // 스펙 6.3: 16대에 도달했으면 스캐너를 열기 전에 막는다. 페어링을 끝까지 돌린 뒤
-        // 거절하면 사용자는 10초를 버리고, 그 사이 Mac 은 CODE2 를 소비해 토큰을 발급해버려
-        // 앱이 그걸 버리는 동안 Mac 쪽만 페어링됐다고 믿는 상태가 된다.
+        // 스펙 6.3 은 "스캐너를 열기 전에 막으라" 하고 8 은 "중복 스캔은 병합" 이라 한다. 16대가
+        // 찼을 때 그냥 막으면 재스캔(= 이름·연결정보를 고치는 유일한 경로)까지 닫혀버리므로,
+        // 새 장치는 못 받는다는 사실을 먼저 알리고 기존 장치 갱신 경로는 열어둔다.
         if let count = try? environment.registry.load().count, count >= DeviceRegistry.maxDevices {
             let full = UIAlertController(
                 title: nil,
-                message: "장치는 최대 \(DeviceRegistry.maxDevices)대까지 추가할 수 있습니다",
+                message: "장치는 최대 \(DeviceRegistry.maxDevices)대까지 추가할 수 있습니다. "
+                    + "이미 등록된 Mac 을 다시 스캔하면 이름과 연결 정보를 갱신할 수 있습니다.",
                 preferredStyle: .alert
             )
-            full.addAction(UIAlertAction(title: "확인", style: .default))
+            full.addAction(UIAlertAction(title: "취소", style: .cancel))
+            full.addAction(UIAlertAction(title: "스캔", style: .default) { [weak self] _ in
+                self?.presentAddDevice()
+            })
             present(full, animated: true)
             return
         }
+        presentAddDevice()
+    }
 
+    private func presentAddDevice() {
         let add = AddDeviceViewController(registry: environment.registry)
         add.onAdded = { [weak self] _ in
             // 레지스트리가 바뀌었으므로 fleet 을 다시 만든다(startFleet 이 옛 fleet 을

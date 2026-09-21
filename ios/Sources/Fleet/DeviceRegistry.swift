@@ -77,3 +77,16 @@ public final class DeviceRegistry {
         try store.write(try JSONEncoder().encode(devices))
     }
 }
+
+public extension Collection where Element == Device {
+    /// 이 목록이 `endpointIdHex` 를 **새 장치로** 더 받을 수 없는 상태인지.
+    ///
+    /// 이미 등록된 장치면 갱신이라 한도와 무관하게 false 다 — 재스캔은 이름과 연결 정보를
+    /// 고치는 유일한 경로다(Ruling 25/28). `upsert` 의 한도 규칙과 같은 판정을 페어링을
+    /// 돌리기 **전에** 쓰려고 순수 함수로 뺐다. 화면이 QR 을 읽어 장치 신원을 안 직후
+    /// 이걸로 거절하면, 10초짜리 핸드셰이크와 Mac 쪽 코드 소비를 통째로 아낀다.
+    func rejectsNewDevice(endpointIdHex: String) -> Bool {
+        guard !contains(where: { $0.endpointIdHex == endpointIdHex }) else { return false }
+        return count >= DeviceRegistry.maxDevices
+    }
+}

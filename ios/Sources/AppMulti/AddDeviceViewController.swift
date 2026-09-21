@@ -68,14 +68,42 @@ final class AddDeviceViewController: UIViewController {
             }, animated: true)
             return
         }
-        askForName(parsed: parsed)
+
+        // 장치 신원을 안 시점이 가장 이른 거절 지점이다. 여기서 안 막으면 10초짜리 페어링을
+        // 끝까지 돌린 뒤에야 upsert 가 거절하는데, 그 사이 Mac 은 CODE2 를 소비해 토큰을
+        // 발급해버려 앱만 그걸 버리는 상태가 된다.
+        let devices: [Device]
+        do {
+            devices = try registry.load()
+        } catch {
+            // 레지스트리를 읽을 수 없으면 새 장치인지 판별할 수 없으므로 추가를 막는다.
+            // 손상된 목록 위에 덮어쓰면 살아 있던 장치들이 통째로 날아간다(Ruling 18).
+            present(
+                alert("\(DeviceRegistryError.corruptedTitle)\n\n\(DeviceRegistryError.corruptedAdvice)") {
+                    [weak self] in self?.resumeScanning()
+                },
+                animated: true
+            )
+            return
+        }
+
+        // 이미 등록된 장치는 한도와 무관하게 통과시킨다 — 재스캔은 이름과 연결 정보를 고치는
+        // 유일한 경로다(Ruling 25). 레지스트리도 같은 규칙이다(한도는 신규 삽입에만 건다).
+        let existing = devices.first { $0.endpointIdHex == parsed.endpointIdHex }
+        if devices.rejectsNewDevice(endpointIdHex: parsed.endpointIdHex) {
+            present(alert("장치는 최대 \(DeviceRegistry.maxDevices)대까지 추가할 수 있습니다") { [weak self] in
+                self?.resumeScanning()
+            }, animated: true)
+            return
+        }
+
+        askForName(parsed: parsed, existing: existing)
     }
 
-    private func askForName(parsed: NetworkClient.ParsedPairingPayload) {
+    private func askForName(parsed: NetworkClient.ParsedPairingPayload, existing: Device?) {
         // 이미 등록된 장치를 재스캔한 경우엔 사용자가 붙여 둔 이름을 먼저 보여준다.
         // Mac 호스트명을 채우면 "내가 지은 이름이 사라졌다"로 보이고, 그대로 확인을 누르면
         // 그 호스트명이 이름이 된다(upsert 는 들어온 이름이 이긴다).
-        let existing = (try? registry.load())?.first { $0.endpointIdHex == parsed.endpointIdHex }
         let defaultName = existing?.userLabel ?? parsed.macName ?? ""
         let sheet = UIAlertController(
             title: "장치 이름", message: "목록에 표시할 이름입니다.", preferredStyle: .alert
