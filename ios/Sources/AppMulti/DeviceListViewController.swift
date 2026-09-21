@@ -1,20 +1,63 @@
 import DesignSystem
 import Fleet
+import SnapKit
 import UIKit
 
 /// 페어링된 Mac 목록. 레지스트리가 바뀌면 fleet 을 통째로 다시 만든다.
 final class DeviceListViewController: UIViewController {
-    private enum Section { case main }
+    /// 보기 모드. 같은 계정의 Claude/Codex 를 여러 Mac 에서 쓰면 한도 %가 장치마다
+    /// 똑같이 반복되므로, 한도는 위에서 한 번만 합쳐 보고 아래에서 장치별 tok/s 만 본다.
+    private enum ViewMode: String {
+        case individual
+        case unified
+    }
+
+    private enum Section: Hashable {
+        /// 개별 모드의 유일한 섹션.
+        case main
+        /// 통합 모드 상단 — 에이전트 종류별 한도.
+        case quota
+        /// 통합 모드 하단 — 장치별 tok/s.
+        case rates
+
+        var headerTitle: String? {
+            switch self {
+            case .main: return nil
+            case .quota: return "한도 (통합)"
+            case .rates: return "장치별 속도"
+            }
+        }
+    }
+
+    /// 항목 식별자는 스냅샷 전체에서 유일해야 한다 — 통합 모드는 두 섹션이 서로 다른
+    /// 종류의 키(에이전트 이름 / endpointIdHex)를 쓰므로 그냥 String 으로 두면 섞인다.
+    private enum Item: Hashable {
+        case device(String)
+        case quotaAgent(String)
+
+        var deviceId: String? {
+            if case .device(let id) = self { return id }
+            return nil
+        }
+    }
+
+    /// 다음 실행에도 유지한다. 저장 실패는 무시하고 기본값(개별)으로 시작한다.
+    private static let viewModeDefaultsKey = "AppMulti.deviceListViewMode"
 
     private let environment: AppEnvironment
     private var fleet: DeviceFleet?
     private var collectionView: UICollectionView!
-    private var dataSource: UICollectionViewDiffableDataSource<Section, String>!
+    private var segmentedControl: UISegmentedControl!
+    private var dataSource: UICollectionViewDiffableDataSource<Section, Item>!
     private var reprobeTimer: Timer?
+    private var viewMode: ViewMode = .individual
 
     /// 마지막으로 그린 행. 내용이 그대로인 셀까지 reconfigure 하지 않기 위한 비교 기준이다 —
     /// 16대가 초당 한 장씩 흘리면 갱신 하나마다 보이는 셀 전부를 다시 그리게 된다.
     private var renderedRows: [String: DeviceRowModel] = [:]
+    /// 통합 모드용 비교 기준. 위와 같은 이유로 둔다(키는 각각 에이전트 이름·endpointIdHex).
+    private var renderedAgentRows: [String: UnifiedAgentRow] = [:]
+    private var renderedRateRows: [String: UnifiedDeviceRow] = [:]
     /// 오프라인 장치의 디스크 캐시 읽기 결과. 메인 스레드 동기 I/O 라 장치당 한 번만 읽는다.
     /// 값이 없다는 사실도 기억해야 하므로 옵셔널을 두 겹으로 둔다.
     private var cachedSnapshots: [String: CachedSnapshot?] = [:]
@@ -45,6 +88,8 @@ final class DeviceListViewController: UIViewController {
             barButtonSystemItem: .add, target: self, action: #selector(addDeviceTapped)
         )
 
+        restoreViewMode()
+        configureSegmentedControl()
         configureCollectionView()
         startFleet()
         observeAppLifecycle()
@@ -62,47 +107,133 @@ final class DeviceListViewController: UIViewController {
 
     // MARK: - 구성
 
-    private func configureCollectionView() {
-        var config = UICollectionLayoutListConfiguration(appearance: .insetGrouped)
-        config.backgroundColor = Palette.windowBackground
-        // 목록에서 지울 수 있어야 16대 상한에 걸렸을 때 자리를 비울 수 있다.
-        config.trailingSwipeActionsConfigurationProvider = { [weak self] indexPath in
-            guard let self, let id = self.dataSource.itemIdentifier(for: indexPath) else { return nil }
-            let delete = UIContextualAction(style: .destructive, title: "삭제") { [weak self] _, _, done in
-                self?.removeDevice(endpointIdHex: id)
-                done(true)
-            }
-            return UISwipeActionsConfiguration(actions: [delete])
-        }
-        let layout = UICollectionViewCompositionalLayout.list(using: config)
+    private func restoreViewMode() {
+        let stored = UserDefaults.standard.string(forKey: Self.viewModeDefaultsKey)
+        viewMode = stored.flatMap(ViewMode.init(rawValue:)) ?? .individual
+    }
 
-        collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: layout)
+    private func configureSegmentedControl() {
+        segmentedControl = UISegmentedControl(items: ["개별", "통합"])
+        segmentedControl.selectedSegmentIndex = (viewMode == .unified) ? 1 : 0
+        segmentedControl.addTarget(self, action: #selector(viewModeChanged), for: .valueChanged)
+        view.addSubview(segmentedControl)
+        segmentedControl.snp.makeConstraints { make in
+            make.top.equalTo(view.safeAreaLayoutGuide.snp.top).offset(8)
+            make.leading.trailing.equalToSuperview().inset(16)
+        }
+    }
+
+    private func configureCollectionView() {
+        collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: makeLayout(for: viewMode))
         collectionView.backgroundColor = Palette.windowBackground
         collectionView.delegate = self
         // 스펙 §6.1 — 그룹 안에서는 사용자가 끌어다 놓은 순서(sortIndex)를 따른다.
         collectionView.dragDelegate = self
         collectionView.dropDelegate = self
-        collectionView.dragInteractionEnabled = true
-        collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        collectionView.dragInteractionEnabled = (viewMode == .individual)
         view.addSubview(collectionView)
+        collectionView.snp.makeConstraints { make in
+            make.top.equalTo(segmentedControl.snp.bottom).offset(8)
+            make.leading.trailing.bottom.equalToSuperview()
+        }
 
-        let registration = UICollectionView.CellRegistration<DeviceCell, String> { [weak self] cell, _, id in
+        let deviceRegistration = UICollectionView.CellRegistration<DeviceCell, String> { [weak self] cell, _, id in
             guard let self, let model = self.renderedRows[id] ?? self.rowModel(for: id) else { return }
             cell.configure(model)
         }
-        dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { view, indexPath, id in
-            view.dequeueConfiguredReusableCell(using: registration, for: indexPath, item: id)
+        let quotaRegistration = UICollectionView.CellRegistration<UnifiedQuotaCell, String> { [weak self] cell, _, name in
+            guard let self, let model = self.renderedAgentRows[name] else { return }
+            cell.configure(model)
         }
-        dataSource.reorderingHandlers.canReorderItem = { _ in true }
+        let rateRegistration = UICollectionView.CellRegistration<UnifiedRateCell, String> { [weak self] cell, _, id in
+            guard let self, let model = self.renderedRateRows[id] else { return }
+            cell.configure(model)
+        }
+
+        dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { [weak self] view, indexPath, item in
+            switch item {
+            case .quotaAgent(let name):
+                return view.dequeueConfiguredReusableCell(using: quotaRegistration, for: indexPath, item: name)
+            case .device(let id):
+                // 같은 식별자라도 통합 모드 하단에서는 한도 막대 없이 tok/s 만 그린다.
+                if self?.viewMode == .unified {
+                    return view.dequeueConfiguredReusableCell(using: rateRegistration, for: indexPath, item: id)
+                }
+                return view.dequeueConfiguredReusableCell(using: deviceRegistration, for: indexPath, item: id)
+            }
+        }
+
+        let headerRegistration = UICollectionView.SupplementaryRegistration<UICollectionViewListCell>(
+            elementKind: UICollectionView.elementKindSectionHeader
+        ) { [weak self] header, _, indexPath in
+            guard let self,
+                  let section = self.dataSource.sectionIdentifier(for: indexPath.section) else { return }
+            var content = UIListContentConfiguration.groupedHeader()
+            content.text = section.headerTitle
+            content.textProperties.color = Palette.subtle
+            header.contentConfiguration = content
+        }
+        dataSource.supplementaryViewProvider = { view, _, indexPath in
+            view.dequeueConfiguredReusableSupplementary(using: headerRegistration, for: indexPath)
+        }
+
+        // 통합 모드의 하단 섹션은 순서를 바꾸는 화면이 아니다 — 거기서 끌면 개별 보기의
+        // sortIndex 만 소리 없이 바뀐다.
+        dataSource.reorderingHandlers.canReorderItem = { [weak self] _ in self?.viewMode == .individual }
         // 놓은 뒤에만 저장한다 — 드래그 도중의 중간 순서를 Keychain 에 쓰면 손가락을 뗄
         // 때까지 쓰기가 계속 일어난다.
         dataSource.reorderingHandlers.didReorder = { [weak self] transaction in
-            self?.persistOrder(transaction.finalSnapshot.itemIdentifiers)
+            self?.persistOrder(transaction.finalSnapshot.itemIdentifiers.compactMap(\.deviceId))
         }
 
         let refresh = UIRefreshControl()
         refresh.addTarget(self, action: #selector(pulledToRefresh), for: .valueChanged)
         collectionView.refreshControl = refresh
+    }
+
+    /// 스와이프 삭제는 개별 모드에서만 단다. 섹션 헤더도 모드에 따라 달라지므로 레이아웃
+    /// 자체를 모드마다 새로 만든다 — 개별 모드는 섹션이 하나뿐이라 헤더가 필요 없다.
+    private func makeLayout(for mode: ViewMode) -> UICollectionViewCompositionalLayout {
+        var config = UICollectionLayoutListConfiguration(appearance: .insetGrouped)
+        config.backgroundColor = Palette.windowBackground
+        switch mode {
+        case .individual:
+            // 목록에서 지울 수 있어야 16대 상한에 걸렸을 때 자리를 비울 수 있다.
+            config.trailingSwipeActionsConfigurationProvider = { [weak self] indexPath in
+                guard let self, let id = self.dataSource.itemIdentifier(for: indexPath)?.deviceId else { return nil }
+                let delete = UIContextualAction(style: .destructive, title: "삭제") { [weak self] _, _, done in
+                    self?.removeDevice(endpointIdHex: id)
+                    done(true)
+                }
+                return UISwipeActionsConfiguration(actions: [delete])
+            }
+        case .unified:
+            config.headerMode = .supplementary
+        }
+        return UICollectionViewCompositionalLayout.list(using: config)
+    }
+
+    @objc private func viewModeChanged(_ sender: UISegmentedControl) {
+        let mode: ViewMode = (sender.selectedSegmentIndex == 1) ? .unified : .individual
+        guard mode != viewMode else { return }
+        viewMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.viewModeDefaultsKey)
+        applyViewMode()
+    }
+
+    /// **fleet 은 다시 만들지 않는다.** 모드 전환은 표시 방식만 바꾸는 것이라 연결을 끊으면
+    /// 안 된다 — `startFleet()` 을 부르면 16대의 QUIC 연결이 전부 끊긴다. 드래그 재정렬이
+    /// 같은 이유로 `applySortOrder` 를 따로 두는 것과 같다(Ruling 38).
+    private func applyViewMode() {
+        renderedRows.removeAll()
+        renderedAgentRows.removeAll()
+        renderedRateRows.removeAll()
+        collectionView.setCollectionViewLayout(makeLayout(for: viewMode), animated: false)
+        collectionView.dragInteractionEnabled = (viewMode == .individual)
+        // 섹션 구성 자체가 바뀌고 같은 식별자가 다른 셀 종류로 넘어가므로, 한 번 비우고
+        // 새로 쌓는다. 모드 전환은 사용자가 탭할 때만 일어나므로 비용은 무시할 수 있다.
+        dataSource.applySnapshotUsingReloadData(NSDiffableDataSourceSnapshot<Section, Item>())
+        applySnapshot()
     }
 
     private func observeAppLifecycle() {
@@ -128,6 +259,8 @@ final class DeviceListViewController: UIViewController {
         fleet?.stopAll()
         cachedSnapshots.removeAll()
         renderedRows.removeAll()
+        renderedAgentRows.removeAll()
+        renderedRateRows.removeAll()
 
         let fleet = environment.makeFleet()
         fleet.onChange = { [weak self] in self?.scheduleApply() }
@@ -175,18 +308,25 @@ final class DeviceListViewController: UIViewController {
     }
 
     private func rowModel(for id: String) -> DeviceRowModel? {
-        guard let session = fleet?.sessions.first(where: { $0.device.endpointIdHex == id }) else {
-            return nil
-        }
-        // 신선도는 **스냅샷을 받은 시각**으로 계산한다. 지금 시각을 쓰면 오프라인으로 떨어진
-        // 장치가 들고 있는 낡은 스냅샷이 영원히 "방금 전"으로 보인다.
+        guard let session = session(for: id) else { return nil }
+        return DeviceListPresentation.row(
+            device: session.device, status: session.status, cached: cachedSnapshot(of: session), now: Date()
+        )
+    }
+
+    private func session(for id: String) -> DeviceSession? {
+        fleet?.sessions.first(where: { $0.device.endpointIdHex == id })
+    }
+
+    /// 세션이 들고 있는 값이 있으면 그걸 쓰고, 없으면 디스크 캐시로 떨어진다.
+    ///
+    /// 신선도는 **스냅샷을 받은 시각**으로 계산한다. 지금 시각을 쓰면 오프라인으로 떨어진
+    /// 장치가 들고 있는 낡은 스냅샷이 영원히 "방금 전"으로 보인다.
+    private func cachedSnapshot(of session: DeviceSession) -> CachedSnapshot? {
         let live = session.latest.flatMap { snapshot in
             session.latestAt.map { CachedSnapshot(snapshot: snapshot, fetchedAt: $0) }
         }
-        let cached = live ?? diskSnapshot(for: id)
-        return DeviceListPresentation.row(
-            device: session.device, status: session.status, cached: cached, now: Date()
-        )
+        return live ?? diskSnapshot(for: session.device.endpointIdHex)
     }
 
     /// 디스크 캐시는 장치당 한 번만 읽는다 — `load` 는 메인 스레드에서 파일 읽기 + JSON
@@ -198,31 +338,76 @@ final class DeviceListViewController: UIViewController {
         return loaded
     }
 
+    /// 표시 순서대로 정렬된 세션. 두 모드가 같은 정렬(`DeviceListPresentation.sorted`)을 쓴다.
+    private func orderedSessions(_ fleet: DeviceFleet) -> [DeviceSession] {
+        DeviceListPresentation.sorted(fleet.sessions.map { ($0.device, $0.status) })
+            .compactMap { device in session(for: device.endpointIdHex) }
+    }
+
     private func applySnapshot() {
         guard let fleet, let dataSource else { return }
-        let ordered = DeviceListPresentation.sorted(
-            fleet.sessions.map { ($0.device, $0.status) }
-        )
-        let ids = ordered.map(\.endpointIdHex)
+        switch viewMode {
+        case .individual: applyIndividualSnapshot(fleet: fleet, dataSource: dataSource)
+        case .unified: applyUnifiedSnapshot(fleet: fleet, dataSource: dataSource)
+        }
+    }
+
+    private func applyIndividualSnapshot(
+        fleet: DeviceFleet, dataSource: UICollectionViewDiffableDataSource<Section, Item>
+    ) {
+        let ids = orderedSessions(fleet).map(\.device.endpointIdHex)
         let previous = Set(dataSource.snapshot().itemIdentifiers)
 
         var models: [String: DeviceRowModel] = [:]
-        var changed: [String] = []
+        var changed: [Item] = []
         for id in ids {
             guard let model = rowModel(for: id) else { continue }
             models[id] = model
             // 이미 화면에 있고 내용까지 그대로면 건드리지 않는다. 새로 삽입되는 id 를
             // 여기 넣으면 삽입과 갱신이 같은 스냅샷에서 겹쳐 적용이 거부된다.
-            if previous.contains(id), renderedRows[id] != model { changed.append(id) }
+            if previous.contains(.device(id)), renderedRows[id] != model { changed.append(.device(id)) }
         }
         renderedRows = models
 
-        var snapshot = NSDiffableDataSourceSnapshot<Section, String>()
+        var snapshot = NSDiffableDataSourceSnapshot<Section, Item>()
         snapshot.appendSections([.main])
-        snapshot.appendItems(ids)
+        snapshot.appendItems(ids.map(Item.device))
         snapshot.reconfigureItems(changed)
         // 구성이 그대로면 애니메이션할 것이 없다 — 스트리밍 중 매 갱신마다 셀이 깜빡인다.
-        dataSource.apply(snapshot, animatingDifferences: previous != Set(ids))
+        dataSource.apply(snapshot, animatingDifferences: previous != Set(ids.map(Item.device)))
+    }
+
+    /// 상단은 에이전트 종류별 한도(합산 규칙은 `UnifiedPresentation` — Ruling 40),
+    /// 하단은 장치별 tok/s.
+    private func applyUnifiedSnapshot(
+        fleet: DeviceFleet, dataSource: UICollectionViewDiffableDataSource<Section, Item>
+    ) {
+        let sessions = orderedSessions(fleet)
+        let sources = sessions.map { (status: $0.status, cached: cachedSnapshot(of: $0)) }
+        let agentRows = UnifiedPresentation.agentRows(sources: sources, now: Date())
+        let deviceRows = sessions.map { session in
+            UnifiedPresentation.deviceRow(
+                device: session.device, status: session.status, cached: cachedSnapshot(of: session)
+            )
+        }
+
+        let previous = Set(dataSource.snapshot().itemIdentifiers)
+        var changed: [Item] = []
+        for row in agentRows where previous.contains(.quotaAgent(row.name)) && renderedAgentRows[row.name] != row {
+            changed.append(.quotaAgent(row.name))
+        }
+        for row in deviceRows where previous.contains(.device(row.id)) && renderedRateRows[row.id] != row {
+            changed.append(.device(row.id))
+        }
+        renderedAgentRows = Dictionary(uniqueKeysWithValues: agentRows.map { ($0.name, $0) })
+        renderedRateRows = Dictionary(uniqueKeysWithValues: deviceRows.map { ($0.id, $0) })
+
+        var snapshot = NSDiffableDataSourceSnapshot<Section, Item>()
+        snapshot.appendSections([.quota, .rates])
+        snapshot.appendItems(agentRows.map { Item.quotaAgent($0.name) }, toSection: .quota)
+        snapshot.appendItems(deviceRows.map { Item.device($0.id) }, toSection: .rates)
+        snapshot.reconfigureItems(changed)
+        dataSource.apply(snapshot, animatingDifferences: previous != Set(snapshot.itemIdentifiers))
     }
 
     // MARK: - 동작
@@ -325,11 +510,17 @@ final class DeviceListViewController: UIViewController {
 }
 
 extension DeviceListViewController: UICollectionViewDelegate {
+    /// 통합 상단(한도)은 장치 하나에 대응하지 않으므로 선택할 수 없다.
+    func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
+        dataSource.itemIdentifier(for: indexPath)?.deviceId != nil
+    }
+
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: true)
-        guard let id = dataSource.itemIdentifier(for: indexPath),
+        // 통합 하단의 장치 셀도 개별 보기와 같은 목적지 판정을 쓴다.
+        guard let id = dataSource.itemIdentifier(for: indexPath)?.deviceId,
               let fleet,
-              let session = fleet.sessions.first(where: { $0.device.endpointIdHex == id }) else {
+              let session = session(for: id) else {
             return
         }
         switch DeviceListPresentation.tapDestination(for: session.status) {
@@ -357,7 +548,9 @@ extension DeviceListViewController: UICollectionViewDragDelegate {
         _ collectionView: UICollectionView, itemsForBeginning session: UIDragSession,
         at indexPath: IndexPath
     ) -> [UIDragItem] {
-        guard let id = dataSource.itemIdentifier(for: indexPath) else { return [] }
+        // 통합 모드는 순서를 바꾸는 화면이 아니다 — 들어올려 봐야 놓을 때 취소된다.
+        guard viewMode == .individual,
+              let id = dataSource.itemIdentifier(for: indexPath)?.deviceId else { return [] }
         // 앱 밖으로 끌어낼 일이 없으므로 페이로드는 비워 두고 localObject 로만 식별한다.
         let item = UIDragItem(itemProvider: NSItemProvider())
         item.localObject = id
@@ -373,12 +566,12 @@ extension DeviceListViewController: UICollectionViewDropDelegate {
         _ collectionView: UICollectionView, dropSessionDidUpdate session: UIDropSession,
         withDestinationIndexPath destinationIndexPath: IndexPath?
     ) -> UICollectionViewDropProposal {
-        guard session.localDragSession != nil else {
+        guard viewMode == .individual, session.localDragSession != nil else {
             return UICollectionViewDropProposal(operation: .forbidden)
         }
         guard let destinationIndexPath,
               let draggedId = session.localDragSession?.items.first?.localObject as? String,
-              let destinationId = dataSource.itemIdentifier(for: destinationIndexPath),
+              let destinationId = dataSource.itemIdentifier(for: destinationIndexPath)?.deviceId,
               let from = status(of: draggedId), let to = status(of: destinationId),
               DeviceListPresentation.allowsReorder(from: from, to: to) else {
             return UICollectionViewDropProposal(operation: .cancel)
@@ -395,7 +588,7 @@ extension DeviceListViewController: UICollectionViewDropDelegate {
     ) {}
 
     private func status(of id: String) -> DeviceStatus? {
-        fleet?.sessions.first(where: { $0.device.endpointIdHex == id })?.status
+        session(for: id)?.status
     }
 
     /// 놓인 순서를 레지스트리에 저장하고, 살아 있는 세션에 그대로 얹는다.
