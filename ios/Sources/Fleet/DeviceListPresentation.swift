@@ -108,6 +108,21 @@ public enum DeviceListPresentation {
     }
 
     /// `온라인 → 불안정 → 오프라인` 그룹, 그룹 안에서는 sortIndex 순.
+    /// 아직 화면에 채울 값이 하나도 없는가 — 첫 실행처럼 모든 장치가 확인 중이고 캐시도
+    /// 없는 상태. 이때 평소 레이아웃을 그리면 통합 보기에서 한도 섹션이 헤더만 남고 비며,
+    /// 장치 카드도 이름과 상태만 있는 얇은 띠가 된다. 호출부는 대신 로딩 카드 한 장을 띄운다.
+    ///
+    /// 한 대라도 결과에 도달했으면(온라인·재연결 중·오프라인·종단) false 다 — 보여줄 게
+    /// 생겼으므로 평소 레이아웃이 맞다. 캐시가 있으면 확인 중이어도 그 값을 보여줄 수 있다.
+    public static func isAwaitingFirstResult(
+        sources: [(status: DeviceStatus, cached: CachedSnapshot?)]
+    ) -> Bool {
+        guard !sources.isEmpty else { return false }
+        return sources.allSatisfy { source in
+            source.cached == nil && (source.status == .idle || source.status == .probing)
+        }
+    }
+
     public static func sorted(_ rows: [(Device, DeviceStatus)]) -> [Device] {
         rows.sorted { lhs, rhs in
             let l = groupRank(lhs.1), r = groupRank(rhs.1)

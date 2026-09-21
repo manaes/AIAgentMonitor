@@ -289,4 +289,38 @@ final class DeviceListPresentationTests: XCTestCase {
         )
         XCTAssertFalse(DeviceListPresentation.allowsReorder(from: .offline, to: .needsRepairing))
     }
+    // MARK: - 첫 확인 대기
+
+    /// 첫 실행: 모든 장치가 확인 중이고 캐시도 없다 → 로딩 카드 한 장.
+    func testAwaitingWhenEveryDeviceIsProbingWithoutCache() {
+        XCTAssertTrue(DeviceListPresentation.isAwaitingFirstResult(sources: [
+            (status: .probing, cached: nil),
+            (status: .idle, cached: nil),
+        ]))
+    }
+
+    /// 한 대라도 결과에 도달했으면 평소 레이아웃이 맞다 — 보여줄 게 생겼다.
+    func testNotAwaitingOnceAnyDeviceSettles() {
+        XCTAssertFalse(DeviceListPresentation.isAwaitingFirstResult(sources: [
+            (status: .probing, cached: nil),
+            (status: .offline, cached: nil),
+        ]), "오프라인도 결과다 — 로딩으로 가리면 안 된다")
+    }
+
+    /// 캐시가 있으면 확인 중이어도 그 값을 보여줄 수 있다.
+    func testNotAwaitingWhenCacheExists() throws {
+        let snapshot = try JSONDecoder().decode(
+            MirrorSnapshot.self,
+            from: Data(#"{"v":1,"t":1758000000,"a":[{"k":0,"r":1,"t5":10,"pj":[]}]}"#.utf8)
+        )
+        XCTAssertFalse(DeviceListPresentation.isAwaitingFirstResult(sources: [
+            (status: .probing, cached: CachedSnapshot(snapshot: snapshot, fetchedAt: Date())),
+        ]))
+    }
+
+    /// 장치가 없으면 로딩이 아니라 빈 목록이다.
+    func testNotAwaitingWithNoDevices() {
+        XCTAssertFalse(DeviceListPresentation.isAwaitingFirstResult(sources: []))
+    }
+
 }

@@ -19,12 +19,15 @@ final class DeviceListViewController: UIViewController {
         case quota
         /// 통합 모드 하단 — 장치별 tok/s.
         case rates
+        /// 첫 확인이 끝나기 전. 두 모드 공통이며 헤더가 없다.
+        case loading
 
         var headerTitle: String? {
             switch self {
             case .main: return nil
             case .quota: return "한도 (통합)"
             case .rates: return "장치별 속도"
+            case .loading: return nil
             }
         }
     }
@@ -34,6 +37,7 @@ final class DeviceListViewController: UIViewController {
     private enum Item: Hashable {
         case device(String)
         case quotaAgent(String)
+        case loading
 
         var deviceId: String? {
             if case .device(let id) = self { return id }
@@ -150,8 +154,12 @@ final class DeviceListViewController: UIViewController {
             cell.configure(model)
         }
 
+        let loadingRegistration = UICollectionView.CellRegistration<LoadingCell, Int> { _, _, _ in }
+
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { [weak self] view, indexPath, item in
             switch item {
+            case .loading:
+                return view.dequeueConfiguredReusableCell(using: loadingRegistration, for: indexPath, item: 0)
             case .quotaAgent(let name):
                 return view.dequeueConfiguredReusableCell(using: quotaRegistration, for: indexPath, item: name)
             case .device(let id):
@@ -355,10 +363,29 @@ final class DeviceListViewController: UIViewController {
         }
     }
 
+    /// 첫 확인이 끝나기 전이면 로딩 카드 한 장만 깔고 true 를 돌려준다. 판정은
+    /// `DeviceListPresentation.isAwaitingFirstResult` 한 곳에만 둔다 — 같은 규칙을
+    /// 두 모드에 따로 적으면 어긋난다(이 저장소가 여러 번 겪은 실수다).
+    private func applyLoadingSnapshotIfAwaiting(
+        sessions: [DeviceSession], dataSource: UICollectionViewDiffableDataSource<Section, Item>
+    ) -> Bool {
+        let sources = sessions.map { (status: $0.status, cached: cachedSnapshot(of: $0)) }
+        guard DeviceListPresentation.isAwaitingFirstResult(sources: sources) else { return false }
+        let previous = Set(dataSource.snapshot().itemIdentifiers)
+        guard previous != [.loading] else { return true }   // 이미 로딩 중이면 다시 적용하지 않는다
+        var snapshot = NSDiffableDataSourceSnapshot<Section, Item>()
+        snapshot.appendSections([.loading])
+        snapshot.appendItems([.loading])
+        dataSource.apply(snapshot, animatingDifferences: false)
+        return true
+    }
+
     private func applyIndividualSnapshot(
         fleet: DeviceFleet, dataSource: UICollectionViewDiffableDataSource<Section, Item>
     ) {
-        let ids = orderedSessions(fleet).map(\.device.endpointIdHex)
+        let sessions = orderedSessions(fleet)
+        if applyLoadingSnapshotIfAwaiting(sessions: sessions, dataSource: dataSource) { return }
+        let ids = sessions.map(\.device.endpointIdHex)
         let previous = Set(dataSource.snapshot().itemIdentifiers)
 
         var models: [String: DeviceRowModel] = [:]
@@ -386,6 +413,7 @@ final class DeviceListViewController: UIViewController {
         fleet: DeviceFleet, dataSource: UICollectionViewDiffableDataSource<Section, Item>
     ) {
         let sessions = orderedSessions(fleet)
+        if applyLoadingSnapshotIfAwaiting(sessions: sessions, dataSource: dataSource) { return }
         let sources = sessions.map { (status: $0.status, cached: cachedSnapshot(of: $0)) }
         let agentRows = UnifiedPresentation.agentRows(sources: sources, now: Date())
         let deviceRows = sessions.map { session in
