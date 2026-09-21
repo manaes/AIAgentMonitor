@@ -18,6 +18,11 @@ import UIKit
 final class UnifiedRateCell: UICollectionViewListCell {
     private let titleLabel = UILabel()
     private let statusLabel = UILabel()
+    /// 카드를 직접 그린다. 셀의 `backgroundConfiguration` 을 쓰면 insetGrouped 리스트가
+    /// **섹션 안의 위치에 따라** 모서리를 깎아(첫 셀 위만, 마지막 셀 아래만) 장치마다
+    /// 독립된 카드가 되지 않는다. `UIBackgroundConfiguration.clear()` 로도 막히지 않아,
+    /// 셀 배경은 투명하게 비우고 이 컨테이너가 배경·모서리를 전부 책임진다.
+    private let container = UIView()
     private let rateScroll = UIScrollView()
     private let rateStack = UIStackView()
 
@@ -53,25 +58,26 @@ final class UnifiedRateCell: UICollectionViewListCell {
         root.axis = .vertical
         root.spacing = 10
 
+        container.backgroundColor = Palette.cardBackground
+        container.layer.cornerRadius = 14
+        container.layer.masksToBounds = true
+
         automaticallyUpdatesBackgroundConfiguration = false
         configurationUpdateHandler = { cell, state in
-            // `listGroupedCell()` 은 **섹션 안의 위치에 따라** 모서리를 깎는다(첫 셀은 위만,
-            // 마지막 셀은 아래만). 장치마다 독립된 카드로 보이려면 그 규칙이 없는 빈 배경에서
-            // 직접 구성해야 한다 — 안 그러면 첫 장치의 아래, 다음 장치의 위가 각진다.
-            var background = UIBackgroundConfiguration.clear()
-            background.backgroundColor = state.isHighlighted
+            // 셀 배경은 완전히 비운다 — 위 `container` 주석 참고.
+            cell.backgroundConfiguration = UIBackgroundConfiguration.clear()
+            guard let cell = cell as? UnifiedRateCell else { return }
+            cell.container.backgroundColor = state.isHighlighted
                 ? Palette.separator   // 눌린 동안만 한 단계 밝게
                 : Palette.cardBackground
-            // 장치마다 배경을 띄운다. 같은 색 셀이 맞붙고 구분선까지 없으면 여러 대가
-            // 하나의 긴 배경처럼 보인다 — 섹션 통째로 둥근 insetGrouped 에서 특히 그렇다.
-            background.cornerRadius = 14
-            background.backgroundInsets = NSDirectionalEdgeInsets(
-                top: 5, leading: 0, bottom: 5, trailing: 0
-            )
-            cell.backgroundConfiguration = background
         }
 
-        contentView.addSubview(root)
+        contentView.addSubview(container)
+        // 장치끼리 떨어져 보이도록 위아래를 띄운다.
+        container.snp.makeConstraints { make in
+            make.edges.equalToSuperview().inset(UIEdgeInsets(top: 5, left: 0, bottom: 5, right: 0))
+        }
+        container.addSubview(root)
         root.snp.makeConstraints { make in
             make.edges.equalToSuperview().inset(UIEdgeInsets(top: 12, left: 16, bottom: 12, right: 16))
         }
