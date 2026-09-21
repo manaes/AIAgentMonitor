@@ -83,6 +83,28 @@ final class DeviceDetailViewController: UIViewController {
         }
     }
 
+    /// 가로모드에서는 카드가 한 줄에 나란히 보이도록 `cardStack` 을 가로 축으로 바꾼다 —
+    /// 세로모드처럼 쌓으면 화면 높이가 좁아진 가로모드에서 스크롤 없이는 첫 카드조차 다
+    /// 안 보인다. 1:1 앱 `MirrorViewController.updateAgentsLayout` 과 같은 규칙이다.
+    ///
+    /// `.fillEqually` 는 숨겨진 arranged subview 를 레이아웃에서 제외하므로 보이는 카드끼리만
+    /// 폭을 나눠 갖는다. `scrollView` 가 safeAreaLayoutGuide 에 물려 있어(노치·홈 인디케이터)
+    /// 나뉜 카드도 safe area 를 벗어나지 않는다.
+    private func updateCardsLayout(for size: CGSize) {
+        let isLandscape = size.width > size.height
+        let axis: NSLayoutConstraint.Axis = isLandscape ? .horizontal : .vertical
+        // viewDidLayoutSubviews 는 자주 불린다 — 바뀔 때만 손댄다.
+        guard cardStack.axis != axis else { return }
+        cardStack.axis = axis
+        cardStack.distribution = isLandscape ? .fillEqually : .fill
+        cardStack.alignment = isLandscape ? .top : .fill
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        updateCardsLayout(for: view.bounds.size)
+    }
+
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         fleet.onSessionChange = { [weak self] changed in

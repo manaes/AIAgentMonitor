@@ -11,7 +11,7 @@ final class LoadingCell: UICollectionViewListCell {
     /// 배경·모서리를 직접 그린다 — 셀의 backgroundConfiguration 을 쓰면 insetGrouped 가
     /// 섹션 안의 위치에 따라 모서리를 깎는다(`UnifiedRateCell` 과 같은 이유).
     private let container = UIView()
-    private let spinner = UIActivityIndicatorView(style: .medium)
+    private let spinner = UIActivityIndicatorView(style: .large)
     private let label = UILabel()
 
     override init(frame: CGRect) {
@@ -21,6 +21,9 @@ final class LoadingCell: UICollectionViewListCell {
         container.layer.masksToBounds = true
 
         spinner.color = Palette.subtle
+        // 멈춰 있으면 숨겨져 스택에서 높이가 0이 된다 — 재사용으로 멈춘 채 돌아와도
+        // 자리가 사라지지 않게 한다.
+        spinner.hidesWhenStopped = false
         spinner.startAnimating()
 
         label.font = Typography.label
@@ -31,6 +34,8 @@ final class LoadingCell: UICollectionViewListCell {
         automaticallyUpdatesBackgroundConfiguration = false
         configurationUpdateHandler = { cell, _ in
             cell.backgroundConfiguration = UIBackgroundConfiguration.clear()
+            guard let cell = cell as? LoadingCell else { return }
+            cell.spinner.startAnimating()
         }
 
         let content = UIStackView(arrangedSubviews: [spinner, label])
@@ -41,12 +46,13 @@ final class LoadingCell: UICollectionViewListCell {
         contentView.addSubview(container)
         container.snp.makeConstraints { make in
             make.edges.equalToSuperview().inset(UIEdgeInsets(top: 5, left: 0, bottom: 5, right: 0))
+            // 높이를 명시하지 않으면 셀이 내용 높이(라벨 한 줄)까지만 줄어든다.
+            make.height.equalTo(148)
         }
         container.addSubview(content)
         content.snp.makeConstraints { make in
             make.center.equalToSuperview()
             make.leading.trailing.equalToSuperview().inset(16)
-            make.top.bottom.equalToSuperview().inset(36)
         }
     }
 
