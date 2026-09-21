@@ -16,6 +16,10 @@ public final class DeviceFleet {
 
     public private(set) var sessions: [DeviceSession] = []
     public var onChange: (() -> Void)?
+    /// 세션 **하나**의 변화를 보고 싶은 화면(상세)용. `onChange`(목록용, 인자 없음)와 별개로 어느 세션이
+    /// 바뀌었는지 넘긴다. 상세 화면이 viewWillAppear 에서 걸고 viewWillDisappear 에서 nil 로 되돌린다.
+    /// `DeviceSession.onChange` 자체는 fleet 소유라 화면이 건드리면 안 된다 — 캐시 쓰기가 끊긴다.
+    public var onSessionChange: ((DeviceSession) -> Void)?
 
     private let cache: DeviceSnapshotCache?
     /// 장치별 마지막 캐시 쓰기 시각. `cacheWriteInterval` 스로틀의 기준점.
@@ -106,6 +110,7 @@ public final class DeviceFleet {
                 cache?.save(snapshot, fetchedAt: session.latestAt ?? now, endpointIdHex: id)
             }
         }
+        onSessionChange?(session)
         onChange?()
     }
 }

@@ -254,6 +254,39 @@ final class DeviceFleetTests: XCTestCase {
         fleet.stopAll()
     }
 
+    /// Ruling 23 — 상세 화면은 `DeviceSession.onChange` 를 덮어쓰지 않고 fleet 이 주는
+    /// `onSessionChange` 로 한 세션을 구독한다. `onChange` 는 목록용이라 계속 살아 있어야
+    /// 하고(캐시 쓰기·목록 갱신이 그 경로에 있다), `onSessionChange` 는 **바뀐 그 세션**을
+    /// 넘겨야 상세가 자기 세션인지 가려낼 수 있다.
+    func testOnSessionChangeReportsChangedSessionAndOnChangeStillFires() async throws {
+        let transport = OpenStreamTransport(snapshots: [try makeSnapshot()])
+        let fleet = DeviceFleet(
+            devices: devices(1),
+            transportFactory: { _ in transport },
+            cache: nil
+        )
+
+        var reported: [DeviceSession] = []
+        var listRefreshCount = 0
+        fleet.onSessionChange = { reported.append($0) }
+        fleet.onChange = { listRefreshCount += 1 }
+
+        await fleet.startInitialRound()
+        await waitUntil { fleet.sessions[0].status == .online }
+
+        XCTAssertFalse(reported.isEmpty, "onSessionChange 가 한 번도 불리지 않았다")
+        XCTAssertTrue(
+            reported.allSatisfy { $0 === fleet.sessions[0] },
+            "바뀐 세션이 아닌 다른 인스턴스를 넘겼다 — 상세 화면이 identity 로 걸러낼 수 없다"
+        )
+        XCTAssertGreaterThan(
+            listRefreshCount, 0,
+            "onSessionChange 를 추가하면서 목록용 onChange 가 끊겼다"
+        )
+
+        fleet.stopAll()
+    }
+
     /// 조건이 만족될 때까지 기다린다. 고정 sleep 과 달리 느린 CI 에서도 흔들리지 않는다.
     private func waitUntil(timeout: TimeInterval = 1, _ condition: () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
