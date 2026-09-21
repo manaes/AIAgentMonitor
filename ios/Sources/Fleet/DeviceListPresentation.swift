@@ -89,6 +89,24 @@ public enum DeviceListPresentation {
         status == .needsRepairing ? .rePair : .detail
     }
 
+    /// 스캔한 QR 의 장치가 지금 고치려는 장치가 맞는지. `expected` 가 nil 이면(`+` 버튼으로
+    /// 연 일반 추가 경로) 무엇이든 통과시킨다.
+    ///
+    /// 재페어링 스캐너를 범용으로 두면, 다른 Mac 의 QR 을 스캔했을 때 고치려던 장치는 망가진
+    /// 채 그대로 두고 엉뚱한 장치가 새로 추가된다. 16대가 찬 상태라면 그 오스캔이 한도 거절로
+    /// 끝나 사용자는 영문도 모른 채 실패만 본다(스펙 §7 "그 장치용").
+    ///
+    /// 비교 전에 소문자로 맞춘다. 이 저장소는 endpointIdHex 를 소문자로 쓰는 전제이지만
+    /// (`DeviceSnapshotCache` 의 파일명), 단순 `==` 로 두면 대문자로 실려온 같은 장치의 QR 을
+    /// 남의 것으로 거절하게 된다.
+    ///
+    /// `tapDestination` 과 같은 이유로 화면 밖에 있다 — AppMultiTests 타겟이 없어 화면 안에
+    /// 두면 자동 테스트를 걸 수단이 없다.
+    public static func acceptsScannedDevice(expected: String?, scanned: String) -> Bool {
+        guard let expected else { return true }
+        return expected.lowercased() == scanned.lowercased()
+    }
+
     /// `온라인 → 불안정 → 오프라인` 그룹, 그룹 안에서는 sortIndex 순.
     public static func sorted(_ rows: [(Device, DeviceStatus)]) -> [Device] {
         rows.sorted { lhs, rhs in

@@ -13,6 +13,12 @@ import UIKit
 final class AddDeviceViewController: UIViewController {
     private let registry: DeviceRegistry
     var onAdded: ((Device) -> Void)?
+    /// 재페어링 경로에서만 채워진다. 이 값이 있으면 **그 장치의 QR 만** 받아들인다 —
+    /// 범용 스캐너로 두면 다른 Mac 을 스캔했을 때 고치려던 장치는 그대로 두고 엉뚱한 장치가
+    /// 새로 추가된다(스펙 §7 "그 장치용").
+    var expectedEndpointIdHex: String?
+    /// 안내 문구에 쓸 이름. nil 이면 hex 를 쓰지 않고 "다른 Mac 의 QR 입니다" 로만 안내한다.
+    var expectedDeviceName: String?
 
     private let scanner = QRScannerViewController()
     /// 카메라는 같은 코드를 초당 여러 번 던진다. 한 번 처리를 시작하면 흐름이 끝나거나
@@ -29,7 +35,8 @@ final class AddDeviceViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "장치 추가"
+        // 같은 화면이지만 사용자가 온 경로가 다르다 — 재페어링은 "추가"가 아니라 "고치기"다.
+        title = expectedEndpointIdHex == nil ? "장치 추가" : "재페어링"
         view.backgroundColor = Palette.windowBackground
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             title: "취소", style: .plain, target: self, action: #selector(cancelTapped)
@@ -64,6 +71,20 @@ final class AddDeviceViewController: UIViewController {
     private func handle(_ payload: String) {
         guard let parsed = NetworkClient.parseQrPayload(payload) else {
             present(alert("QR 코드를 인식하지 못했습니다") { [weak self] in
+                self?.resumeScanning()
+            }, animated: true)
+            return
+        }
+
+        // 재페어링으로 들어온 경우엔 그 장치의 QR 만 받는다. 한도 판정보다 먼저 보는 이유는,
+        // 기대 장치는 이미 등록된 장치라 한도와 무관하고(한도는 신규 삽입에만 걸린다) 오스캔이
+        // 한도 거절 문구로 끝나면 사용자가 "왜 실패했는지"를 잘못 읽기 때문이다.
+        guard DeviceListPresentation.acceptsScannedDevice(
+            expected: expectedEndpointIdHex, scanned: parsed.endpointIdHex
+        ) else {
+            let message = expectedDeviceName.map { "\($0) 의 QR 이 아닙니다. 그 Mac 화면의 QR 을 스캔하세요" }
+                ?? "다른 Mac 의 QR 입니다"
+            present(alert(message) { [weak self] in
                 self?.resumeScanning()
             }, animated: true)
             return

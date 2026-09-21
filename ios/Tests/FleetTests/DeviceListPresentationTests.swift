@@ -221,6 +221,28 @@ final class DeviceListPresentationTests: XCTestCase {
         }
     }
 
+    // MARK: - 재페어링 스캔 대상 검사
+
+    /// 스펙 §7 — 재페어링은 "그 장치용" 스캐너다. 범용으로 두면 다른 Mac 의 QR 을 스캔했을 때
+    /// 고치려던 장치는 망가진 채 두고 엉뚱한 장치가 새로 추가된다.
+    func testAcceptsScannedDeviceOnlyMatchesExpectedDevice() {
+        XCTAssertTrue(
+            DeviceListPresentation.acceptsScannedDevice(expected: nil, scanned: "aabb"),
+            "일반 추가(+) 경로는 기대 장치가 없으므로 무엇이든 통과해야 한다"
+        )
+        XCTAssertTrue(
+            DeviceListPresentation.acceptsScannedDevice(expected: "aabb", scanned: "aabb")
+        )
+        XCTAssertFalse(
+            DeviceListPresentation.acceptsScannedDevice(expected: "aabb", scanned: "ccdd"),
+            "다른 Mac 의 QR 을 받아들였다"
+        )
+        XCTAssertTrue(
+            DeviceListPresentation.acceptsScannedDevice(expected: "AABB", scanned: "aabb"),
+            "대소문자만 다른 같은 장치를 남의 것으로 거절했다"
+        )
+    }
+
     // MARK: - 정렬
 
     func testSortsOnlineThenUnstableThenOffline() {

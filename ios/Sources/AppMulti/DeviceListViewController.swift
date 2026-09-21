@@ -259,8 +259,12 @@ final class DeviceListViewController: UIViewController {
         presentAddDevice()
     }
 
-    private func presentAddDevice() {
+    /// `repairing` 이 있으면 그 장치를 고치러 온 것이다 — 스캐너가 그 장치의 QR 만 받는다.
+    /// `+` 버튼 경로는 nil 로 둬서 지금까지와 같은 범용 스캐너가 된다.
+    private func presentAddDevice(repairing device: Device? = nil) {
         let add = AddDeviceViewController(registry: environment.registry)
+        add.expectedEndpointIdHex = device?.endpointIdHex
+        add.expectedDeviceName = device?.displayName
         add.onAdded = { [weak self] _ in
             // 레지스트리가 바뀌었으므로 fleet 을 다시 만든다(startFleet 이 옛 fleet 을
             // flushCache 한 뒤 stopAll 한다 — Ruling 17).
@@ -319,7 +323,7 @@ extension DeviceListViewController: UICollectionViewDelegate {
             // 막혀 있다(종단 상태). 스펙 §7 대로 그 장치를 다시 스캔하는 경로로 보낸다.
             // 재스캔은 endpointIdHex 로 병합되므로(Ruling 25) 이름·정렬순서는 보존되고 토큰만 갱신된다.
             // 16대 사전 안내(Ruling 28)는 여기서 하지 않는다 — 기존 장치 갱신이라 한도와 무관하다.
-            presentAddDevice()
+            presentAddDevice(repairing: session.device)
         case .detail:
             // 다른 세션은 끊지 않는다 — 목록으로 돌아왔을 때 즉시 최신값이 보여야 하고,
             // 끊었다 다시 붙이면 probe 승격으로 아끼려던 비용을 그대로 다시 낸다(스펙 §4.4).
