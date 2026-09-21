@@ -8,10 +8,11 @@ import UIKit
 ///
 /// ```
 /// [이름] ................ [연결됨]
-/// ┌──────────────┐ ┌──────────────┐
-/// │ Claude Code  │ │ Codex        │
-/// │ 34.7k tok/s  │ │ 0 tok/s      │
-/// └──────────────┘ └──────────────┘
+/// ┌──────────┐ ┌──────────┐
+/// │Claude Code│ │Codex     │
+/// │  34.7k   │ │   0      │
+/// │  tok/s   │ │  tok/s   │
+/// └──────────┘ └──────────┘
 /// 카드가 넘치면 가로로 스크롤한다.
 /// ```
 final class UnifiedRateCell: UICollectionViewListCell {
@@ -83,8 +84,9 @@ final class UnifiedRateCell: UICollectionViewListCell {
         rateScroll.isHidden = model.rates.isEmpty
     }
 
-    /// 카드 하나 = 에이전트 하나. 이름을 작게 위에, tok/s 를 크게 아래에 둔다.
-    private static let cardWidth: CGFloat = 142
+    /// 카드 하나 = 에이전트 하나. 이름 위, 숫자 가운데, 단위 아래로 쌓아 **정사각형**으로 둔다.
+    /// 단위를 숫자 옆이 아니라 아래로 내리면 필요한 폭이 줄어 정사각형이 나온다.
+    private static let cardSide: CGFloat = 118
 
     private func makeRateCard(_ rate: UnifiedRate) -> UIView {
         let card = UIView()
@@ -112,23 +114,26 @@ final class UnifiedRateCell: UICollectionViewListCell {
         unit.font = Typography.hugeRateUnit
         unit.textColor = Palette.subtle
         unit.text = "tok/s"
-        unit.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        // 단위를 숫자의 baseline 에 맞춰 붙인다(레퍼런스의 "999.9 GB" 와 같은 모양).
-        let valueRow = UIStackView(arrangedSubviews: [value, unit])
-        valueRow.axis = .horizontal
-        valueRow.spacing = 4
-        valueRow.alignment = .firstBaseline
-
-        let content = UIStackView(arrangedSubviews: [name, valueRow])
+        let content = UIStackView(arrangedSubviews: [name, value, unit])
         content.axis = .vertical
-        content.spacing = 4
+        content.alignment = .leading
+        content.spacing = 2
+        // 이름과 숫자 사이만 벌려 숫자를 카드 가운데로 띄운다.
+        content.setCustomSpacing(6, after: name)
 
         card.addSubview(content)
+        // 내용이 정사각형과 다투지 않게 가운데 정렬로 두고 여백은 최소치만 강제한다.
         content.snp.makeConstraints { make in
-            make.edges.equalToSuperview().inset(UIEdgeInsets(top: 12, left: 14, bottom: 12, right: 14))
+            make.leading.trailing.equalToSuperview().inset(12)
+            make.centerY.equalToSuperview()
+            make.top.greaterThanOrEqualToSuperview().offset(10)
+            make.bottom.lessThanOrEqualToSuperview().offset(-10)
         }
-        card.snp.makeConstraints { $0.width.equalTo(Self.cardWidth) }
+        card.snp.makeConstraints { make in
+            make.width.equalTo(Self.cardSide)
+            make.height.equalTo(Self.cardSide)
+        }
         return card
     }
 }
