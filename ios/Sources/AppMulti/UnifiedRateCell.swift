@@ -59,6 +59,12 @@ final class UnifiedRateCell: UICollectionViewListCell {
             background.backgroundColor = state.isHighlighted
                 ? Palette.separator   // 눌린 동안만 한 단계 밝게
                 : Palette.cardBackground
+            // 장치마다 배경을 띄운다. 같은 색 셀이 맞붙고 구분선까지 없으면 여러 대가
+            // 하나의 긴 배경처럼 보인다 — 섹션 통째로 둥근 insetGrouped 에서 특히 그렇다.
+            background.cornerRadius = 14
+            background.backgroundInsets = NSDirectionalEdgeInsets(
+                top: 5, leading: 0, bottom: 5, trailing: 0
+            )
             cell.backgroundConfiguration = background
         }
 
