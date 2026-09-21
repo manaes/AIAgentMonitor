@@ -132,7 +132,6 @@ public enum UnifiedPresentation {
     /// 장치 한 대가 그 종류에 대해 보고한 것. 한 장치가 같은 종류를 두 줄로 보내는 일은
     /// 없어야 하지만, 토큰까지 잃지 않도록 합쳐 둔다.
     private struct Report {
-        let status: DeviceStatus
         let fetchedAt: Date
         /// %·리셋 시각·조회 실패를 가져올 대표 항목.
         let representative: MirrorAgent
@@ -146,21 +145,19 @@ public enum UnifiedPresentation {
         let matching = cached.snapshot.agents.filter { $0.kind == kind }
         guard let representative = matching.first else { return nil }
         return Report(
-            status: source.status,
             fetchedAt: cached.fetchedAt,
             representative: representative,
             tokens5h: matching.reduce(UInt64(0)) { $0 + UInt64($1.tokens5h) }
         )
     }
 
-    /// 계정 단위 값을 가져올 스냅샷 하나를 고른다.
+    /// 계정 단위 값을 가져올 스냅샷 하나를 고른다 — **오직 `fetchedAt` 이 가장 최근인 것**.
     ///
-    /// 온라인 장치가 하나라도 있으면 **온라인 것만** 후보다 — 꺼진 Mac 이 들고 있는 낡은
-    /// %가 살아 있는 값을 이기면 안 된다. `fetchedAt` 이 더 최근이어도 마찬가지다(꺼지기
-    /// 직전에 받은 값이 방금 켜진 Mac 의 값보다 새로울 수 있다).
+    /// 장치 상태로 거르지 않는다. 계정 한도는 그 Mac 이 꺼졌다고 틀려지지 않으므로, 2초 전에
+    /// 꺼진 Mac 이 보낸 42% 는 그대로 유효하다. 반대로 온라인을 우선하면 스트림이 느린 장치의
+    /// **더 오래된** 값을 고르게 된다. 온라인 장치는 초당 갱신돼 실제로는 어차피 가장 최근이라,
+    /// 상태 조건은 이득 없이 규칙만 복잡하게 만든다.
     private static func adopt(_ reports: [Report]) -> MirrorAgent? {
-        let online = reports.filter { $0.status == .online }
-        let candidates = online.isEmpty ? reports : online
-        return candidates.max(by: { $0.fetchedAt < $1.fetchedAt })?.representative
+        reports.max(by: { $0.fetchedAt < $1.fetchedAt })?.representative
     }
 }

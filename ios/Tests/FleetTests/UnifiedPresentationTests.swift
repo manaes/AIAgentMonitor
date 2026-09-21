@@ -56,9 +56,11 @@ final class UnifiedPresentationTests: XCTestCase {
         XCTAssertEqual(rows[0].tokens5h, 350)
     }
 
-    /// 꺼진 Mac 의 낡은 %가 살아 있는 값을 이기면 안 된다 — 오프라인 쪽 `fetchedAt` 이
-    /// 더 최근이어도 온라인 장치가 있으면 온라인 것만 후보다.
-    func testOnlineSnapshotWinsOverFresherOfflineOne() throws {
+    /// **"가장 신선한" 은 오직 시각 하나로 정한다 — 장치 상태로 거르지 않는다.**
+    /// 계정 한도는 그 Mac 이 꺼졌다고 틀려지지 않으므로, 2초 전에 꺼진 Mac 이 보낸 값도
+    /// 그대로 유효하다. 온라인을 우선하면 오히려 스트림이 느린 장치의 **더 오래된** 값을
+    /// 고르게 될 수 있다.
+    func testFreshestValueWinsRegardlessOfDeviceStatus() throws {
         let rows = UnifiedPresentation.agentRows(
             sources: [
                 (status: .offline, cached: try cached(#"{"k":0,"r":0,"t5":10,"p5":99,"pj":[]}"#, minutesAgo: 0)),
@@ -68,13 +70,14 @@ final class UnifiedPresentationTests: XCTestCase {
         )
 
         XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows[0].usedPct5h, 42)
-        // 토큰은 온라인 여부와 무관하게 전부 합산한다.
+        // 오프라인 쪽이 더 최근이므로 그 값을 쓴다.
+        XCTAssertEqual(rows[0].usedPct5h, 99)
+        // 토큰은 상태와 무관하게 전부 합산한다.
         XCTAssertEqual(rows[0].tokens5h, 30)
     }
 
-    /// 온라인이 하나도 없으면 오프라인끼리 `fetchedAt` 으로 겨룬다.
-    func testFreshestOfflineWinsWhenNoDeviceIsOnline() throws {
+    /// 상태가 같아도 규칙은 그대로 — `fetchedAt` 이 가장 최근인 쪽이다.
+    func testFreshestWinsAmongOfflineDevices() throws {
         let rows = UnifiedPresentation.agentRows(
             sources: [
                 (status: .offline, cached: try cached(#"{"k":0,"r":0,"t5":10,"p5":11,"pj":[]}"#, minutesAgo: 60)),
