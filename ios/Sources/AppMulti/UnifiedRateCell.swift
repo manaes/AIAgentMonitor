@@ -10,8 +10,8 @@ import UIKit
 /// [이름] ................ [연결됨]
 /// ┌──────────┐ ┌──────────┐
 /// │Claude Code│ │Codex     │
-/// │  34.7k   │ │   0      │
-/// │  tok/s   │ │  tok/s   │
+/// │    34.7k │ │        0 │
+/// │    tok/s │ │    tok/s │
 /// └──────────┘ └──────────┘
 /// 카드가 넘치면 가로로 스크롤한다.
 /// ```
@@ -110,6 +110,7 @@ final class UnifiedRateCell: UICollectionViewListCell {
         value.textColor = Palette.rate
         value.text = rate.rateValueText
         // "1.2M" 처럼 길어져도 자르지 않고 줄여서 보여준다.
+        value.textAlignment = .right
         value.adjustsFontSizeToFitWidth = true
         value.minimumScaleFactor = 0.5
 
@@ -117,21 +118,27 @@ final class UnifiedRateCell: UICollectionViewListCell {
         unit.font = Typography.hugeRateUnit
         unit.textColor = Palette.subtle
         unit.text = "tok/s"
+        unit.textAlignment = .right
 
-        let content = UIStackView(arrangedSubviews: [name, value, unit])
-        content.axis = .vertical
-        content.alignment = .leading
-        content.spacing = 2
-        // 이름과 숫자 사이만 벌려 숫자를 카드 가운데로 띄운다.
-        content.setCustomSpacing(6, after: name)
+        // 값은 오른쪽에 붙인다. 스택 정렬(.trailing)이 아니라 라벨을 카드 폭만큼 채우고
+        // textAlignment 로 미는 방식이어야 한다 — .trailing 은 라벨 폭이 글자 폭이 되어
+        // adjustsFontSizeToFitWidth 가 걸리지 않고 그냥 넘친다.
+        let valueStack = UIStackView(arrangedSubviews: [value, unit])
+        valueStack.axis = .vertical
+        valueStack.alignment = .fill
+        valueStack.spacing = 0
 
-        card.addSubview(content)
-        // 내용이 정사각형과 다투지 않게 가운데 정렬로 두고 여백은 최소치만 강제한다.
-        content.snp.makeConstraints { make in
+        card.addSubview(name)
+        card.addSubview(valueStack)
+        // 가운데 정렬은 위아래로 빈 띠를 만든다 — 이름은 위, 값은 아래에 고정한다.
+        name.snp.makeConstraints { make in
+            make.top.equalToSuperview().offset(12)
             make.leading.trailing.equalToSuperview().inset(12)
-            make.centerY.equalToSuperview()
-            make.top.greaterThanOrEqualToSuperview().offset(10)
-            make.bottom.lessThanOrEqualToSuperview().offset(-10)
+        }
+        valueStack.snp.makeConstraints { make in
+            make.leading.trailing.equalToSuperview().inset(12)
+            make.bottom.equalToSuperview().offset(-12)
+            make.top.greaterThanOrEqualTo(name.snp.bottom).offset(6)
         }
         card.snp.makeConstraints { make in
             make.width.equalTo(Self.cardSide)
