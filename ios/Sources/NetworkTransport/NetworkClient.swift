@@ -21,8 +21,17 @@ struct KeychainSharedTokenStore: SharedTokenStoring {
 }
 
 /// 전역 슬롯 구현체의 주입 지점. 바꾸는 쪽은 테스트뿐이고, `TokenSlot` 은 메인 액터 밖에서도
-/// 불리므로 `nonisolated(unsafe)` 로 둔다.
-nonisolated(unsafe) var sharedTokenStore: SharedTokenStoring = KeychainSharedTokenStore()
+/// 불리므로 `nonisolated(unsafe)` 로 둔다. setter 는 이 파일 밖으로 나가지 않는다 —
+/// 모듈 어디서나 대입할 수 있으면 프로덕션 코드가 실수로 갈아끼울 수 있다.
+nonisolated(unsafe) private(set) var sharedTokenStore: SharedTokenStoring = KeychainSharedTokenStore()
+
+extension NetworkClient {
+    /// 테스트 전용. 프로덕션 코드가 이걸 부르면 1:1 앱의 토큰 저장소가 통째로 바뀐다.
+    /// 부르는 쪽은 반드시 `defer` 로 원래 저장소를 되돌린다.
+    nonisolated static func _setSharedTokenStoreForTesting(_ store: SharedTokenStoring) {
+        sharedTokenStore = store
+    }
+}
 
 /// iroh(QUIC) 기반 미러 전송. `BLEClient` 와 같은 `MirrorTransport` 모양을 갖지만
 /// GATT 대신 QR 로 전달받은 `EndpointId` 로 직접 dial 한다. 페어링 인증 프로토콜은

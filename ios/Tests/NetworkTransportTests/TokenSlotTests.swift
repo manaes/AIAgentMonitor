@@ -31,25 +31,11 @@ private final class SpyTokenStore: SharedTokenStoring {
 
 /// `.fixed`/`.ephemeral` 슬롯이 전역 Keychain 슬롯을 절대 건드리지 않는다는 것을 고정한다.
 /// 이게 깨지면 장치 B 의 인증 실패가 1:1 앱의 페어링 토큰까지 지운다.
-/// 실제 Keychain 대신 스파이를 끼워 넣으므로(`sharedTokenStore`) 테스트 번들에
+/// 실제 Keychain 대신 스파이를 끼워 넣으므로(`_setSharedTokenStoreForTesting`) 테스트 번들에
 /// keychain-access-group 엔타이틀먼트가 없어도 `.shared` 까지 관측할 수 있다.
+/// 끼우는 테스트는 각자 `defer` 로 되돌린다 — 단언이 중간에 죽어도 프로덕션 저장소가
+/// 다음 테스트로 새면 안 된다.
 final class TokenSlotTests: XCTestCase {
-
-    private var spy: SpyTokenStore!
-    private var originalStore: SharedTokenStoring!
-
-    override func setUp() {
-        super.setUp()
-        originalStore = sharedTokenStore
-        spy = SpyTokenStore()
-        sharedTokenStore = spy
-    }
-
-    override func tearDown() {
-        sharedTokenStore = originalStore
-        spy = nil
-        super.tearDown()
-    }
 
     func testFixedSlotLoadsTheGivenToken() {
         XCTAssertEqual(NetworkClient.TokenSlot.fixed("abc").load(), "abc")
@@ -87,6 +73,11 @@ final class TokenSlotTests: XCTestCase {
     /// 여기서 전역 슬롯에 썼다면 장치를 하나 추가할 때마다 1:1 앱의 페어링이 덮어써진다.
     /// clear 도 닿으면 안 된다 — 페어링 실패가 1:1 앱의 토큰을 지운다.
     func testEphemeralSlotNeverTouchesSharedStore() {
+        let spy = SpyTokenStore()
+        let original = sharedTokenStore
+        NetworkClient._setSharedTokenStoreForTesting(spy)
+        defer { NetworkClient._setSharedTokenStoreForTesting(original) }
+
         let slot = NetworkClient.TokenSlot.ephemeral
         _ = slot.load()
         _ = slot.save("issued-token")
@@ -99,6 +90,11 @@ final class TokenSlotTests: XCTestCase {
 
     /// `.fixed` 도 같다. AppMulti 는 장치마다 토큰이 달라 전역 슬롯에 쓸 것이 없다.
     func testFixedSlotNeverTouchesSharedStore() {
+        let spy = SpyTokenStore()
+        let original = sharedTokenStore
+        NetworkClient._setSharedTokenStoreForTesting(spy)
+        defer { NetworkClient._setSharedTokenStoreForTesting(original) }
+
         let slot = NetworkClient.TokenSlot.fixed("device-token")
         _ = slot.load()
         _ = slot.save("other-token")
@@ -112,6 +108,11 @@ final class TokenSlotTests: XCTestCase {
     /// 반대 방향도 고정한다 — `.shared` 가 전역 슬롯을 안 쓰게 되면 1:1 앱이 매번
     /// 재페어링을 요구한다.
     func testSharedSlotDelegatesToSharedStore() {
+        let spy = SpyTokenStore()
+        let original = sharedTokenStore
+        NetworkClient._setSharedTokenStoreForTesting(spy)
+        defer { NetworkClient._setSharedTokenStoreForTesting(original) }
+
         spy.stored = "저장된-토큰"
         let slot = NetworkClient.TokenSlot.shared
 
