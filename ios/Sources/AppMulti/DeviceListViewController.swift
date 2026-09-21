@@ -239,17 +239,29 @@ final class DeviceListViewController: UIViewController {
     }
 
     @objc private func addDeviceTapped() {
+        // 스펙 6.3: 16대에 도달했으면 스캐너를 열기 전에 막는다. 페어링을 끝까지 돌린 뒤
+        // 거절하면 사용자는 10초를 버리고, 그 사이 Mac 은 CODE2 를 소비해 토큰을 발급해버려
+        // 앱이 그걸 버리는 동안 Mac 쪽만 페어링됐다고 믿는 상태가 된다.
+        if let count = try? environment.registry.load().count, count >= DeviceRegistry.maxDevices {
+            let full = UIAlertController(
+                title: nil,
+                message: "장치는 최대 \(DeviceRegistry.maxDevices)대까지 추가할 수 있습니다",
+                preferredStyle: .alert
+            )
+            full.addAction(UIAlertAction(title: "확인", style: .default))
+            present(full, animated: true)
+            return
+        }
+
         let add = AddDeviceViewController(registry: environment.registry)
         add.onAdded = { [weak self] _ in
             // 레지스트리가 바뀌었으므로 fleet 을 다시 만든다(startFleet 이 옛 fleet 을
             // flushCache 한 뒤 stopAll 한다 — Ruling 17).
             self?.startFleet()
         }
-        let nav = UINavigationController(rootViewController: add)
-        // Palette 은 고정 다크 팔레트인데 앱이 인터페이스 스타일을 강제하지 않는다. 라이트
-        // 모드에서는 내비 타이틀이 검정으로 그려져 스캐너의 검은 배경 위에서 안 보인다.
-        nav.overrideUserInterfaceStyle = .dark
-        present(nav, animated: true)
+        // 다크 강제는 SceneDelegate 의 루트 윈도우에서 한 번만 한다 — 모달에 따로 걸면
+        // 화면이 늘 때마다 빠뜨린다.
+        present(UINavigationController(rootViewController: add), animated: true)
     }
 
     private func removeDevice(endpointIdHex: String) {
@@ -277,8 +289,8 @@ final class DeviceListViewController: UIViewController {
         guard !hasShownRegistryError, let error = environment.registryError else { return }
         hasShownRegistryError = true
         let alert = UIAlertController(
-            title: "저장된 장치 목록을 읽지 못했습니다",
-            message: "\(error.localizedDescription)\n\n새로 페어링하면 기존 목록을 덮어씁니다.",
+            title: DeviceRegistryError.corruptedTitle,
+            message: "\(error.localizedDescription)\n\n\(DeviceRegistryError.corruptedAdvice)",
             preferredStyle: .alert
         )
         alert.addAction(UIAlertAction(title: "확인", style: .default))

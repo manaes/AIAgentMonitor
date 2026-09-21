@@ -20,6 +20,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         let window = UIWindow(windowScene: windowScene)
         window.rootViewController = UINavigationController(rootViewController: list)
+        // Palette 이 고정 다크 팔레트라 라이트 모드 기기에서는 본문만 어둡고 내비바가
+        // 밝아진다. 루트 윈도우에서 한 번 강제하면 모달·시트까지 전부 따라온다.
+        window.overrideUserInterfaceStyle = .dark
         window.makeKeyAndVisible()
         self.window = window
     }
