@@ -39,6 +39,19 @@ final class DeviceCell: UICollectionViewListCell {
         root.axis = .vertical
         root.spacing = 8
 
+        // 카드 배경을 직접 준다. 기본값(listGroupedCell)의 다크 모드 색은 `Palette.barTrack`
+        // 과 같은 #1c1c1e 라, 한도 막대의 트랙이 배경에 완전히 묻혀 그래프가 없는 것처럼
+        // 보였다(실기에서 관찰). 1:1 앱의 카드와 같은 색을 쓰면 트랙이 한 단계 어두운
+        // 홈처럼 드러난다.
+        automaticallyUpdatesBackgroundConfiguration = false
+        configurationUpdateHandler = { cell, state in
+            var background = UIBackgroundConfiguration.listGroupedCell()
+            background.backgroundColor = state.isHighlighted
+                ? Palette.separator   // 눌린 동안만 한 단계 밝게
+                : Palette.cardBackground
+            cell.backgroundConfiguration = background
+        }
+
         contentView.addSubview(root)
         root.snp.makeConstraints { make in
             make.edges.equalToSuperview().inset(UIEdgeInsets(top: 12, left: 16, bottom: 12, right: 16))

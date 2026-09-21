@@ -78,13 +78,25 @@ public final class QuotaBarView: UIView {
     }
 }
 
+/// 채움 막대. 그라디언트를 **뷰 자신의 레이어**로 쓴다.
+///
+/// 서브레이어로 두고 부모의 `layoutSubviews` 에서 프레임을 맞추면 첫 표시에 막대가 통째로
+/// 사라진다 — 레이아웃은 위에서 아래로 도는데, `PercentRow.layoutSubviews` 가 도는 시점에
+/// `fill` 은 아직 `track` 의 자식으로 배치되기 전이라 `bounds` 가 0이다. 그 뒤로 `PercentRow`
+/// 가 다시 레이아웃될 일이 없으면 그라디언트는 0 프레임인 채로 남는다.
+/// 1:1 앱은 1초 틱이 매번 다시 레이아웃해서 가려졌을 뿐, 같은 결함을 갖고 있었다.
+/// `layerClass` 로 두면 레이어가 곧 뷰라 프레임을 맞출 일 자체가 없어진다.
+private final class GradientView: UIView {
+    override class var layerClass: AnyClass { CAGradientLayer.self }
+    var gradientLayer: CAGradientLayer { layer as! CAGradientLayer }
+}
+
 /// 라벨 + 퍼센트 + 진행 바 한 세트.
 private final class PercentRow: UIView {
     private let titleLabel = UILabel()
     private let percentLabel = UILabel()
     private let track = UIView()
-    private let fill = UIView()
-    private let gradient = CAGradientLayer()
+    private let fill = GradientView()
     private var ratio: CGFloat = 0
     /// true면 percentLabel이 실제 %를, false면 안내 문구("동기화 전" 등)를 담고 있다 —
     /// 두 모드 모두 percentLabel 하나를 재사용하므로 `percentText`/`unavailableText`가
@@ -115,9 +127,8 @@ private final class PercentRow: UIView {
         track.layer.cornerRadius = 3
         track.layer.masksToBounds = true
 
-        gradient.startPoint = CGPoint(x: 0, y: 0.5)
-        gradient.endPoint = CGPoint(x: 1, y: 0.5)
-        fill.layer.addSublayer(gradient)
+        fill.gradientLayer.startPoint = CGPoint(x: 0, y: 0.5)
+        fill.gradientLayer.endPoint = CGPoint(x: 1, y: 0.5)
         fill.layer.cornerRadius = 3
         fill.layer.masksToBounds = true
 
@@ -155,7 +166,7 @@ private final class PercentRow: UIView {
         percentLabel.text = MirrorFormat.toFixed(Double(percent), 0) + "%"
         ratio = CGFloat(max(0, min(100, percent)) / 100)
         let g = QuotaDisplay.gradient(forPercent: percent)
-        gradient.colors = [UIColor(hex: g.startHex).cgColor, UIColor(hex: g.endHex).cgColor]
+        fill.gradientLayer.colors = [UIColor(hex: g.startHex).cgColor, UIColor(hex: g.endHex).cgColor]
         fill.snp.remakeConstraints { make in
             make.leading.top.bottom.equalToSuperview()
             make.width.equalToSuperview().multipliedBy(max(ratio, 0.0001)).priority(.high)
@@ -180,8 +191,4 @@ private final class PercentRow: UIView {
         setNeedsLayout()
     }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        gradient.frame = fill.bounds
-    }
 }
