@@ -28,7 +28,10 @@ final class DeviceCell: UICollectionViewListCell {
         titleLabel.lineBreakMode = .byTruncatingTail
 
         agentStack.axis = .vertical
-        agentStack.spacing = 6
+        // 에이전트 블록(이름+tok/s 줄 + 한도 막대 두 줄)끼리 붙어 있으면 어디까지가 한
+        // 에이전트인지 구분이 안 된다는 지적이 있었다(실기). 막대 사이 간격(6)보다
+        // 확실히 넓혀 블록 경계를 만든다.
+        agentStack.spacing = 14
 
         let header = UIStackView(arrangedSubviews: [titleLabel, statusLabel, UIView(), freshnessLabel])
         header.axis = .horizontal
