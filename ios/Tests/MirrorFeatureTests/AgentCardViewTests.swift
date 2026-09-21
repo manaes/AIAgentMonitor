@@ -66,6 +66,22 @@ final class AgentCardViewTests: XCTestCase {
         )
     }
 
+    /// 상세 화면은 카드를 풀에서 재사용하므로 같은 뷰가 오프라인으로 그려졌다가 다시
+    /// 온라인으로 그려진다. 이때 되돌아오지 않을 수 있는 필드는 `unitLabel.isHidden`
+    /// 하나뿐이다 — 나머지는 텍스트·색이라 어느 경로로 들어와도 덮어써진다.
+    func testReusedCardRestoresRateWhenDeviceComesBackOnline() {
+        let agent = Fixture.agent(r: 1234)
+        let card = AgentCardView()
+
+        card.configure(agent: agent, now: now, isLive: false)
+        XCTAssertNil(card.unitText)
+
+        card.configure(agent: agent, now: now)
+
+        XCTAssertEqual(card.rateText, "1.2k", "온라인으로 돌아왔는데 값 없음 표시가 남았다")
+        XCTAssertEqual(card.unitText, "tok/s", "재사용된 카드에서 단위가 숨겨진 채 남았다")
+    }
+
     func testCodexHeader() {
         let v = AgentCardView()
         v.configure(agent: Fixture.agent(k: 1), now: now)

@@ -27,6 +27,8 @@ final class DeviceDetailViewController: UIViewController {
     /// 디코드를 하므로 갱신마다 부르면 안 된다. "읽었는데 없더라"도 기억해야 해서
     /// 옵셔널을 두 겹으로 둔다(목록 화면과 같은 방식).
     private var diskSnapshot: CachedSnapshot??
+    /// 화면이 떠 있는 동안만 도는 1초 틱. 아래 viewWillAppear 의 주석 참고.
+    private var tick: Timer?
 
     init(session: DeviceSession, fleet: DeviceFleet, cache: DeviceSnapshotCache) {
         self.session = session
@@ -37,6 +39,10 @@ final class DeviceDetailViewController: UIViewController {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) 는 쓰지 않는다") }
+
+    deinit {
+        tick?.invalidate()
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -64,11 +70,14 @@ final class DeviceDetailViewController: UIViewController {
 
         // session.onChange 는 건드리지 않는다 — fleet 소유(캐시 쓰기·목록 갱신). 구독은 아래
         // viewWillAppear/viewWillDisappear 의 fleet.onSessionChange 로 한다(Ruling 23).
-        render()
+        // 첫 그리기는 viewWillAppear 가 한다 — push 되는 화면은 여기 다음에 반드시 그게
+        // 불리므로, 여기서도 부르면 첫 표시에 render 가 두 번 돈다.
 
         // 오프라인 장치에 들어왔다면 사용자 의도가 명확하므로 즉시 1회 재시도한다(스펙 §6.2).
+        // self 가 아니라 session 만 캡처한다 — 재시도는 화면을 닫아도 끝까지 도는 게 맞지만,
+        // 그 3초 동안 화면을 붙들고 있을 이유는 없다.
         if session.status == .offline || session.status == .idle {
-            Task { await session.retrigger() }
+            Task { [session] in await session.retrigger() }
         }
     }
 
@@ -80,11 +89,27 @@ final class DeviceDetailViewController: UIViewController {
             self.render()
         }
         render()
+
+        // 카운트다운과 상대 시각("N분 전")은 스냅샷이 아니라 now 로 계산되므로, 추가 전송
+        // 없이 1초마다 다시 그린다 — 1:1 앱 MirrorViewController 와 같은 이유·같은 패턴이다.
+        // 이게 없으면 오프라인 장치의 신선도가 다음 재탐색(3분)까지 그대로 굳어서, 사용자는
+        // "0분 전"이 몇 분째 안 움직이는 화면을 본다. 클로저가 self 를 약하게만 잡으므로
+        // 타이머가 화면의 수명을 늘리지 않는다.
+        //
+        // 다시 걸기 전에 먼저 끊는다 — 스와이프 뒤로가기를 중간에 취소하면 viewWillDisappear
+        // 다음에 viewWillAppear 가 한 번 더 오는데, 그냥 대입하면 옛 타이머가 무효화되지 않은
+        // 채 런루프에 남아 초당 두 번씩 그리게 된다.
+        tick?.invalidate()
+        tick = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.render() }
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         fleet.onSessionChange = nil
+        tick?.invalidate()
+        tick = nil
     }
 
     private func render() {
