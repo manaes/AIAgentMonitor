@@ -5,7 +5,12 @@ import Wire
 /// 이 타입은 전송 호출과 세대 관리만 한다.
 @MainActor
 public final class DeviceSession {
-    public static let probeTimeoutSeconds: Double = 3
+    /// 장치 하나에 붙어보는 예산. dial(hole-punch 또는 릴레이) + 인증 왕복 여러 번 +
+    /// 첫 스냅샷까지가 이 안에 들어가야 한다. 처음 3초로 잡았다가 실기에서 전부 실패했다 —
+    /// 같은 일을 하는 페어링 경로가 10초를 쓰는 데는 이유가 있었다. Endpoint 바인드는
+    /// 이 예산 밖으로 뺐으므로(`NetworkClient.endpointBindTimeoutSeconds`) 순수 dial 비용만 재면 된다.
+    /// 16대가 전부 꺼져 있어도 동시성 4라 목록이 자리잡는 최악은 4라운드 × 이 값이다.
+    public static let probeTimeoutSeconds: Double = 8
 
     /// `sortIndex` 만 드래그 재정렬로 바뀐다(`updateSortIndex`). 나머지 필드는 세션
     /// 수명 동안 고정이다 — 연결 정보가 바뀌면 fleet 을 다시 만든다.

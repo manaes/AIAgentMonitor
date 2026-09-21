@@ -2,6 +2,7 @@ import BLETransport
 import Combine
 import Foundation
 import IrohLib
+import os
 import Wire
 
 /// 토큰 전역 슬롯 접근의 이음매. 프로덕션은 Keychain(`NetworkTokenStore`) 그대로다.
@@ -179,14 +180,45 @@ public final class NetworkClient: NSObject {
     ) async throws -> ProbeResult {
         // 토큰이 코드를 이긴다 — 이미 페어링된 장치는 재연결 경로가 맞다.
         let tokens: TokenSlot = token.map(TokenSlot.fixed) ?? (code != nil ? .ephemeral : .shared)
-        let work = Task { () throws -> ProbeResult in
-            try await dialAuthenticateAndOpen(
-                endpointIdHex: endpointIdHex, relayUrl: relayUrl, addresses: addresses,
-                tokens: tokens, code: code
-            )
+        let started = Date()
+        // 바인드는 probe 예산 밖에서 기다린다(위 endpointBindTimeoutSeconds 주석 참고).
+        let endpoint = try await withBudget(Self.endpointBindTimeoutSeconds) { [self] in
+            try await resolveEndpoint()
         }
+        let bound = Date()
+        do {
+            let result = try await withBudget(timeoutSeconds) { [self] in
+                try await dialAuthenticateAndOpen(
+                    endpoint: endpoint, endpointIdHex: endpointIdHex, relayUrl: relayUrl,
+                    addresses: addresses, tokens: tokens, code: code
+                )
+            }
+            Self.logger.info("""
+                probe 성공 \(endpointIdHex.prefix(8), privacy: .public)                 bind \(Int(bound.timeIntervalSince(started) * 1000))ms                 dial+인증+첫스냅샷 \(Int(Date().timeIntervalSince(bound) * 1000))ms                 (예산 \(Int(timeoutSeconds * 1000))ms)
+                """)
+            return result
+        } catch {
+            Self.logger.error("""
+                probe 실패 \(endpointIdHex.prefix(8), privacy: .public)                 bind \(Int(bound.timeIntervalSince(started) * 1000))ms                 이후 \(Int(Date().timeIntervalSince(bound) * 1000))ms                 (예산 \(Int(timeoutSeconds * 1000))ms) — \(String(describing: error), privacy: .public)
+                """)
+            throw error
+        }
+    }
+
+    /// Endpoint 바인드 예산. UDP 소켓·릴레이 접속·discovery 준비까지 하는 **앱 전체에서 한 번뿐인**
+    /// 작업이라 장치 하나를 붙어보는 예산과 성격이 다르다. probe 예산 안에 같이 넣으면 콜드 스타트의
+    /// 첫 라운드가 통째로 타임아웃한다 — 동시에 도는 4대가 전부 같은 바인드를 기다리기 때문이다.
+    public static let endpointBindTimeoutSeconds: Double = 15
+
+    private static let logger = Logger(subsystem: "co.kr.wannypark.aiagentmirror", category: "NetworkClient")
+
+    /// `body` 가 예산 안에 끝나지 않으면 취소하고 `fetchTimedOut` 을 던진다.
+    private func withBudget<T>(
+        _ seconds: Double, _ body: @escaping @MainActor () async throws -> T
+    ) async throws -> T {
+        let work = Task { try await body() }
         let watchdog = Task {
-            try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             work.cancel()
         }
         defer { watchdog.cancel() }
@@ -213,6 +245,7 @@ public final class NetworkClient: NSObject {
     /// 받으면 연결을 닫지 않고 바로 돌려준다 — 호출부가 그대로 스트리밍을
     /// 이어가거나(AppMulti), 즉시 닫는다(위젯, `fetchSnapshotOnce`).
     private func dialAuthenticateAndOpen(
+        endpoint ep: Endpoint,
         endpointIdHex: String, relayUrl: String?, addresses: [String], tokens: TokenSlot,
         code: String? = nil
     ) async throws -> ProbeResult {
@@ -222,7 +255,6 @@ public final class NetworkClient: NSObject {
         let endpointId = try EndpointId.fromBytes(bytes: idBytes)
         let addr = EndpointAddr(id: endpointId, relayUrl: relayUrl, addresses: addresses)
 
-        let ep = try await resolveEndpoint()
         let conn = try await ep.connect(addr: addr, alpn: Self.alpn)
         // 연결이 열린 뒤로는 어떤 경로로 실패해도 연결을 닫고 나가야 한다. 인증 거부·버전
         // 불일치는 장치마다 **반드시** 이 경로를 밟으므로, 안 닫으면 16대에서 실패가
