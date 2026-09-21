@@ -90,9 +90,12 @@ public final class DeviceSession {
         // 않으면 probeNow() 가 다시 호출되어 generation 이 올라가고, 지금 한창 진행 중인 probe
         // 자체가 "늦게 도착한 결과"로 취급돼 버려 이 태스크가 막으려는 버그를 스스로 일으킨다.
         guard status != .probing else { return }
-        let nextStatus = DeviceStatusMachine.next(status, on: .retriggered)
-        // 오프라인이 아니면 재탐색 대상이 아니다(이미 붙어 있거나 붙는 중).
-        guard nextStatus == .probing || status == .idle else { return }
+        // 재탐색 대상 판정은 `DeviceStatus.isRetriggerable` 한 곳에만 둔다 — 같은 규칙을
+        // 여기와 `DeviceFleet.retriggerOffline()` 에 따로 적어 두 곳이 어긋난 것이
+        // "`.unstable` 에서 영영 못 빠져나오는" 버그였다(Ruling 33).
+        // `.probing` 은 isRetriggerable 이 false 라 위 가드와 중복이지만, 이 함수의 계약을
+        // 한 줄로 읽히게 두는 편이 낫다.
+        guard status.isRetriggerable else { return }
         await probeNow()
     }
 

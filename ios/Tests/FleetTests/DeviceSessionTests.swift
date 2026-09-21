@@ -301,4 +301,44 @@ final class DeviceSessionTests: XCTestCase {
         XCTAssertEqual(session.status, .online)
         XCTAssertEqual(transport.probeCount, 4)
     }
+
+    /// Ruling 33 — `.unstable` 세션도 재탐색 대상이다.
+    ///
+    /// 연결이 끊긴 장치는 `.unstable(1)` 이 되는데, 여기서 재탐색이 막히면 실패 카운트가
+    /// 더 오르지 않아 `.offline` 로도 못 가고 "재연결 중"에서 영구 정지한다. 3분 타이머도
+    /// 당겨서 새로고침도 이 세션을 건너뛴다.
+    func testRetriggerOnUnstableSessionProbesAgain() async throws {
+        let transport = FakeTransport()
+        transport.outcomes = [.fail(.unreachable), .stream([try makeSnapshot(rate: 1)])]
+        let session = DeviceSession(device: makeDevice(), transport: transport)
+
+        await session.probeNow()
+        XCTAssertEqual(session.status, .unstable(failureCount: 1))
+
+        await session.retrigger()
+
+        XCTAssertEqual(transport.probeCount, 2, ".unstable 세션에 재탐색이 걸리지 않았다")
+        XCTAssertEqual(session.status, .online)
+    }
+
+    /// Ruling 33 — 재시도가 실패 카운트를 초기화하지 않아야 `.offline` 에 닿는다.
+    ///
+    /// 이 테스트의 핵심은 `.unstable(1) → .unstable(2) → .offline` 이라는 **누적**이다.
+    /// `.probeStarted` 가 `.unstable(n)` 을 보존하는 규칙(DeviceStatus.swift)이 깨지면
+    /// 재시도마다 카운트가 0으로 돌아가 영원히 `.offline` 에 도달하지 못한다.
+    func testUnstableSessionReachesOfflineAfterThreeFailures() async {
+        let transport = FakeTransport()
+        transport.outcomes = [.fail(.unreachable), .fail(.unreachable), .fail(.unreachable)]
+        let session = DeviceSession(device: makeDevice(), transport: transport)
+
+        await session.probeNow()
+        XCTAssertEqual(session.status, .unstable(failureCount: 1))
+
+        await session.retrigger()
+        XCTAssertEqual(session.status, .unstable(failureCount: 2), "재시도가 실패 카운트를 초기화했다")
+
+        await session.retrigger()
+        XCTAssertEqual(session.status, .offline)
+        XCTAssertEqual(transport.probeCount, 3)
+    }
 }

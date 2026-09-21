@@ -48,9 +48,11 @@ public final class DeviceFleet {
         await runRound(sessions) { session in await session.probeNow() }
     }
 
-    /// 타이머(3분)/당겨서 새로고침. 오프라인·미탐색 세션만 다시 본다.
+    /// 타이머(3분)/당겨서 새로고침. **붙어 있지 않은 모든 세션**(미탐색·재연결 중·오프라인)을
+    /// 다시 본다. 판정은 `DeviceStatus.isRetriggerable` 한 곳에만 있다 — 여기와
+    /// `DeviceSession.retrigger()` 에 같은 규칙을 따로 적어 어긋난 것이 Ruling 33 의 버그였다.
     public func retriggerOffline() async {
-        let targets = sessions.filter { $0.status == .offline || $0.status == .idle }
+        let targets = sessions.filter { $0.status.isRetriggerable }
         await runRound(targets) { session in await session.retrigger() }
     }
 

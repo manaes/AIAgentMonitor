@@ -95,4 +95,26 @@ final class DeviceStatusTests: XCTestCase {
         // 시작된 프로빙을 상태에 반영하기만 하면 된다.
         XCTAssertEqual(next(.offline, .probeStarted), .probing)
     }
+
+    /// Ruling 33 — "재탐색 대상인가" 판정을 전 케이스로 고정한다.
+    ///
+    /// 이 판정은 3분 타이머(`DeviceFleet.retriggerOffline`)와 세션 가드
+    /// (`DeviceSession.retrigger`)가 **같이** 쓴다. 두 곳에 따로 적혀 어긋났을 때
+    /// `.unstable` 장치가 영영 "재연결 중"에 머무는 버그가 났다 — 재탐색이 막히면
+    /// 실패 카운트가 오르지 않아 `.offline` 로도 가지 못한다.
+    func testIsRetriggerableCoversEveryStatus() {
+        // 붙어 있지 않은 상태 — 다시 붙어봐야 한다.
+        XCTAssertTrue(DeviceStatus.idle.isRetriggerable)
+        XCTAssertTrue(DeviceStatus.offline.isRetriggerable)
+        XCTAssertTrue(DeviceStatus.unstable(failureCount: 1).isRetriggerable)
+        XCTAssertTrue(DeviceStatus.unstable(failureCount: 2).isRetriggerable)
+
+        // 이미 붙어 있거나 붙는 중 — 재요청은 진행 중인 probe 를 무효화한다.
+        XCTAssertFalse(DeviceStatus.probing.isRetriggerable)
+        XCTAssertFalse(DeviceStatus.online.isRetriggerable)
+
+        // 종단 상태 — 재시도로는 절대 풀리지 않는다.
+        XCTAssertFalse(DeviceStatus.needsRepairing.isRetriggerable)
+        XCTAssertFalse(DeviceStatus.versionMismatch.isRetriggerable)
+    }
 }

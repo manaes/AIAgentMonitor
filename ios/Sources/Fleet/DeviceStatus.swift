@@ -12,6 +12,25 @@ public enum DeviceStatus: Equatable, Sendable {
     case versionMismatch
 }
 
+public extension DeviceStatus {
+    /// 3분 타이머·당겨서 새로고침이 다시 붙어볼 대상인가.
+    ///
+    /// `.unstable` 이 빠지면 연결이 끊긴 장치가 영영 "재연결 중" 에 머문다 — 재탐색이
+    /// 막히면 실패 카운트가 오르지 않아 `.offline` 로도 못 간다. 이 판정이 fleet 필터와
+    /// 세션 가드 두 곳에 따로 적혀 어긋난 것이 그 버그의 형태였으므로 여기 하나만 둔다.
+    ///
+    /// `.probing` 이 false 인 것이 진행 중인 probe 에 재요청이 겹치는 걸 막는다.
+    /// 종단 상태 2종은 재시도로 풀리지 않으므로 대상이 아니다.
+    var isRetriggerable: Bool {
+        switch self {
+        case .idle, .offline, .unstable:
+            return true
+        case .probing, .online, .needsRepairing, .versionMismatch:
+            return false
+        }
+    }
+}
+
 public enum DeviceEvent: Equatable, Sendable {
     case probeStarted
     case probeSucceeded
