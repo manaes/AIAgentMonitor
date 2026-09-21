@@ -38,7 +38,8 @@ final class UnifiedQuotaCell: UICollectionViewListCell {
 
         contentView.addSubview(root)
         root.snp.makeConstraints { make in
-            make.edges.equalToSuperview().inset(UIEdgeInsets(top: 12, left: 16, bottom: 12, right: 16))
+            // 아래만 넉넉히 둔다 — 주간 막대가 카드 바닥에 붙어 답답해 보인다는 실기 피드백.
+            make.edges.equalToSuperview().inset(UIEdgeInsets(top: 12, left: 16, bottom: 28, right: 16))
         }
     }
 
