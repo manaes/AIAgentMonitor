@@ -16,6 +16,7 @@ agentdb.rvf.lock
 .superpowers/
 .claude/
 .unlazy/
+**/.swarm/
 
 # JSONL 로그/데이터 파일
 *.jsonl
