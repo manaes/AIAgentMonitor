@@ -157,7 +157,7 @@ void renderHeader(const Snapshot &s, uint64_t now) {
         if (ok && a->hasWeeklyResetAt) {
             char r[16];
             dashFormatReset(a->resetWeeklyEpochSec, now, r, sizeof(r));
-            snprintf(buf, sizeof(buf), "resets %s", r);
+            snprintf(buf, sizeof(buf), "%s", r);
         } else {
             buf[0] = '\0';
         }
@@ -177,7 +177,7 @@ void createRow(Row &r) {
     lv_arc_set_rotation(r.runArc, 270);
     lv_arc_set_bg_angles(r.runArc, 0, 360);
     styleArc(r.runArc, 2, COL_TRACK, COL_RUN);
-    lv_arc_set_value(r.runArc, 25);  // 90° 호(정적. 회전 애니메이션은 프로파일링 후)
+    lv_arc_set_value(r.runArc, 25);  // 기본 25% 호, %를 알면 renderRows 가 갱신
     r.name = makeLabel(r.card, 0, 0, 100, 14, F12, COL_TX);
     r.time = makeLabel(r.card, 0, 0, 54, 14, F12, COL_SUB, LV_TEXT_ALIGN_RIGHT);
     r.project = makeLabel(r.card, 0, 0, 84, 12, F10, COL_SUB);
@@ -273,6 +273,9 @@ void renderRow(Row &r, const SnapshotJob &j, const DashRow &d, uint64_t now) {
         setText(r.project, j.project);
         const int p = j.hasPercent ? (j.percent > 100 ? 100 : j.percent) : 0;
         if (lv_bar_get_value(r.bar) != p) lv_bar_set_value(r.bar, p, LV_ANIM_OFF);
+        // 진행중 링도 실제 %를 따른다(%를 모르면 정적 25% 호 유지).
+        const int ap = j.hasPercent ? p : 25;
+        if (lv_arc_get_value(r.runArc) != ap) lv_arc_set_value(r.runArc, ap);
         snprintf(buf, sizeof(buf), "%d%%", p);
         setText(r.pct, buf);
     } else if (d.failEmphasis) {
