@@ -126,6 +126,15 @@ impl QuotaState {
         }
     }
 
+    /// `/usage` 에서 읽은 리셋 시각을 채운다. 응답 헤더(초 단위)가 이미 있으면 그쪽이 더 정확하므로 비어 있을 때만 채운다.
+    pub fn fill_missing_resets(&self, session: Option<SystemTime>, week: Option<SystemTime>) {
+        let now = SystemTime::now();
+        for (slot, v) in [(&self.reset_at, session), (&self.reset_weekly, week)] {
+            let mut g = slot.lock().unwrap();
+            if g.is_none() { if let Some(t) = v.filter(|t| *t > now) { *g = Some(t); } }
+        }
+    }
+
     fn mark_updated(&self) {
         *self.last_updated.lock().unwrap() = Some(SystemTime::now());
     }
@@ -230,6 +239,60 @@ pub fn parse_usage_pct(output: &str) -> (Option<f32>, Option<f32>) {
         }
     }
     (session_pct, week_pct)
+}
+
+/// `/usage` 한 줄의 "resets Nov 15 at 7pm (Asia/Seoul)" 를 로컬 시각(naive)으로 읽는다.
+/// 연도가 없어서 `now` 기준 올해로 두고, 이미 하루 넘게 지났으면 내년으로 넘긴다.
+/// 날짜 없이 "resets 7pm" 만 오면 오늘, 지났으면 내일. 해석 못 하면 None.
+fn parse_reset_text(rest: &str, now: chrono::NaiveDateTime) -> Option<chrono::NaiveDateTime> {
+    use chrono::{Datelike, Duration, NaiveDate, NaiveTime};
+    let s = rest.split("resets").nth(1)?.split('(').next()?.trim();
+    let (date_part, time_part) = match s.split_once(" at ") {
+        Some((d, t)) => (Some(d.trim()), t.trim()),
+        None => (None, s),
+    };
+    let lower = time_part.to_lowercase();
+    let pm = lower.ends_with("pm");
+    let digits = lower.trim_end_matches('m').trim_end_matches(['a', 'p']);
+    let (h, m) = digits.split_once(':').unwrap_or((digits, "0"));
+    let mut h: u32 = h.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    if h == 12 { h = 0; }
+    if pm { h += 12; }
+    let time = NaiveTime::from_hms_opt(h, m, 0)?;
+    match date_part {
+        Some(d) => {
+            let (mon, day) = d.split_once(' ')?;
+            let day: u32 = day.trim().parse().ok()?;
+            let months = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+            let month = months.iter().position(|x| mon.to_lowercase().starts_with(x))? as u32 + 1;
+            let dt = NaiveDate::from_ymd_opt(now.year(), month, day)?.and_time(time);
+            Some(if dt < now - Duration::days(1) { NaiveDate::from_ymd_opt(now.year() + 1, month, day)?.and_time(time) } else { dt })
+        }
+        None => {
+            let dt = now.date().and_time(time);
+            Some(if dt < now { dt + Duration::days(1) } else { dt })
+        }
+    }
+}
+
+/// `/usage` 출력의 세션(5h)/주간(all models) 리셋 시각. 표시 시각은 사용자 로컬 타임존이므로 로컬로 해석한다.
+pub fn parse_usage_resets(output: &str) -> (Option<SystemTime>, Option<SystemTime>) {
+    use chrono::{Local, TimeZone};
+    let now = Local::now().naive_local();
+    let conv = |rest: &str| {
+        let n = parse_reset_text(rest, now)?;
+        Some(SystemTime::from(Local.from_local_datetime(&n).earliest()?))
+    };
+    let (mut s, mut w) = (None, None);
+    for line in output.lines().map(str::trim) {
+        if let Some(r) = line.strip_prefix("Current session:") {
+            s = s.or_else(|| conv(r));
+        } else if let Some(r) = line.strip_prefix("Current week (all models):") {
+            w = w.or_else(|| conv(r));
+        }
+    }
+    (s, w)
 }
 
 fn extract_leading_pct(s: &str) -> Option<f32> {
@@ -493,6 +556,18 @@ What's contributing to your limits usage?
         let (session, week) = parse_usage_pct(output);
         assert_eq!(session, Some(21.0), "Current session 값을 읽어야 한다");
         assert_eq!(week, Some(64.0), "(all models) 주간 값을 읽어야 한다 — (Fable) 이 아니라");
+    }
+
+    #[test]
+    fn parses_reset_text_from_usage_lines() {
+        use chrono::NaiveDate;
+        let now = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap().and_hms_opt(17, 0, 0).unwrap();
+        let at = |y, mo, d, h, mi| NaiveDate::from_ymd_opt(y, mo, d).unwrap().and_hms_opt(h, mi, 0).unwrap();
+        assert_eq!(parse_reset_text(" 9% used · resets Nov 15 at 7pm (Asia/Seoul)", now), Some(at(2026, 11, 15, 19, 0)));
+        assert_eq!(parse_reset_text("41% used · resets Nov 9 at 5:59pm (Asia/Seoul)", now), Some(at(2026, 11, 9, 17, 59)));
+        assert_eq!(parse_reset_text("1% used · resets Jan 2 at 12am (Asia/Seoul)", now), Some(at(2027, 1, 2, 0, 0)));
+        assert_eq!(parse_reset_text("1% used · resets 6am (Asia/Seoul)", now), Some(at(2026, 11, 10, 6, 0)));
+        assert_eq!(parse_reset_text("1% used", now), None);
     }
 
     #[test]

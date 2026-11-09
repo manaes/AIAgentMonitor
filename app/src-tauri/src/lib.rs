@@ -721,6 +721,8 @@ async fn run_claude_usage_ping_inner(quota: Arc<quota_proxy::QuotaState>) {
         ));
         return;
     }
+    let (reset_5h, reset_wk) = quota_proxy::parse_usage_resets(&stdout);
+    quota.fill_missing_resets(reset_5h, reset_wk);
     quota.apply_usage_pct(session_pct, week_pct);
     tracing::info!(?session_pct, ?week_pct, "quota 동기화(/usage) 완료");
 }
