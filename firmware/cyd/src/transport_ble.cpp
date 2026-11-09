@@ -729,8 +729,8 @@ void TransportBle::processSnapshotChunk(const uint8_t *data, size_t length) {
                     latestSnapshot_ = snap;
                     hasSnapshot_ = true;
                     lastSnapshotAtMs_ = millis();
-                    Serial.printf("BLE: ★ 스냅샷 수신 및 복호화 성공! (agentCount=%u, emittedAt=%llu)\n",
-                                  (unsigned)snap.agentCount, (unsigned long long)snap.emittedAtEpochSec);
+                    Serial.printf("BLE: ★ 스냅샷 수신 및 복호화 성공! (agentCount=%u, jobCount=%u, emittedAt=%llu)\n",
+                                  (unsigned)snap.agentCount, (unsigned)snap.jobCount, (unsigned long long)snap.emittedAtEpochSec);
                 }
             }
         }

@@ -21,6 +21,38 @@ SnapshotProjectStatus mapProjectStatus(int raw) {
     }
 }
 
+/// 고정 버퍼에 복사한다: 인쇄 가능 ASCII 만 남기고 나머지 바이트는 `?`, `cap-1` 바이트에서 자르고 NUL 종료.
+/// (맥이 이미 정리하지만 CYD 는 한글 글리프가 없어 한 번 더 막는다.)
+void copyAscii(char *dst, size_t cap, const char *src) {
+    size_t i = 0;
+    for (; src[i] != '\0' && i + 1 < cap; i++) {
+        unsigned char c = (unsigned char)src[i];
+        dst[i] = (c >= 0x20 && c < 0x7F) ? (char)c : '?';
+    }
+    dst[i] = '\0';
+}
+
+/// job 하나. 필수(`p`/`n`/`s`/`a`)가 없거나 `s` 가 0~2 밖이면 false — 호출자가 그 job 만 버린다
+/// (한 job 때문에 스냅샷 전체와 사용량 카드를 잃지 않는다).
+bool parseJob(JsonObjectConst obj, SnapshotJob &out) {
+    if (!obj["p"].is<const char *>() || !obj["n"].is<const char *>() ||
+        !obj["s"].is<int>() || !obj["a"].is<uint64_t>()) {
+        return false;
+    }
+    int s = obj["s"].as<int>();
+    if (s < 0 || s > 2) return false;
+    out = SnapshotJob();
+    copyAscii(out.project, sizeof(out.project), obj["p"].as<const char *>());
+    copyAscii(out.name, sizeof(out.name), obj["n"].as<const char *>());
+    out.state = (SnapshotJobState)s;
+    out.hasPercent = obj["g"].is<uint8_t>();
+    out.percent = out.hasPercent ? obj["g"].as<uint8_t>() : 0;
+    out.startedEpochSec = obj["a"].as<uint64_t>();
+    out.hasFinished = obj["f"].is<uint64_t>();
+    out.finishedEpochSec = out.hasFinished ? obj["f"].as<uint64_t>() : 0;
+    return true;
+}
+
 /// 프로젝트 객체 하나. 필수 필드(`id`/`n`/`m`/`r`/`t`/`s`) 중 하나라도 없거나
 /// 선언된 타입이 아니면 false — 개별 프로젝트를 조용히 스킵하지 않는다
 /// (snapshotParse 문서: 실패는 스냅샷 전체로 전파된다).
@@ -103,6 +135,18 @@ bool snapshotParse(const uint8_t *json, size_t len, Snapshot &out) {
             return false;  // out 을 건드리지 않은 채 그대로 반환.
         }
         result.agents[result.agentCount++] = a;
+    }
+
+    // 선택 필드 `j`(최근 CI job). 없으면 0개. 개별 job 이 이상하면 그 job 만 버린다.
+    if (doc["j"].is<JsonArray>()) {
+        for (JsonObjectConst jo : doc["j"].as<JsonArrayConst>()) {
+            if (result.jobCount >= SNAPSHOT_MAX_JOBS) {
+                result.jobsTruncated = true;
+                break;
+            }
+            SnapshotJob j;
+            if (parseJob(jo, j)) result.jobs[result.jobCount++] = j;
+        }
     }
 
     out = result;

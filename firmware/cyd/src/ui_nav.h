@@ -8,7 +8,8 @@
 
 enum class UiView : uint8_t {
     Cards = 0,
-    Sessions = 1,
+    Sessions = 1,  // 미구현(예약)
+    Dash = 2,      // 기본 화면: 7d 게이지 + 최근 CI job (ui_dash). 터치하면 Cards 와 번갈아 보인다.
 };
 
 /// 네비게이션 탭 바 및 하위 뷰들을 초기화한다.

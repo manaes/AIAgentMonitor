@@ -2,11 +2,27 @@
 #include "ui_nav.h"
 
 #include "ui_cards.h"
+#include "ui_dash.h"
 #include "ui_pairing.h"
 
 namespace {
 
 int g_cardsVisibleCache = -1;  // -1=미적용, 0=숨김, 1=표시
+int g_dashVisibleCache = -1;
+UiView g_view = UiView::Dash;
+
+// 화면을 터치하면 Dash <-> Cards 전환. 표시 캐시를 비워 다음 uiNavUpdate 가 새로 그리게 한다.
+void onTap(lv_event_t *) {
+    g_view = (g_view == UiView::Dash) ? UiView::Cards : UiView::Dash;
+    g_cardsVisibleCache = -1;
+    g_dashVisibleCache = -1;
+}
+
+// 카드 화면의 자식들이 터치를 삼키지 않고 루트로 올려보내게 한다.
+void bubbleAll(lv_obj_t *o) {
+    lv_obj_add_flag(o, LV_OBJ_FLAG_EVENT_BUBBLE);
+    for (uint32_t i = 0; i < lv_obj_get_child_count(o); i++) bubbleAll(lv_obj_get_child(o, i));
+}
 
 }  // namespace
 
@@ -17,21 +33,46 @@ void uiNavCreate(Transport &transport) {
     uiPairingCreate(transport);
 
     // 2. 풀스크린 카드 전용 대시보드 생성
-    uiCardsCreate(screen);
+    lv_obj_t *cards = uiCardsCreate(screen);
+    lv_obj_t *dash = uiDashCreate(screen);
+    lv_obj_add_event_cb(dash, onTap, LV_EVENT_CLICKED, nullptr);
+    if (cards) {
+        lv_obj_add_event_cb(cards, onTap, LV_EVENT_CLICKED, nullptr);
+        bubbleAll(cards);
+    }
 
-    // 초기 상태: 카드 화면 숨김 (페어링 완료 시 표시)
+    // 초기 상태: 두 화면 숨김 (페어링 완료 시 Dash 표시)
     uiCardsSetVisible(false);
+    uiDashSetVisible(false);
 }
 
-void uiNavSetView(UiView /*view*/) {
-    // 단일 카드 뷰 전용
+void uiNavSetView(UiView view) {
+    if (view != UiView::Dash && view != UiView::Cards) return;  // Sessions 는 아직 없다
+    g_view = view;
+    g_cardsVisibleCache = -1;
+    g_dashVisibleCache = -1;
 }
 
 void uiNavUpdate(Transport &transport) {
     const bool isSubscribed = (transport.authStep() == AuthStep::Subscribed && transport.isConnected());
 
-    if (isSubscribed) {
-        // 인가 완료: 카드 대시보드 활성화 및 갱신
+    if (isSubscribed && g_view == UiView::Dash) {
+        // 인가 완료 + Dash 화면: 카드는 숨기고 Dash 만 갱신한다.
+        if (g_dashVisibleCache != 1) {
+            g_dashVisibleCache = 1;
+            uiDashSetVisible(true);
+        }
+        if (g_cardsVisibleCache != 0) {
+            g_cardsVisibleCache = 0;
+            uiCardsSetVisible(false);
+        }
+        uiDashUpdate(transport);
+    } else if (isSubscribed) {
+        // 인가 완료 + 카드 화면 (터치로 전환했을 때): Dash 는 숨긴다.
+        if (g_dashVisibleCache != 0) {
+            g_dashVisibleCache = 0;
+            uiDashSetVisible(false);
+        }
         bool justShown = false;
         if (g_cardsVisibleCache != 1) {
             g_cardsVisibleCache = 1;
@@ -76,6 +117,10 @@ void uiNavUpdate(Transport &transport) {
         }
     } else {
         // 연결 끊김 / 재연결 중 / 페어링 대기: 카드 대시보드 숨김
+        if (g_dashVisibleCache != 0) {
+            g_dashVisibleCache = 0;
+            uiDashSetVisible(false);
+        }
         if (g_cardsVisibleCache != 0) {
             g_cardsVisibleCache = 0;
             uiCardsSetVisible(false);

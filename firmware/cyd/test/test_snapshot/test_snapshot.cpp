@@ -181,6 +181,76 @@ void test_agents_beyond_cap_are_truncated_not_failed() {
     TEST_ASSERT_TRUE(s.agentsTruncated);
 }
 
+// ── 최근 CI job `j[]` (Task 3) ─────────────────────────────────────────────
+
+void test_parses_four_jobs() {
+    const char *json =
+        "{\"v\":1,\"t\":1755500000,\"a\":[],\"j\":["
+        "{\"p\":\"seqnex\",\"n\":\"build-ios\",\"s\":0,\"g\":60,\"a\":1755499778},"
+        "{\"p\":\"seqnex\",\"n\":\"unit-test\",\"s\":1,\"a\":1755499700,\"f\":1755499880},"
+        "{\"p\":\"api\",\"n\":\"deploy\",\"s\":2,\"a\":1755499500,\"f\":1755499803},"
+        "{\"p\":\"web\",\"n\":\"lint\",\"s\":1,\"a\":1755499000,\"f\":1755499048}]}";
+    Snapshot s;
+    TEST_ASSERT_TRUE(parse(json, s));
+    TEST_ASSERT_EQUAL_size_t(4, s.jobCount);
+    TEST_ASSERT_FALSE(s.jobsTruncated);
+    TEST_ASSERT_EQUAL_STRING("seqnex", s.jobs[0].project);
+    TEST_ASSERT_EQUAL_STRING("build-ios", s.jobs[0].name);
+    TEST_ASSERT_TRUE(s.jobs[0].state == SnapshotJobState::Running);
+    TEST_ASSERT_TRUE(s.jobs[0].hasPercent);
+    TEST_ASSERT_EQUAL_UINT8(60, s.jobs[0].percent);
+    TEST_ASSERT_FALSE(s.jobs[0].hasFinished);
+    TEST_ASSERT_TRUE(s.jobs[1].state == SnapshotJobState::Success);
+    TEST_ASSERT_TRUE(s.jobs[1].hasFinished);
+    TEST_ASSERT_EQUAL_UINT64(1755499880ULL, s.jobs[1].finishedEpochSec);
+    TEST_ASSERT_TRUE(s.jobs[2].state == SnapshotJobState::Failed);
+    TEST_ASSERT_EQUAL_UINT64(1755499500ULL, s.jobs[2].startedEpochSec);
+}
+
+void test_missing_j_key_means_zero_jobs_not_failure() {
+    Snapshot s;
+    TEST_ASSERT_TRUE(parse("{\"v\":1,\"t\":1,\"a\":[]}", s));
+    TEST_ASSERT_EQUAL_size_t(0, s.jobCount);
+}
+
+void test_more_than_four_jobs_truncated() {
+    String json = "{\"v\":1,\"t\":1,\"a\":[],\"j\":[";
+    for (int i = 0; i < 6; i++) {
+        if (i > 0) json += ",";
+        json += "{\"p\":\"a\",\"n\":\"j\",\"s\":1,\"a\":1,\"f\":2}";
+    }
+    json += "]}";
+    Snapshot s;
+    TEST_ASSERT_TRUE(parse(json.c_str(), s));
+    TEST_ASSERT_EQUAL_size_t(SNAPSHOT_MAX_JOBS, s.jobCount);
+    TEST_ASSERT_TRUE(s.jobsTruncated);
+}
+
+void test_long_and_non_ascii_names_are_safe() {
+    // 맥이 이미 정리하지만 CYD 도 방어한다: 40바이트 이름과 UTF-8 바이트(0xEC 0x8A 0xA4)
+    const char *json =
+        "{\"v\":1,\"t\":1,\"a\":[],\"j\":[{\"p\":\"abcdefghijklmnopqrstuvwxyz\","
+        "\"n\":\"deploy-\xEC\x8A\xA4-0123456789012345678901234567890\",\"s\":2,\"a\":1,\"f\":2}]}";
+    Snapshot s;
+    TEST_ASSERT_TRUE(parse(json, s));
+    TEST_ASSERT_EQUAL_size_t(1, s.jobCount);
+    TEST_ASSERT_TRUE(strlen(s.jobs[0].project) <= 12);
+    TEST_ASSERT_TRUE(strlen(s.jobs[0].name) <= 24);
+    for (const char *c = s.jobs[0].name; *c; c++) TEST_ASSERT_TRUE((unsigned char)*c >= 0x20 && (unsigned char)*c < 0x7F);
+    TEST_ASSERT_EQUAL_CHAR_ARRAY("deploy-???", s.jobs[0].name, 10);
+}
+
+void test_unknown_job_state_is_dropped_not_fatal() {
+    const char *json =
+        "{\"v\":1,\"t\":1,\"a\":[],\"j\":["
+        "{\"p\":\"a\",\"n\":\"bad\",\"s\":9,\"a\":1},"
+        "{\"p\":\"a\",\"n\":\"good\",\"s\":1,\"a\":1,\"f\":2}]}";
+    Snapshot s;
+    TEST_ASSERT_TRUE(parse(json, s));
+    TEST_ASSERT_EQUAL_size_t(1, s.jobCount);
+    TEST_ASSERT_EQUAL_STRING("good", s.jobs[0].name);
+}
+
 void setup() {
     delay(2000);  // 시리얼 모니터가 붙을 시간을 준다.
     UNITY_BEGIN();
@@ -194,6 +264,11 @@ void setup() {
     RUN_TEST(test_parses_quota_error_code);
     RUN_TEST(test_healthy_snapshot_has_no_quota_error);
     RUN_TEST(test_quota_error_text_mapping);
+    RUN_TEST(test_parses_four_jobs);
+    RUN_TEST(test_missing_j_key_means_zero_jobs_not_failure);
+    RUN_TEST(test_more_than_four_jobs_truncated);
+    RUN_TEST(test_long_and_non_ascii_names_are_safe);
+    RUN_TEST(test_unknown_job_state_is_dropped_not_fatal);
     UNITY_END();
 }
 

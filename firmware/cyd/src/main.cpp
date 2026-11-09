@@ -107,18 +107,63 @@ static uint32_t lvglMaxHandlerUs = 0;
 // 찾아야 한다(`setup()` 참고). 콜백 안에서는 `lv_indev_active()`(LVGL v9
 // 공개 API, "Can be used in action functions too" — `lvgl/src/indev/lv_indev.h`)
 // 로 지금 이 이벤트를 일으킨 입력장치를 되찾는다.
+// 화면 방향. 보드 JSON 은 세로(240x320)이고 Dash(B안)는 가로 320x240 이다.
+// esp32_smartdisplay 의 회전은 "하드웨어를 시계방향으로 돌린 각도"다(커넥터가 아래일 때가 0):
+//   ROTATION_90  = 보드를 시계방향 90° 돌린 모양 (USB 커넥터가 왼쪽)
+//   ROTATION_270 = 보드를 반시계 90° 돌린 모양 (USB 커넥터가 오른쪽)
+// 거꾸로 보이면 이 값만 바꾼다.
+#ifndef CYD_ROTATION
+#define CYD_ROTATION LV_DISPLAY_ROTATION_90
+#endif
+
 static lv_indev_read_cb_t g_origTouchReadCb = nullptr;
 static void wrappedTouchReadCb(lv_indev_t *indev, lv_indev_data_t *data) {
     if (g_origTouchReadCb != nullptr) {
         g_origTouchReadCb(indev, data);
     }
-    if (data->point.x >= 240) {
-        data->point.x = 239;
-    }
-    if (data->point.y >= 320) {
-        data->point.y = 319;
+    // 라이브러리는 터치를 세로 패널 좌표(x 0..239, y 0..319)로 준다(위 X 오프바이원 주석).
+    int32_t px = data->point.x >= 240 ? 239 : data->point.x;
+    int32_t py = data->point.y >= 320 ? 319 : data->point.y;
+    // 사용자가 보는 가로 화면 좌표로 돌린다(화면이 보드의 회전을 보정해 똑바로 보이는 좌표계).
+    switch (CYD_ROTATION) {
+        case LV_DISPLAY_ROTATION_90:  data->point.x = 319 - py; data->point.y = px; break;
+        case LV_DISPLAY_ROTATION_270: data->point.x = py;       data->point.y = 239 - px; break;
+        case LV_DISPLAY_ROTATION_180: data->point.x = 239 - px; data->point.y = 319 - py; break;
+        default:                      data->point.x = px;       data->point.y = py; break;
     }
 }
+
+#ifdef CYD_SCREEN_DUMP
+// 검증용(-DCYD_SCREEN_DUMP 빌드에서만): 시리얼로 'D' 를 받으면 화면 전체를 다시 그리며 픽셀을 한 줄씩
+// "PX <y> <x> <RGB565 hex...>" 로 내보낸다. PC 에서 PNG 로 복원해 실제 화면을 확인한다.
+static lv_display_flush_cb_t g_origFlushCb = nullptr;
+static bool g_dumping = false, g_dumpedAny = false;
+static void dumpFlushCb(lv_display_t *d, const lv_area_t *a, uint8_t *px) {
+    if (g_dumping) {
+        const int w = a->x2 - a->x1 + 1, h = a->y2 - a->y1 + 1;
+        const uint16_t *p = (const uint16_t *)px;
+        static char line[24 + 4 * 320 + 4];
+        for (int y = 0; y < h; y++) {
+            int n = snprintf(line, 24, "PX %d %d ", (int)(a->y1 + y), (int)a->x1);
+            for (int x = 0; x < w; x++) n += snprintf(line + n, 5, "%04x", p[y * w + x]);
+            line[n++] = '\n';
+            Serial.write((const uint8_t *)line, n);
+        }
+        g_dumpedAny = true;
+    }
+    g_origFlushCb(d, a, px);
+}
+static void screenDumpPoll() {
+    if (g_dumping && g_dumpedAny) {
+        Serial.println("DUMPEND");
+        g_dumping = false;
+    } else if (!g_dumping && Serial.available() && Serial.read() == 'D') {
+        g_dumping = true;
+        g_dumpedAny = false;
+        lv_obj_invalidate(lv_screen_active());
+    }
+}
+#endif
 
 static void onTouchEvent(lv_event_t *e) {
     (void)e;
@@ -166,6 +211,11 @@ void setup() {
     // 같이 멈춰 있다 — Task 14a 때부터 있던 한계이고 이 태스크가 고치는
     // 범위가 아니다.
     smartdisplay_init();
+    lv_display_set_rotation(lv_display_get_default(), CYD_ROTATION);  // uiNavCreate 보다 먼저: 위젯이 가로 해상도로 만들어진다
+#ifdef CYD_SCREEN_DUMP
+    g_origFlushCb = lv_display_get_flush_cb(lv_display_get_default());
+    lv_display_set_flush_cb(lv_display_get_default(), dumpFlushCb);
+#endif
     lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(lv_screen_active(), lv_color_hex(0xffffff), 0);
@@ -274,6 +324,9 @@ void loop() {
     const uint32_t lvglHandlerStartUs = micros();
     lv_timer_handler();
     const uint32_t lvglHandlerUs = micros() - lvglHandlerStartUs;
+#ifdef CYD_SCREEN_DUMP
+    screenDumpPoll();
+#endif
     if (lvglHandlerUs > lvglMaxHandlerUs) {
         lvglMaxHandlerUs = lvglHandlerUs;
     }

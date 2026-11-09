@@ -122,6 +122,24 @@ struct SnapshotAgent {
 /// 못 읽고 있다는 사실은 그대로다.
 const char *snapshotQuotaErrorText(uint8_t code);
 
+/// 한 스냅샷에 실릴 최근 CI job 상한. 고정 `char[]` 인 이유: `Snapshot` 이 DRAM(.bss)에 값으로 잡힌다.
+constexpr size_t SNAPSHOT_MAX_JOBS = 4;
+
+/// wire.rs `MirrorJob.s` — 0 running, 1 success, 2 failed (계약).
+enum class SnapshotJobState : uint8_t { Running = 0, Success = 1, Failed = 2 };
+
+/// `MirrorJob`(wire.rs) 하나. 이름은 Mac 이 ASCII 로 정리해 보내고, 파서가 한 번 더 막는다.
+struct SnapshotJob {
+    char project[13] = {0};             // wire.rs `p` (≤12)
+    char name[25] = {0};                // wire.rs `n` (≤24)
+    SnapshotJobState state = SnapshotJobState::Success;  // wire.rs `s`
+    bool hasPercent = false;            // wire.rs `g` (running 일 때만)
+    uint8_t percent = 0;
+    uint64_t startedEpochSec = 0;       // wire.rs `a`
+    bool hasFinished = false;           // wire.rs `f` (running 이면 없음)
+    uint64_t finishedEpochSec = 0;
+};
+
 /// `MirrorSnapshot`(wire.rs) 전체 (초경량 카드 전용 모델, 약 180바이트).
 struct Snapshot {
     uint8_t protocolVersion = 0;        // wire.rs `v`
@@ -129,6 +147,9 @@ struct Snapshot {
     SnapshotAgent agents[SNAPSHOT_MAX_AGENTS];  // wire.rs `a`
     size_t agentCount = 0;
     bool agentsTruncated = false;
+    SnapshotJob jobs[SNAPSHOT_MAX_JOBS];  // wire.rs `j` — 없으면 jobCount==0
+    size_t jobCount = 0;
+    bool jobsTruncated = false;
 };
 
 /// 평문 JSON 바이트 → `Snapshot`. 소켓도 복호화도 전혀 모르는 순수 함수 —
