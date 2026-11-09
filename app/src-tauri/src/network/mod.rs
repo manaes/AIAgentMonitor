@@ -495,6 +495,7 @@ mod tests {
     fn snap(rate: f32, at: u64) -> Snapshot {
         use crate::types::{AgentKind, AgentState, TokenCounts};
         Snapshot {
+            ci_jobs: vec![],
             emitted_at: UNIX_EPOCH + Duration::from_secs(at),
             agents: vec![AgentState {
                 kind: AgentKind::Claude,

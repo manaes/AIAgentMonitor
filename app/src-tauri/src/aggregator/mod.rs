@@ -159,7 +159,7 @@ impl Aggregator {
                 projects,
             });
         }
-        Snapshot { emitted_at: now, agents }
+        Snapshot { ci_jobs: vec![], emitted_at: now, agents }
     }
 }
 

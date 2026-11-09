@@ -246,6 +246,7 @@ mod tests {
 
     fn snap(rate: f32, at: u64) -> Snapshot {
         Snapshot {
+            ci_jobs: vec![],
             emitted_at: UNIX_EPOCH + Duration::from_secs(at),
             agents: vec![AgentState {
                 kind: AgentKind::Claude,
@@ -265,6 +266,7 @@ mod tests {
     /// 청킹이 255 청크를 넘어 반드시 실패하도록 에이전트를 여럿 담은 큰 스냅샷.
     fn big_snap(rate: f32, at: u64) -> Snapshot {
         Snapshot {
+            ci_jobs: vec![],
             emitted_at: UNIX_EPOCH + Duration::from_secs(at),
             agents: (0..10)
                 .map(|_| AgentState {

@@ -60,6 +60,9 @@ fn hash_snapshot(s: &Snapshot) -> u64 {
             p.model.hash(&mut h);
         }
     }
+    for j in &s.ci_jobs {
+        (&j.project, &j.name, j.state as u8, j.percent, j.started_at, j.finished_at).hash(&mut h);
+    }
     h.finish()
 }
 
@@ -83,7 +86,7 @@ mod tests {
     #[test]
     fn first_snapshot_is_always_emitted() {
         let mut e = EmitGate::new(Duration::from_millis(500));
-        let snap = Snapshot { emitted_at: SystemTime::now(), agents: vec![agent(0.0)] };
+        let snap = Snapshot { ci_jobs: vec![], emitted_at: SystemTime::now(), agents: vec![agent(0.0)] };
         assert!(e.should_emit(&snap, snap.emitted_at));
     }
 
@@ -91,9 +94,9 @@ mod tests {
     fn identical_snapshot_is_suppressed() {
         let mut e = EmitGate::new(Duration::from_millis(500));
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        let snap = Snapshot { emitted_at: now, agents: vec![agent(1.0)] };
+        let snap = Snapshot { ci_jobs: vec![], emitted_at: now, agents: vec![agent(1.0)] };
         assert!(e.should_emit(&snap, now));
-        let snap2 = Snapshot { emitted_at: now + Duration::from_millis(100), agents: vec![agent(1.0)] };
+        let snap2 = Snapshot { ci_jobs: vec![], emitted_at: now + Duration::from_millis(100), agents: vec![agent(1.0)] };
         assert!(!e.should_emit(&snap2, now + Duration::from_millis(100)));
     }
 
@@ -101,9 +104,9 @@ mod tests {
     fn changed_snapshot_within_throttle_is_suppressed() {
         let mut e = EmitGate::new(Duration::from_millis(500));
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        let snap1 = Snapshot { emitted_at: now, agents: vec![agent(1.0)] };
+        let snap1 = Snapshot { ci_jobs: vec![], emitted_at: now, agents: vec![agent(1.0)] };
         assert!(e.should_emit(&snap1, now));
-        let snap2 = Snapshot { emitted_at: now + Duration::from_millis(200), agents: vec![agent(2.0)] };
+        let snap2 = Snapshot { ci_jobs: vec![], emitted_at: now + Duration::from_millis(200), agents: vec![agent(2.0)] };
         assert!(!e.should_emit(&snap2, now + Duration::from_millis(200)));
     }
 
@@ -111,9 +114,9 @@ mod tests {
     fn changed_snapshot_after_throttle_emits() {
         let mut e = EmitGate::new(Duration::from_millis(500));
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        let snap1 = Snapshot { emitted_at: now, agents: vec![agent(1.0)] };
+        let snap1 = Snapshot { ci_jobs: vec![], emitted_at: now, agents: vec![agent(1.0)] };
         assert!(e.should_emit(&snap1, now));
-        let snap2 = Snapshot { emitted_at: now + Duration::from_millis(600), agents: vec![agent(2.0)] };
+        let snap2 = Snapshot { ci_jobs: vec![], emitted_at: now + Duration::from_millis(600), agents: vec![agent(2.0)] };
         assert!(e.should_emit(&snap2, now + Duration::from_millis(600)));
     }
 
@@ -123,13 +126,13 @@ mod tests {
     fn quota_error_appearing_counts_as_a_change() {
         let mut e = EmitGate::new(Duration::from_millis(500));
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        let snap1 = Snapshot { emitted_at: now, agents: vec![agent(1.0)] };
+        let snap1 = Snapshot { ci_jobs: vec![], emitted_at: now, agents: vec![agent(1.0)] };
         assert!(e.should_emit(&snap1, now));
 
         let mut failing = agent(1.0);
         failing.quota_error = Some(crate::types::QuotaError::auth("Codex 로그인 필요"));
         let later = now + Duration::from_millis(600);
-        let snap2 = Snapshot { emitted_at: later, agents: vec![failing] };
+        let snap2 = Snapshot { ci_jobs: vec![], emitted_at: later, agents: vec![failing] };
         assert!(e.should_emit(&snap2, later));
     }
 
@@ -137,13 +140,24 @@ mod tests {
     fn reset_allows_identical_snapshot_to_emit_again() {
         let mut e = EmitGate::new(Duration::from_millis(500));
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        let snap = Snapshot { emitted_at: now, agents: vec![agent(1.0)] };
+        let snap = Snapshot { ci_jobs: vec![], emitted_at: now, agents: vec![agent(1.0)] };
         assert!(e.should_emit(&snap, now));
 
         e.reset();
 
         // 내용은 동일하지만 리셋했으므로, 스로틀 시간만 지나면 다시 나가야 한다.
-        let snap2 = Snapshot { emitted_at: now + Duration::from_millis(600), agents: vec![agent(1.0)] };
+        let snap2 = Snapshot { ci_jobs: vec![], emitted_at: now + Duration::from_millis(600), agents: vec![agent(1.0)] };
         assert!(e.should_emit(&snap2, now + Duration::from_millis(600)));
+    }
+
+    #[test]
+    fn emit_gate_fires_when_only_jobs_change() {
+        use crate::ci_status::{CiJob, CiState};
+        let now = SystemTime::now();
+        let mut gate = EmitGate::new(Duration::from_millis(500));
+        let mut s1 = Snapshot { ci_jobs: vec![], emitted_at: now, agents: vec![] };
+        assert!(gate.should_emit(&s1, now));
+        s1.ci_jobs = vec![CiJob { project: "a/b".into(), name: "x".into(), state: CiState::Failed, percent: None, started_at: 1, finished_at: Some(2) }];
+        assert!(gate.should_emit(&s1, now + Duration::from_millis(600)), "job 만 바뀌어도 5초 억제 창에 막히면 안 된다");
     }
 }

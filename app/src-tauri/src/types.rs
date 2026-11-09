@@ -150,6 +150,9 @@ pub struct AgentState {
 pub struct Snapshot {
     pub emitted_at: SystemTime,
     pub agents: Vec<AgentState>,
+    /// CIStatusBar `recentJobs` (최대 4개). tick 에서 주입된다. 없으면 빈 목록.
+    #[serde(default)]
+    pub ci_jobs: Vec<crate::ci_status::CiJob>,
 }
 
 #[cfg(test)]
@@ -178,7 +181,7 @@ mod tests {
 
     #[test]
     fn snapshot_round_trip_serde() {
-        let s = Snapshot { emitted_at: SystemTime::now(), agents: vec![] };
+        let s = Snapshot { ci_jobs: vec![], emitted_at: SystemTime::now(), agents: vec![] };
         let json = serde_json::to_string(&s).unwrap();
         let back: Snapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back.agents.len(), 0);

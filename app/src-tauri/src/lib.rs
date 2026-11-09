@@ -2,6 +2,7 @@ mod aggregator;
 mod peers;
 mod ble;
 mod crypto;
+mod ci_status;
 mod clock;
 mod emitter;
 mod lan;
@@ -1512,6 +1513,10 @@ pub fn run() {
                             snap.agents.retain(|ag| enabled.enabled_agents.contains(&ag.kind));
                         }
                         let now = std::time::SystemTime::now();
+                        // CIStatusBar 가 내보낸 최근 job (읽기 전용, 없거나 낡았으면 빈 목록). 작은 파일이라 틱마다 읽는다.
+                        if let Some(p) = crate::ci_status::default_path() {
+                            snap.ci_jobs = crate::ci_status::read_recent_jobs(&p, now);
+                        }
                         // 실제 quota 주입(있을 때만): Claude=프록시 헤더, Codex=rollout rate_limits, Antigravity=gen_metadata 버킷.
                         // 캐시된 reset_at 이 이미 지났으면 만료된 창의 %이므로 0%로 보여주고
                         // reset_at 자체는 안 덮어쓴다(quota_pct_for_tick 문서 참고).

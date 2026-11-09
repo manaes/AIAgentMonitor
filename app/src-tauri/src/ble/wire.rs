@@ -26,6 +26,45 @@ pub struct MirrorSnapshot {
     pub v: u8,
     pub t: u64,
     pub a: Vec<MirrorAgent>,
+    /// CI 최근 job(최대 4개). 없으면 키 생략 — 모르는 구버전 클라이언트는 무시한다(프로토콜 v 유지).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub j: Vec<MirrorJob>,
+}
+
+/// CYD(한글 폰트 없음·고정 버퍼)용으로 ASCII 로 정리하고 자른 job. 전체 경로·로그는 보내지 않는다.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MirrorJob {
+    /// 프로젝트 경로의 마지막 조각, 최대 12바이트
+    pub p: String,
+    /// job 이름, 최대 24바이트
+    pub n: String,
+    /// 0 = running, 1 = success, 2 = failed (계약)
+    pub s: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub g: Option<u8>,
+    /// 시작 epoch 초
+    pub a: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub f: Option<u64>,
+}
+
+/// 인쇄 가능한 ASCII 만 남기고(나머지 글자 하나는 `?` 하나) `max` 글자로 자른다.
+fn ascii_clip(s: &str, max: usize) -> String {
+    s.chars().map(|c| if (' '..='~').contains(&c) { c } else { '?' }).take(max).collect()
+}
+
+impl From<&crate::ci_status::CiJob> for MirrorJob {
+    fn from(j: &crate::ci_status::CiJob) -> Self {
+        use crate::ci_status::CiState;
+        Self {
+            p: ascii_clip(j.project.rsplit('/').next().unwrap_or(""), 12),
+            n: ascii_clip(&j.name, 24),
+            s: match j.state { CiState::Running => 0, CiState::Success => 1, CiState::Failed => 2 },
+            g: j.percent,
+            a: j.started_at,
+            f: j.finished_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -114,6 +153,7 @@ impl From<&Snapshot> for MirrorSnapshot {
             v: PROTOCOL_VERSION,
             t: epoch_secs(s.emitted_at),
             a: s.agents.iter().map(MirrorAgent::from).collect(),
+            j: s.ci_jobs.iter().take(4).map(MirrorJob::from).collect(),
         }
     }
 }
@@ -129,6 +169,7 @@ mod tests {
 
     fn sample_snapshot() -> Snapshot {
         Snapshot {
+            ci_jobs: vec![],
             emitted_at: UNIX_EPOCH + Duration::from_secs(1_755_500_000),
             agents: vec![AgentState {
                 kind: AgentKind::Claude,
@@ -312,5 +353,73 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(actual, expected, "주간 쿼터 필드가 골든 벡터와 어긋났다");
+    }
+
+    fn ci(project: &str, name: &str, state: crate::ci_status::CiState, pct: Option<u8>, a: u64, f: Option<u64>) -> crate::ci_status::CiJob {
+        crate::ci_status::CiJob { project: project.into(), name: name.into(), state, percent: pct, started_at: a, finished_at: f }
+    }
+
+    fn sample_snapshot_with_jobs() -> Snapshot {
+        use crate::ci_status::CiState::*;
+        let mut s = sample_snapshot();
+        s.ci_jobs = vec![
+            ci("ios/seqnex", "build-ios", Running, Some(60), 1_755_499_778, None),
+            ci("ios/seqnex", "unit-test", Success, None, 1_755_499_700, Some(1_755_499_880)),
+            ci("web/api", "deploy", Failed, None, 1_755_499_500, Some(1_755_499_803)),
+        ];
+        s
+    }
+
+    #[test]
+    fn jobs_key_omitted_when_empty() {
+        let json = serde_json::to_string(&MirrorSnapshot::from(&sample_snapshot())).unwrap();
+        assert!(!json.contains("\"j\""), "job 이 없으면 키 생략: {json}");
+    }
+
+    /// CYD 는 한글 글리프가 없고 고정 버퍼라서 Mac 이 ASCII 로 정리해 자른 이름만 보낸다.
+    #[test]
+    fn wire_job_names_are_ascii_and_truncated() {
+        use crate::ci_status::CiState::*;
+        let mut s = sample_snapshot();
+        s.ci_jobs = vec![ci(
+            "grp/하이브리드앱-아주긴프로젝트이름",
+            "deploy-스테이징-e2e-통합테스트-아주아주긴이름-abcdef",
+            Failed, None, 10, Some(20),
+        )];
+        let m = MirrorSnapshot::from(&s);
+        let j = &m.j[0];
+        assert!(j.p.len() <= 12 && j.n.len() <= 24, "p={} n={}", j.p, j.n);
+        assert!(j.p.is_ascii() && j.n.is_ascii());
+        assert!(j.n.starts_with("deploy-????-e2e-"), "{}", j.n);
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("grp/"), "그룹 경로는 나가지 않는다: {json}");
+        assert_eq!(j.s, 2, "failed 는 2");
+    }
+
+    #[test]
+    fn at_most_four_jobs_go_out() {
+        use crate::ci_status::CiState::*;
+        let mut s = sample_snapshot();
+        s.ci_jobs = (0..6).map(|i| ci("a/b", &format!("j{i}"), Success, None, 1, Some(2))).collect();
+        assert_eq!(MirrorSnapshot::from(&s).j.len(), 4);
+    }
+
+    /// 상태 코드는 계약이다: 0 running, 1 success, 2 failed.
+    #[test]
+    fn golden_snapshot_with_jobs_matches() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/ble-protocol/golden/snapshot-jobs-sample.json");
+        let dto = MirrorSnapshot::from(&sample_snapshot_with_jobs());
+        assert_eq!(dto.j.iter().map(|j| j.s).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(dto.j[0].g, Some(60));
+        let actual = serde_json::to_value(&dto).unwrap();
+        if std::env::var("UPDATE_GOLDEN").is_ok() {
+            std::fs::write(&path, serde_json::to_string_pretty(&actual).unwrap() + "\n").unwrap();
+            return;
+        }
+        let expected: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)
+            .expect("골든 벡터가 없다. UPDATE_GOLDEN=1 로 생성하고 커밋하라")).unwrap();
+        assert_eq!(actual, expected, "job 필드가 골든 벡터와 어긋났다");
     }
 }

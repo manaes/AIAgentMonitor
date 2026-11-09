@@ -1737,6 +1737,7 @@ mod tests {
     /// 때문이다 — 같은 값을 두 번 넣으면 두 번째는 나가지 않는다.
     fn sample_snapshot(rate: f32) -> Snapshot {
         Snapshot {
+            ci_jobs: vec![],
             emitted_at: UNIX_EPOCH + Duration::from_secs(1_755_500_000),
             agents: vec![AgentState {
                 kind: AgentKind::Claude,
