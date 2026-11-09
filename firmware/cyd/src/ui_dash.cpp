@@ -115,7 +115,7 @@ void createGauge(Gauge &g, int i) {
     g.value = makeLabel(g_root, cx - 20, cy - 11, 40, 22, F20, COL_TX, LV_TEXT_ALIGN_CENTER);
     g.label = makeLabel(g_root, tx, 12, 78, 14, F12, COL_TX);
     g.rate = makeLabel(g_root, tx, 30, 78, 14, F12, COL_SUB);
-    g.reset = makeLabel(g_root, cx - 48, 65, 96, 12, F10, COL_SUB, LV_TEXT_ALIGN_CENTER);
+    g.reset = makeLabel(g_root, tx, 47, 78, 12, F10, COL_SUB);
     setText(g.label, i ? "Codex" : "Claude");
     setText(g.value, "--");
     setText(g.rate, "-- tok/s");
