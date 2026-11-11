@@ -9,6 +9,7 @@ mod lan;
 mod network;
 mod quota_proxy;
 mod settings;
+mod testhub;
 mod tray;
 mod types;
 mod watchers;
@@ -1475,6 +1476,9 @@ pub fn run() {
                     }
                 });
 
+                // TestHub 진행 중 테스트(5초 폴링). 틱마다 최신 값을 읽어 CI job 맨 앞에 붙인다.
+                let testhub_jobs: testhub::Shared = Default::default();
+                testhub::spawn_poller(testhub_jobs.clone());
                 let agg_for_tick = aggregator.clone();
                 let gate_for_tick = gate.clone();
                 let quota_for_tick = quota_state.clone();
@@ -1518,6 +1522,11 @@ pub fn run() {
                         // CIStatusBar 가 내보낸 최근 job (읽기 전용, 없거나 낡았으면 빈 목록). 작은 파일이라 틱마다 읽는다.
                         if let Some(p) = crate::ci_status::default_path() {
                             snap.ci_jobs = crate::ci_status::read_recent_jobs(&p, now);
+                        }
+                        // 진행 중인 TestHub 테스트는 맨 위에 둔다(미러 페이로드가 앞 4개만 싣는다).
+                        let th = testhub_jobs.lock().unwrap().clone();
+                        if !th.is_empty() {
+                            snap.ci_jobs.splice(0..0, th);
                         }
                         // 실제 quota 주입(있을 때만): Claude=프록시 헤더, Codex=rollout rate_limits, Antigravity=gen_metadata 버킷.
                         // 캐시된 reset_at 이 이미 지났으면 만료된 창의 %이므로 0%로 보여주고

@@ -35,7 +35,7 @@ Mac 앱은 Claude Code, Codex, Antigravity의 로컬 기록을 수집하고 하�
 | `pj[].m` | 최근 모델 이름 |
 | `pj[].r`, `pj[].t` | 프로젝트 tok/s와 마지막 이벤트 시각 |
 | `pj[].s` | 활동 상태: `0` Active, `1` Idle, `2` Dormant |
-| `j[]` | CI 최근 job 최대 4개(CIStatusBar의 `~/.config/ci-status/status.json` `recentJobs`를 읽어 옴). 없으면 키 자체를 생략한다(v1 유지, 모르는 클라이언트는 무시). |
+| `j[]` | CI 최근 job 최대 4개(CIStatusBar의 `~/.config/ci-status/status.json` `recentJobs`를 읽어 옴). TestHub 테스트가 진행 중이면(`~/.config/ci-status/testhub.url` 설정 시 `/api/automation` 5초 폴링) 그 단계가 `p`="TestHub", `s`=0 으로 맨 앞에 끼어든다. 없으면 키 자체를 생략한다(v1 유지, 모르는 클라이언트는 무시). |
 | `j[].p`, `j[].n` | 프로젝트 마지막 이름(≤12바이트), job 이름(≤24바이트). CYD가 한글 폰트가 없어 Mac이 ASCII로 정리하고(그 외 글자는 `?`) 자른다. |
 | `j[].s` | `0` running, `1` success, `2` failed (계약) |
 | `j[].g`, `j[].a`, `j[].f` | 진행률(running일 때만), 시작 epoch 초, 종료 epoch 초(running이면 생략) |

@@ -4,5 +4,7 @@
 <dict>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>iPhone 등 클라이언트 기기로 모니터링 화면을 전송하기 위해 블루투스를 사용합니다.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>같은 네트워크의 TestHub 진행 상태를 읽어 CYD 보드로 보내기 위해 로컬 네트워크를 사용합니다.</string>
 </dict>
 </plist>
