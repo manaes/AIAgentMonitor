@@ -120,6 +120,62 @@ void test_format_rate() {
     }
 }
 
+void test_quota_wait_five_hour_with_weekly_remaining() {
+    SnapshotAgent a;
+    a.has5hUsagePct = a.has5hResetAt = a.hasWeeklyUsagePct = true;
+    a.usage5hPct = 100;
+    a.usageWeeklyPct = 54;
+    a.reset5hEpochSec = 6000;
+    auto w = dashQuotaWait(a);
+    TEST_ASSERT_TRUE(w.fiveHour);
+    TEST_ASSERT_FALSE(w.weekly);
+    TEST_ASSERT_TRUE(w.hasReset);
+    TEST_ASSERT_EQUAL_UINT64(6000, w.resetEpochSec);
+    // 리셋 시각이 지나도 새 사용률을 받기 전에는 소진 상태를 유지한다.
+    TEST_ASSERT_TRUE(dashQuotaWait(a).fiveHour);
+    a.usage5hPct = 0;
+    TEST_ASSERT_FALSE(dashQuotaWait(a).fiveHour);
+}
+
+void test_quota_wait_both_limits_use_later_reset() {
+    SnapshotAgent a;
+    a.has5hUsagePct = a.hasWeeklyUsagePct = a.has5hResetAt = a.hasWeeklyResetAt = true;
+    a.usage5hPct = a.usageWeeklyPct = 100;
+    a.reset5hEpochSec = 6000;
+    a.resetWeeklyEpochSec = 9000;
+    auto w = dashQuotaWait(a);
+    TEST_ASSERT_TRUE(w.fiveHour && w.weekly && w.hasReset);
+    TEST_ASSERT_EQUAL_UINT64(9000, w.resetEpochSec);
+    a.reset5hEpochSec = 12000;
+    TEST_ASSERT_EQUAL_UINT64(12000, dashQuotaWait(a).resetEpochSec);
+    a.usage5hPct = 54;
+    w = dashQuotaWait(a);
+    TEST_ASSERT_FALSE(w.fiveHour);
+    TEST_ASSERT_TRUE(w.weekly);
+    TEST_ASSERT_EQUAL_UINT64(9000, w.resetEpochSec);
+}
+
+void test_quota_wait_missing_reset_error_and_below_limit() {
+    SnapshotAgent a;
+    TEST_ASSERT_FALSE(dashQuotaWait(a).fiveHour);
+    a.has5hUsagePct = true;
+    a.usage5hPct = 99.9f;  // 반올림해 100으로 보이더라도 소진으로 판단하지 않는다.
+    TEST_ASSERT_FALSE(dashQuotaWait(a).fiveHour);
+    a.usage5hPct = 100;
+    TEST_ASSERT_TRUE(dashQuotaWait(a).fiveHour);
+    TEST_ASSERT_FALSE(dashQuotaWait(a).hasReset);
+    a.has5hResetAt = true;
+    TEST_ASSERT_FALSE(dashQuotaWait(a).hasReset);  // epoch 0도 알 수 없는 시각이다.
+    a.reset5hEpochSec = 6000;
+    TEST_ASSERT_TRUE(dashQuotaWait(a).hasReset);
+    a.hasWeeklyUsagePct = true;
+    a.usageWeeklyPct = 100;
+    TEST_ASSERT_FALSE(dashQuotaWait(a).hasReset);  // 두 한도 중 하나만 알아도 추측하지 않는다.
+    a.hasQuotaError = true;
+    auto w = dashQuotaWait(a);
+    TEST_ASSERT_FALSE(w.fiveHour || w.weekly);
+}
+
 void setup() {
     delay(2000);
     UNITY_BEGIN();
@@ -133,6 +189,9 @@ void setup() {
     RUN_TEST(test_format_truncates_to_buffer);
     RUN_TEST(test_format_rate);
     RUN_TEST(test_now_epoch_wraps_and_elapsed_clamps);
+    RUN_TEST(test_quota_wait_five_hour_with_weekly_remaining);
+    RUN_TEST(test_quota_wait_both_limits_use_later_reset);
+    RUN_TEST(test_quota_wait_missing_reset_error_and_below_limit);
     UNITY_END();
 }
 

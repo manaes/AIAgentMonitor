@@ -21,6 +21,7 @@ const lv_font_t *const F20 = &lv_font_montserrat_20;
 
 struct Gauge {
     lv_obj_t *arc, *value, *label, *rate, *reset;
+    bool limited = false;
 };
 struct Row {
     lv_obj_t *card, *stripe, *disc, *sym, *runArc, *name, *time, *project, *detail, *bar, *pct;
@@ -127,11 +128,56 @@ const SnapshotAgent *findAgent(const Snapshot &s, SnapshotAgentKind kind) {
     return nullptr;
 }
 
+// 대기 중에는 게이지 자리를 카운트다운에 쓰고, 모드가 바뀔 때만 배치를 변경한다.
+void layoutGauge(Gauge &g, int i, bool limited) {
+    if (g.limited == limited) return;
+    g.limited = limited;
+    const int cx = i ? 208 : 48, x = i * 160 + 8;
+    setHidden(g.arc, limited);
+    setHidden(g.reset, limited);
+    place(g.label, limited ? x : cx + 34, limited ? 8 : 12, limited ? 144 : 78, 14);
+    place(g.value, limited ? x : cx - 20, limited ? 28 : 25, limited ? 144 : 40, 22);
+    place(g.rate, limited ? x : cx + 34, limited ? 55 : 30, limited ? 144 : 78, 14);
+    lv_obj_set_style_text_align(g.value, limited ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(g.rate, limited ? F10 : F12, 0);
+    lv_obj_set_style_text_color(g.value, lv_color_hex(limited ? COL_CLAUDE : COL_TX), 0);
+    lv_obj_set_style_text_color(g.rate, lv_color_hex(limited ? COL_CLAUDE : COL_SUB), 0);
+}
+
 void renderHeader(const Snapshot &s, uint64_t now) {
     const SnapshotAgentKind kinds[2] = {SnapshotAgentKind::Claude, SnapshotAgentKind::Codex};
     for (int i = 0; i < 2; i++) {
         Gauge &g = g_gauge[i];
         const SnapshotAgent *a = findAgent(s, kinds[i]);
+        const DashQuotaWait wait = a ? dashQuotaWait(*a) : DashQuotaWait{};
+        const bool limited = wait.fiveHour || wait.weekly;
+        layoutGauge(g, i, limited);
+        if (limited) {
+            char value[24], detail[32];
+            const bool pending = !wait.hasReset || wait.resetEpochSec <= now;
+            if (!wait.hasReset) strcpy(value, "Reset unknown");
+            else if (pending) strcpy(value, "Refreshing");
+            else if (wait.resetEpochSec - now < 60) strcpy(value, "<1m");
+            else dashFormatReset(wait.resetEpochSec, now, value, sizeof(value));
+            const lv_font_t *font = pending ? F16 : F20;
+            if (lv_obj_get_style_text_font(g.value, LV_PART_MAIN) != font)
+                lv_obj_set_style_text_font(g.value, font, 0);
+            setText(g.value, value);
+            setText(g.label, i ? "Codex - wait" : "Claude - wait");
+            const char *reason = wait.fiveHour ? (wait.weekly ? "5h+7d limit" : "5h limit") : "7d limit";
+            if (a->hasWeeklyUsagePct) {
+                int p = (int)lroundf(a->usageWeeklyPct);
+                p = p < 0 ? 0 : (p > 100 ? 100 : p);
+                snprintf(detail, sizeof(detail), "%s / 7d %d%%", reason, p);
+            } else {
+                snprintf(detail, sizeof(detail), "%s / 7d --", reason);
+            }
+            setText(g.rate, detail);
+            continue;
+        }
+        setText(g.label, i ? "Codex" : "Claude");
+        if (lv_obj_get_style_text_font(g.value, LV_PART_MAIN) != F20)
+            lv_obj_set_style_text_font(g.value, F20, 0);
         // 주간 값이 없거나 조회 실패(e) 중이면 낡은 %를 그리지 않는다.
         const bool ok = a && a->hasWeeklyUsagePct && !a->hasQuotaError;
         char buf[24];
@@ -344,6 +390,6 @@ void uiDashUpdate(const Transport &transport) {
     }
     g_lastRenderMs = ms;
     const uint64_t now = dashNowEpoch(g_lastT, g_rxMs, ms);
-    if (fresh) renderHeader(s, now);  // 게이지/tok/s 는 스냅샷이 바뀔 때만
+    renderHeader(s, now);  // 새 스냅샷이 없어도 한도 리셋 카운트다운은 갱신한다
     renderJobs(s, now);
 }

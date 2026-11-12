@@ -32,3 +32,13 @@ size_t dashFormatRate(float tokPerSec, char *buf, size_t n);
 uint64_t dashNowEpoch(uint64_t snapshotT, uint32_t rxMillis, uint32_t nowMillis);
 /// 경과 초. 시작 시각이 지금보다 미래(시계 불일치)여도 0 으로 clamp.
 uint32_t dashElapsedSec(uint64_t nowEpoch, uint64_t startEpoch);
+
+/// 소진된 한도가 있으면 두 한도가 모두 풀릴 때까지 대기한다.
+/// 어느 소진 한도든 리셋 시각이 없으면 남은 시간을 추측하지 않는다.
+struct DashQuotaWait {
+    bool fiveHour = false;
+    bool weekly = false;
+    bool hasReset = false;
+    uint64_t resetEpochSec = 0;
+};
+DashQuotaWait dashQuotaWait(const SnapshotAgent &agent);

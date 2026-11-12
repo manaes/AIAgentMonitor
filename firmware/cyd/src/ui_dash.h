@@ -1,6 +1,7 @@
 // AI Agent Monitor — CYD 펌웨어: Dash 화면(승인된 B안, docs/design/b-final.en.html 기준).
 //
 // 상단: Claude/Codex 주간(7d) 게이지 2개 + tok/s + 리셋까지 남은 시간.
+// 한도 소진 시: 주간 게이지 대신 재사용까지 남은 시간(5h/7d 중 늦은 리셋)과 주간 %를 주황색으로 표시.
 // 중단: 최근 CI job 최대 4행(진행중/성공/실패, 첫 실패 행만 풀폭 빨강 강조).
 // 라벨은 전부 ASCII, 폰트는 LVGL 내장 Montserrat 10/12/16/20 Regular 뿐이다(펌웨어에 한글 폰트 없음).
 // 행 높이·시간 포맷은 lib/dashlogic(순수 함수, 호스트 테스트 가능)이 정한다.

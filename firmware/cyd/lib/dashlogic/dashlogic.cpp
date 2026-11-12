@@ -64,3 +64,16 @@ size_t dashFormatRate(float v, char *buf, size_t n) {
     if (w < 0) { buf[0] = '\0'; return 0; }
     return (size_t)w < n ? (size_t)w : n - 1;
 }
+
+DashQuotaWait dashQuotaWait(const SnapshotAgent &a) {
+    DashQuotaWait w;
+    if (a.hasQuotaError) return w;
+    w.fiveHour = a.has5hUsagePct && a.usage5hPct >= 100.0f;
+    w.weekly = a.hasWeeklyUsagePct && a.usageWeeklyPct >= 100.0f;
+    if (!w.fiveHour && !w.weekly) return w;
+    w.hasReset = (!w.fiveHour || (a.has5hResetAt && a.reset5hEpochSec > 0)) &&
+                 (!w.weekly || (a.hasWeeklyResetAt && a.resetWeeklyEpochSec > 0));
+    if (w.fiveHour) w.resetEpochSec = a.reset5hEpochSec;
+    if (w.weekly && a.resetWeeklyEpochSec > w.resetEpochSec) w.resetEpochSec = a.resetWeeklyEpochSec;
+    return w;
+}
